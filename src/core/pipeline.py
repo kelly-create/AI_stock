@@ -18,6 +18,7 @@ import time
 import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import List, Dict, Any, Optional, Tuple, Callable
@@ -103,6 +104,19 @@ from bot.models import BotMessage
 
 
 logger = logging.getLogger(__name__)
+
+
+def _durable_execution_active() -> bool:
+    """Avoid swallowing persistence failures inside a durable worker."""
+
+    try:
+        from src.services.durable_job_handlers import (
+            get_optional_durable_execution_context,
+        )
+
+        return get_optional_durable_execution_context() is not None
+    except (ImportError, RuntimeError):
+        return False
 
 
 def _share_image_payload(result: Any) -> Optional[Dict[str, Any]]:
@@ -858,6 +872,14 @@ class StockAnalysisPipeline:
                         context_snapshot=context_snapshot,
                         save_snapshot=self.save_context_snapshot
                     )
+                    if getattr(result, "_durable_history_reused", False):
+                        frozen_context = getattr(
+                            result,
+                            "diagnostic_context_snapshot",
+                            None,
+                        )
+                        if isinstance(frozen_context, dict):
+                            context_snapshot = frozen_context
                     valid_saved_history_id = (
                         isinstance(saved_history_id, int)
                         and not isinstance(saved_history_id, bool)
@@ -885,6 +907,8 @@ class StockAnalysisPipeline:
                         metadata_saved=False,
                         error_message=e,
                     )
+                    if _durable_execution_active():
+                        raise
                     logger.warning(f"{stock_name}({code}) 保存分析历史失败: {e}")
 
             return result
@@ -892,6 +916,8 @@ class StockAnalysisPipeline:
         except Exception as e:
             logger.error(f"{stock_name}({code}) 分析失败: {e}")
             logger.exception(f"{stock_name}({code}) 详细错误信息:")
+            if _durable_execution_active():
+                raise
             return None
     
     def _enhance_context(
@@ -1681,6 +1707,14 @@ class StockAnalysisPipeline:
                         context_snapshot=agent_context_snapshot,
                         save_snapshot=self.save_context_snapshot,
                     )
+                    if getattr(result, "_durable_history_reused", False):
+                        frozen_context = getattr(
+                            result,
+                            "diagnostic_context_snapshot",
+                            None,
+                        )
+                        if isinstance(frozen_context, dict):
+                            agent_context_snapshot = frozen_context
                     valid_saved_history_id = (
                         isinstance(saved_history_id, int)
                         and not isinstance(saved_history_id, bool)
@@ -1709,7 +1743,10 @@ class StockAnalysisPipeline:
                             portfolio_context=portfolio_context,
                         )
                     latest_diagnostic_snapshot = current_diagnostic_snapshot()
-                    if latest_diagnostic_snapshot is not None:
+                    if (
+                        latest_diagnostic_snapshot is not None
+                        and not getattr(result, "_durable_history_reused", False)
+                    ):
                         agent_context_snapshot["diagnostics"] = latest_diagnostic_snapshot
                         result.diagnostic_context_snapshot = agent_context_snapshot
                 except Exception as e:
@@ -1718,6 +1755,8 @@ class StockAnalysisPipeline:
                         metadata_saved=False,
                         error_message=e,
                     )
+                    if _durable_execution_active():
+                        raise
                     logger.warning(f"[{code}] 保存 Agent 分析历史失败: {e}")
 
             return result
@@ -1725,6 +1764,8 @@ class StockAnalysisPipeline:
         except Exception as e:
             logger.error(f"[{code}] Agent 分析失败: {e}")
             logger.exception(f"[{code}] Agent 详细错误信息:")
+            if _durable_execution_active():
+                raise
             return None
 
     def _load_agent_analysis_context(self, code: str, stock_name: str) -> Dict[str, Any]:
@@ -2663,6 +2704,8 @@ class StockAnalysisPipeline:
                 if summary:
                     setattr(result, "decision_signal_summary", summary)
         except Exception as exc:
+            if _durable_execution_active():
+                raise
             logger.warning(
                 "Decision signal extraction skipped after history save: query_id=%s stock_code=%s error=%s",
                 query_id,
@@ -3107,6 +3150,8 @@ class StockAnalysisPipeline:
         except Exception as e:
             # 捕获所有异常，确保单股失败不影响整体
             logger.exception(f"[{code}] 处理过程发生未知异常: {e}")
+            if _durable_execution_active():
+                raise
             return None
         finally:
             reset_run_diagnostic_context(diag_token)
@@ -3205,6 +3250,7 @@ class StockAnalysisPipeline:
             # 提交任务
             future_to_code = {
                 executor.submit(
+                    copy_context().run,
                     self.process_single_stock,
                     code,
                     skip_analysis=dry_run,
@@ -3246,6 +3292,8 @@ class StockAnalysisPipeline:
 
                 except Exception as e:
                     logger.error(f"[{code}] 任务执行失败: {e}")
+                    if _durable_execution_active():
+                        raise
         
         # 统计
         elapsed_time = time.time() - start_time
@@ -3385,6 +3433,8 @@ class StockAnalysisPipeline:
                     fallback_code=fallback_code,
                     notification_run=notification_run,
                 )
+                if _durable_execution_active():
+                    raise
                 logger.error(f"[{stock_code}] 单股推送异常: {e}")
 
     def _save_local_report(
@@ -3434,6 +3484,52 @@ class StockAnalysisPipeline:
                     status="skipped",
                     success=False,
                     attempts=0,
+                )
+                self._refresh_saved_diagnostic_snapshot(
+                    results=results,
+                    notification_run=notification_run,
+                )
+                return
+
+            if _durable_execution_active():
+                # A durable handler must only plan deliveries into the Outbox;
+                # the Worker dispatcher sends them after parent-job success.
+                report_type_key = (
+                    report_type.value
+                    if isinstance(report_type, ReportType)
+                    else str(report_type)
+                )
+                codes_key = ",".join(
+                    sorted(
+                        str(getattr(result, "code", "") or "")
+                        for result in results
+                    )
+                )
+                dedup_key = f"report:aggregate:{report_type_key}:{codes_key}"
+                send_kwargs: Dict[str, Any] = {
+                    "route_type": "report",
+                    "severity": "info",
+                    "dedup_key": dedup_key,
+                    "cooldown_key": dedup_key,
+                }
+                if (
+                    len(results) == 1
+                    and _supports_explicit_keyword(
+                        self.notifier.send,
+                        "structured_payload",
+                    )
+                ):
+                    send_kwargs["structured_payload"] = _share_image_payload(results[0])
+                sent = bool(self.notifier.send(report, **send_kwargs))
+                notification_run = self._build_notification_run_snapshot(
+                    channel="report",
+                    status="queued" if sent else "failed",
+                    success=sent,
+                )
+                record_notification_run(
+                    channel="report",
+                    status="queued" if sent else "failed",
+                    success=sent,
                 )
                 self._refresh_saved_diagnostic_snapshot(
                     results=results,
@@ -3960,6 +4056,8 @@ class StockAnalysisPipeline:
                 self.notifier.release_noise_control(noise_decision)
             import traceback
             logger.error(f"发送通知失败: {e}\n{traceback.format_exc()}")
+            if _durable_execution_active():
+                raise
 
     def _generate_aggregate_report(
         self,

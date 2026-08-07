@@ -10,6 +10,7 @@ A股自选股智能分析系统 - AI分析层
 3. 解析 LLM 响应为结构化 AnalysisResult
 """
 
+import copy
 import json
 import logging
 import math
@@ -304,6 +305,14 @@ def _persist_usage_once(
     *,
     call_type: str,
     stock_code: Optional[str] = None,
+    latency_ms: Optional[int] = None,
+    status: str = "success",
+    error_code: Optional[str] = None,
+    error_message_sanitized: Optional[str] = None,
+    attempt_no: Optional[int] = None,
+    estimated_cost_usd: Optional[float] = None,
+    cost_source: Optional[str] = None,
+    force: bool = False,
 ) -> Dict[str, Any]:
     """Persist provider usage once and mark the in-memory payload.
 
@@ -316,9 +325,26 @@ def _persist_usage_once(
     result = dict(payload)
     if result.get(_USAGE_PERSISTED_MARKER):
         return result
-    if should_persist_usage_telemetry(result):
+    if force or should_persist_usage_telemetry(result):
+        try:
+            persistence_payload = copy.copy(payload)
+        except Exception:
+            persistence_payload = dict(payload)
+        audit_values = {
+            "latency_ms": latency_ms,
+            "error_code": error_code,
+            "error_message_sanitized": error_message_sanitized,
+            "attempt_no": attempt_no,
+            "estimated_cost_usd": estimated_cost_usd,
+            "cost_source": cost_source,
+        }
+        for key, value in audit_values.items():
+            if value is not None:
+                persistence_payload[key] = value
+        if force or status != "success" or any(value is not None for value in audit_values.values()):
+            persistence_payload["status"] = status
         persist_llm_usage(
-            payload,
+            persistence_payload,
             str(model or "unknown"),
             call_type=call_type,
             stock_code=stock_code,
@@ -3185,18 +3211,103 @@ class GeminiAnalyzer:
                 }
             } or None
 
+        provider_attempt_counter = 0
+        last_dispatch_attempt_no: Optional[int] = None
+        last_dispatch_started_at: Optional[float] = None
+        last_dispatch_latency_ms: Optional[int] = None
+        persisted_provider_attempts: set[int] = set()
+
+        def _next_provider_attempt() -> tuple[int, float]:
+            nonlocal provider_attempt_counter
+            provider_attempt_counter += 1
+            return provider_attempt_counter, time.perf_counter()
+
+        def _record_provider_failure(
+            actual_model: Optional[str],
+            exc: BaseException,
+            *,
+            attempt_no: Optional[int],
+            started_at: Optional[float],
+        ) -> None:
+            if not usage_call_type or attempt_no is None or attempt_no in persisted_provider_attempts:
+                return
+            latency_ms = None
+            if started_at is not None:
+                latency_ms = max(0, int((time.perf_counter() - started_at) * 1000))
+            safe_error = self._sanitize_litellm_exception_text(
+                exc,
+                config=config,
+                model=str(actual_model or "unknown"),
+            )
+            _persist_usage_once(
+                {},
+                actual_model,
+                call_type=usage_call_type,
+                stock_code=usage_stock_code,
+                latency_ms=latency_ms,
+                status="failed",
+                error_code=type(exc).__name__,
+                error_message_sanitized=safe_error,
+                attempt_no=attempt_no,
+                force=True,
+            )
+            persisted_provider_attempts.add(attempt_no)
+
+        def _dispatch_with_usage_audit(
+            actual_model: str,
+            kwargs: Dict[str, Any],
+        ) -> Any:
+            nonlocal last_dispatch_attempt_no, last_dispatch_started_at, last_dispatch_latency_ms
+            attempt_no, started_at = _next_provider_attempt()
+            last_dispatch_attempt_no = attempt_no
+            last_dispatch_started_at = started_at
+            try:
+                response = self._dispatch_litellm_completion(
+                    actual_model,
+                    kwargs,
+                    config=config,
+                    use_channel_router=use_channel_router,
+                    router_model_names=router_model_names,
+                )
+            except Exception as exc:
+                _record_provider_failure(
+                    actual_model,
+                    exc,
+                    attempt_no=attempt_no,
+                    started_at=started_at,
+                )
+                raise
+            last_dispatch_latency_ms = max(
+                0,
+                int((time.perf_counter() - started_at) * 1000),
+            )
+            return response
+
         def _record_provider_usage(
             usage: Dict[str, Any],
             actual_model: Optional[str],
+            *,
+            status: str = "success",
+            error_code: Optional[str] = None,
+            error_message_sanitized: Optional[str] = None,
         ) -> Dict[str, Any]:
             if not usage_call_type:
                 return usage
-            return _persist_usage_once(
+            recorded = _persist_usage_once(
                 usage,
                 actual_model,
                 call_type=usage_call_type,
                 stock_code=usage_stock_code,
+                latency_ms=last_dispatch_latency_ms,
+                status=status,
+                error_code=error_code,
+                error_message_sanitized=error_message_sanitized,
+                attempt_no=last_dispatch_attempt_no,
+                force=True,
             )
+            if last_dispatch_attempt_no is not None:
+                persisted_provider_attempts.add(last_dispatch_attempt_no)
+            return recorded
 
         models_to_try = [config.litellm_model] + (config.litellm_fallback_models or [])
         models_to_try = [m for m in models_to_try if m]
@@ -3302,13 +3413,7 @@ class GeminiAnalyzer:
                             "include_usage": True,
                         }
                         stream_response = call_litellm_with_param_recovery(
-                            lambda kwargs: self._dispatch_litellm_completion(
-                                model,
-                                kwargs,
-                                config=config,
-                                use_channel_router=use_channel_router,
-                                router_model_names=router_model_names,
-                            ),
+                            lambda kwargs: _dispatch_with_usage_audit(model, kwargs),
                             model=model,
                             call_kwargs=stream_call_kwargs,
                             model_list=recovery_model_list,
@@ -3323,6 +3428,12 @@ class GeminiAnalyzer:
                             progress_callback=stream_progress_callback,
                         )
                     except _LiteLLMStreamError as exc:
+                        _record_provider_failure(
+                            model,
+                            exc,
+                            attempt_no=last_dispatch_attempt_no,
+                            started_at=last_dispatch_started_at,
+                        )
                         safe_error = self._sanitize_litellm_exception_text(exc, config=config, model=model)
                         if exc.partial_received:
                             logger.warning(
@@ -3338,6 +3449,12 @@ class GeminiAnalyzer:
                             )
                         last_error = RuntimeError(f"{type(exc).__name__}: {safe_error}")
                     except Exception as exc:
+                        _record_provider_failure(
+                            model,
+                            exc,
+                            attempt_no=last_dispatch_attempt_no,
+                            started_at=last_dispatch_started_at,
+                        )
                         safe_error = self._sanitize_litellm_exception_text(exc, config=config, model=model)
                         logger.warning(
                             "[LiteLLM] %s stream request failed before first chunk, falling back to non-stream: %s",
@@ -3346,23 +3463,34 @@ class GeminiAnalyzer:
                         )
 
                 if _stream_text is not None:
+                    if last_dispatch_started_at is not None:
+                        last_dispatch_latency_ms = max(
+                            0,
+                            int((time.perf_counter() - last_dispatch_started_at) * 1000),
+                        )
                     last_response_text = _stream_text
                     last_model = model
                     _stream_usage = _attach_usage_audit(_stream_usage, call_kwargs["messages"])
+                    if response_validator is not None:
+                        try:
+                            response_validator(_stream_text)
+                        except Exception as exc:
+                            safe_error = self._sanitize_litellm_exception_text(exc, config=config, model=model)
+                            _stream_usage = _record_provider_usage(
+                                _stream_usage,
+                                model,
+                                status="invalid_response",
+                                error_code=type(exc).__name__,
+                                error_message_sanitized=safe_error,
+                            )
+                            last_usage = _stream_usage
+                            raise
                     _stream_usage = _record_provider_usage(_stream_usage, model)
                     last_usage = _stream_usage
-                    if response_validator is not None:
-                        response_validator(_stream_text)
                     return _stream_text, model, _stream_usage
 
                 response = call_litellm_with_param_recovery(
-                    lambda kwargs: self._dispatch_litellm_completion(
-                        model,
-                        kwargs,
-                        config=config,
-                        use_channel_router=use_channel_router,
-                        router_model_names=router_model_names,
-                    ),
+                    lambda kwargs: _dispatch_with_usage_audit(model, kwargs),
                     model=model,
                     call_kwargs=call_kwargs,
                     model_list=recovery_model_list,
@@ -3382,16 +3510,34 @@ class GeminiAnalyzer:
                     )
                     if effective_audit_context is not None:
                         usage = _attach_usage_audit(usage, call_kwargs["messages"])
-                    usage = _record_provider_usage(usage, model)
                     last_response_text = content
                     last_model = model
-                    last_usage = usage
                     if response_validator is not None:
-                        response_validator(content)
+                        try:
+                            response_validator(content)
+                        except Exception as exc:
+                            safe_error = self._sanitize_litellm_exception_text(exc, config=config, model=model)
+                            usage = _record_provider_usage(
+                                usage,
+                                model,
+                                status="invalid_response",
+                                error_code=type(exc).__name__,
+                                error_message_sanitized=safe_error,
+                            )
+                            last_usage = usage
+                            raise
+                    usage = _record_provider_usage(usage, model)
+                    last_usage = usage
                     return (content, model, usage)
                 raise ValueError("LLM returned empty response")
 
             except Exception as e:
+                _record_provider_failure(
+                    model,
+                    e,
+                    attempt_no=last_dispatch_attempt_no,
+                    started_at=last_dispatch_started_at,
+                )
                 safe_error = self._sanitize_litellm_exception_text(e, config=config, model=model)
                 logger.warning("[LiteLLM] %s failed: %s", model, safe_error)
                 last_error = RuntimeError(f"{type(e).__name__}: {safe_error}")

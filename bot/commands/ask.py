@@ -16,6 +16,12 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from bot.commands.base import BotCommand
+from bot.durable import (
+    accepted_bot_response,
+    bot_idempotency_key,
+    build_bot_target,
+    get_durable_bot_queue,
+)
 from bot.models import BotMessage, BotResponse
 from data_provider.base import canonical_stock_code
 from src.config import get_config
@@ -218,6 +224,42 @@ class AskCommand(BotCommand):
         skill_text = " ".join(remaining_args).strip()
 
         logger.info("[AskCommand] Stocks: %s, Skill: %s, Extra: %s", codes, skill_id, skill_text)
+
+        durable_queue = get_durable_bot_queue()
+        if durable_queue is not None:
+            try:
+                target = build_bot_target(message)
+                task = durable_queue.submit_typed_job(
+                    "bot_ask",
+                    {
+                        "target": target,
+                        "stock_codes": codes,
+                        "skill_id": skill_id or None,
+                        "skill_text": skill_text,
+                    },
+                    stock_code=codes[0] if len(codes) == 1 else "bot_ask",
+                    query_source="bot",
+                    notify=True,
+                    message="Bot ask accepted",
+                    stage="queued",
+                    idempotency_key=bot_idempotency_key(target, self.name),
+                )
+                return accepted_bot_response(task.task_id, "问股任务")
+            except Exception as exc:
+                logger.error("[AskCommand] durable submit failed: %s", exc)
+                return BotResponse.error_response(f"提交问股任务失败: {str(exc)[:100]}")
+
+        return self._execute_parsed(config, message, codes, skill_id, skill_text)
+
+    def _execute_parsed(
+        self,
+        config: Any,
+        message: BotMessage,
+        codes: List[str],
+        skill_id: str,
+        skill_text: str,
+    ) -> BotResponse:
+        """Execute an already validated request inside the caller's process."""
 
         if len(codes) == 1:
             return self._analyze_single(config, message, codes[0], skill_id, skill_text)

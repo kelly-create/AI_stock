@@ -3,7 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useTaskStream } from '../useTaskStream';
 
 const { getTaskStreamUrl } = vi.hoisted(() => ({
-  getTaskStreamUrl: vi.fn(() => 'http://localhost/api/v1/analysis/tasks/stream'),
+  getTaskStreamUrl: vi.fn((lastEventId?: string) => {
+    const base = 'http://localhost/api/v1/analysis/tasks/stream';
+    return lastEventId ? `${base}?last_event_id=${lastEventId}` : base;
+  }),
 }));
 
 vi.mock('../../api/analysis', () => ({
@@ -98,6 +101,7 @@ describe('useTaskStream', () => {
           stock_code: '600519',
           stock_name: '贵州茅台',
           status: 'processing',
+          stage: 'analyzing',
           progress: 72,
           message: 'LLM 正在生成分析结果',
           report_type: 'detailed',
@@ -132,6 +136,7 @@ describe('useTaskStream', () => {
       stockCode: '600519',
       stockName: '贵州茅台',
       status: 'processing',
+      stage: 'analyzing',
       progress: 72,
       message: 'LLM 正在生成分析结果',
       reportType: 'detailed',
@@ -228,5 +233,33 @@ describe('useTaskStream', () => {
 
     expect(eventSourceInstances).toHaveLength(2);
     expect(getTaskStreamUrl).toHaveBeenCalledTimes(2);
+  });
+
+  it('replays from the last durable event id after a manual EventSource rebuild', async () => {
+    vi.useFakeTimers();
+    renderHook(() => useTaskStream({ enabled: true }));
+
+    await vi.runOnlyPendingTimersAsync();
+    expect(eventSourceInstances).toHaveLength(1);
+
+    eventSourceInstance.listeners.task_progress?.(
+      new MessageEvent('task_progress', {
+        data: JSON.stringify({
+          task_id: 'task-cursor',
+          stock_code: '600519',
+          status: 'processing',
+          progress: 50,
+          report_type: 'detailed',
+          created_at: '2026-08-08T00:00:00Z',
+        }),
+        lastEventId: '42',
+      }),
+    );
+
+    eventSourceInstance.onerror?.(new Event('error'));
+    await vi.advanceTimersByTimeAsync(3000);
+
+    expect(eventSourceInstances).toHaveLength(2);
+    expect(getTaskStreamUrl).toHaveBeenLastCalledWith('42');
   });
 });

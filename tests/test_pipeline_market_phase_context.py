@@ -19,6 +19,7 @@ ensure_litellm_stub()
 from src.analyzer import AnalysisResult
 from src.core.pipeline import StockAnalysisPipeline
 from src.enums import ReportType
+from src.services.durable_job_handlers import bind_durable_execution_context
 from src.services.run_diagnostics import activate_run_diagnostic_context, current_diagnostic_snapshot, reset_run_diagnostic_context
 
 
@@ -864,6 +865,74 @@ class PipelineMarketPhaseContextTestCase(unittest.TestCase):
 
         self.assertIsNotNone(result)
         mock_extract.assert_not_called()
+
+    def test_durable_pipeline_propagates_history_write_failure(self):
+        pipeline = _make_pipeline(agent_mode=False, save_context_snapshot=True)
+        pipeline.db.save_analysis_history.side_effect = RuntimeError("history write failed")
+        phase_context = SimpleNamespace(to_dict=MagicMock(return_value=_phase_payload()))
+
+        with (
+            bind_durable_execution_context(SimpleNamespace(job_id="job-history-failure")),
+            patch("src.core.pipeline.build_market_phase_context", return_value=phase_context),
+            self.assertRaisesRegex(RuntimeError, "history write failed"),
+        ):
+            pipeline.analyze_stock(
+                "600519",
+                ReportType.SIMPLE,
+                "job-history-failure",
+                current_time=datetime(2026, 3, 27, 10, 0),
+            )
+
+    def test_durable_retry_uses_frozen_history_context_for_signal(self):
+        pipeline = _make_pipeline(agent_mode=False, save_context_snapshot=True)
+        frozen_context = {
+            "market_phase_summary": {"phase": "postmarket"},
+            "analysis_context_pack_overview": {
+                "data_quality": {"level": "first-attempt"},
+            },
+        }
+
+        def reuse_first_history(*, result, **_kwargs):
+            result._durable_history_reused = True
+            result.diagnostic_context_snapshot = frozen_context
+            return 42
+
+        pipeline.db.save_analysis_history.side_effect = reuse_first_history
+        phase_context = SimpleNamespace(to_dict=MagicMock(return_value=_phase_payload()))
+        with (
+            patch("src.core.pipeline.build_market_phase_context", return_value=phase_context),
+            patch("src.core.pipeline.extract_and_persist_from_analysis_result") as mock_extract,
+        ):
+            result = pipeline.analyze_stock(
+                "600519",
+                ReportType.SIMPLE,
+                "job-frozen-context",
+                current_time=datetime(2026, 3, 27, 10, 0),
+            )
+
+        self.assertIsNotNone(result)
+        self.assertIs(mock_extract.call_args.kwargs["context_snapshot"], frozen_context)
+
+    def test_durable_pipeline_propagates_signal_write_failure(self):
+        pipeline = _make_pipeline(agent_mode=False, save_context_snapshot=True)
+        pipeline.db.save_analysis_history.return_value = 42
+        phase_context = SimpleNamespace(to_dict=MagicMock(return_value=_phase_payload()))
+
+        with (
+            bind_durable_execution_context(SimpleNamespace(job_id="job-signal-failure")),
+            patch("src.core.pipeline.build_market_phase_context", return_value=phase_context),
+            patch(
+                "src.core.pipeline.extract_and_persist_from_analysis_result",
+                side_effect=RuntimeError("signal write failed"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "signal write failed"),
+        ):
+            pipeline.analyze_stock(
+                "600519",
+                ReportType.SIMPLE,
+                "job-signal-failure",
+                current_time=datetime(2026, 3, 27, 10, 0),
+            )
 
     def test_legacy_pipeline_extract_failure_does_not_mark_history_save_failed(self):
         pipeline = _make_pipeline(agent_mode=False, save_context_snapshot=True)

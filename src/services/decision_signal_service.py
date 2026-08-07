@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import math
 from dataclasses import dataclass
@@ -168,6 +169,18 @@ class DecisionSignalService:
         return self._write_outcome(result, row=final_row)
 
     def _store_signal(self, payload: Dict[str, Any]) -> DecisionSignalCreateResult:
+        try:
+            from src.services.durable_job_handlers import (
+                get_optional_durable_execution_context,
+            )
+
+            durable_context = get_optional_durable_execution_context()
+        except (ImportError, RuntimeError):
+            durable_context = None
+        if durable_context is not None:
+            # Treat signal persistence as a cancellation/lease-safe boundary;
+            # an expired attempt must not invalidate or create account advice.
+            durable_context.checkpoint()
         fields, lifecycle = self._normalize_payload(payload)
         return self.repo.create_if_absent(
             fields,
@@ -863,6 +876,42 @@ class DecisionSignalService:
             "expires_at": expires_at,
             "metadata_json": self._json_dumps(metadata),
         }
+        explicit_idempotency_key = self._optional_identity_text(
+            payload.get("idempotency_key"),
+            "idempotency_key",
+            max_length=128,
+        )
+        if explicit_idempotency_key:
+            fields["idempotency_key"] = explicit_idempotency_key
+        else:
+            try:
+                from src.services.durable_job_handlers import (
+                    get_optional_durable_execution_context,
+                )
+
+                durable_context = get_optional_durable_execution_context()
+            except (ImportError, RuntimeError):
+                durable_context = None
+            if durable_context is not None:
+                identity = {
+                    "job_id": durable_context.job_id,
+                    "source_report_id": fields["source_report_id"],
+                    "source_type": fields["source_type"],
+                    "market": fields["market"],
+                    "stock_code": fields["stock_code"],
+                    "decision_profile": fields["decision_profile"],
+                }
+                digest = hashlib.sha256(
+                    json.dumps(
+                        identity,
+                        ensure_ascii=True,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()[:32]
+                fields["idempotency_key"] = (
+                    f"job:{durable_context.job_id}:{digest}"
+                )
         if created_at is not None:
             fields["created_at"] = created_at
         if fields["status"] == "active" and self._is_expired(fields["expires_at"]):

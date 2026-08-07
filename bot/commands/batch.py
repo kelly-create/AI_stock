@@ -13,6 +13,12 @@ import uuid
 from typing import List
 
 from bot.commands.base import BotCommand
+from bot.durable import (
+    accepted_bot_response,
+    bot_idempotency_key,
+    build_bot_target,
+    get_durable_bot_queue,
+)
 from bot.models import BotMessage, BotResponse
 
 logger = logging.getLogger(__name__)
@@ -79,6 +85,34 @@ class BatchCommand(BotCommand):
             stock_list = stock_list[:limit]
         
         logger.info(f"[BatchCommand] 开始批量分析 {len(stock_list)} 只股票")
+
+        durable_queue = get_durable_bot_queue()
+        if durable_queue is not None:
+            try:
+                target = build_bot_target(message)
+                task = durable_queue.submit_typed_job(
+                    "scheduled_analysis",
+                    {
+                        "stock_codes": list(stock_list),
+                        "no_notify": False,
+                        "no_market_review": True,
+                        "force_run": True,
+                        "dry_run": False,
+                        "single_notify": True,
+                        "no_context_snapshot": False,
+                        "bot_target": target,
+                    },
+                    stock_code="bot_batch",
+                    query_source="bot",
+                    notify=True,
+                    message="Bot batch analysis accepted",
+                    stage="queued",
+                    idempotency_key=bot_idempotency_key(target, self.name),
+                )
+                return accepted_bot_response(task.task_id, "批量分析任务")
+            except Exception as exc:
+                logger.error("[BatchCommand] durable submit failed: %s", exc)
+                return BotResponse.error_response(f"提交批量分析任务失败: {str(exc)[:100]}")
         
         # 在后台线程中执行分析
         thread = threading.Thread(

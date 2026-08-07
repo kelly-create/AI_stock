@@ -191,9 +191,19 @@ class CommandDispatcher:
 
 | /batch | /b, 批量 | 批量分析自选股 | `/batch` |
 
+| /ask | /问股 | 单轮问股 | `/ask 600519 估值如何` |
+
+| /research | /研究 | 深度研究 | `/research 600519 核心风险` |
+
 | /help | /h, 帮助 | 显示帮助信息 | `/help` |
 
 | /status | /s, 状态 | 系统状态 | `/status` |
+
+### Durable Jobs 模式
+
+当 `DURABLE_JOBS_ENABLED=false` 时，Bot 保持原来的同步执行、`TaskService` 和后台线程行为。当开关为 `true` 时，`/analyze`、`/batch`、`/market`、`/ask`、`/research` 只把任务写入 SQLite 队列并立即返回任务 ID；实际数据源、LLM 和通知调用只在独立 Worker 中执行。
+
+飞书和 Telegram 的最终结果通过通知 Outbox 回推，持久化目标只包含 `platform`、`chat_id` 和 `message_id`，不会保存用户内容、原始消息、Webhook 或 Token。钉钉临时 Session Webhook 不能安全跨进程保存，因此 Durable 模式会在提交前明确拒绝且不会创建任务。普通 `/help`、`/status`、历史和聊天类命令不因此进入分析队列。
 
 ## 五、`/status` 与模型配置诊断说明
 

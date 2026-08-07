@@ -2501,6 +2501,7 @@ class ScreeningOpportunitiesApiTestCase(unittest.TestCase):
             config=ANY,
             progress_callback=None,
             daily_history_fetcher=ANY,
+            run_id=None,
         )
         self.assertEqual(fake_module.screen.call_args.kwargs["context"]["llm"]["model"], "")
         self.assertEqual(payload["run_id"], "run123")
@@ -3893,6 +3894,7 @@ class ScreeningOpportunitiesApiTestCase(unittest.TestCase):
             config=ANY,
             progress_callback=None,
             daily_history_fetcher=ANY,
+            run_id=None,
         )
         self.assertEqual(payload["candidates"], [])
         self.assertEqual(payload["candidate_count"], 0)

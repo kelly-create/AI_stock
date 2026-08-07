@@ -265,6 +265,11 @@ export const SettingsField: React.FC<SettingsFieldProps> = ({
               {t('common.readOnly')}
             </Badge>
           ) : null}
+          {schema?.restartRequired ? (
+            <Badge variant="warning" size="sm">
+              {t('common.restartRequired')}
+            </Badge>
+          ) : null}
         </div>
 
         {description ? (

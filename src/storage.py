@@ -16,6 +16,7 @@ from contextlib import contextmanager
 import hashlib
 import json
 import logging
+import math
 import threading
 import time
 from datetime import datetime, date, timedelta, timezone
@@ -48,7 +49,7 @@ from sqlalchemy import (
     MetaData,
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.schema import CreateTable
+from sqlalchemy.schema import CreateIndex, CreateTable
 from sqlalchemy.orm import (
     declarative_base,
     sessionmaker,
@@ -350,6 +351,8 @@ class AnalysisHistory(Base):
 
     # 关联查询链路
     query_id = Column(String(64), index=True)
+    # Durable job linkage is nullable so legacy/flag-off writes remain valid.
+    job_id = Column(String(64), nullable=True)
 
     # 股票信息
     code = Column(String(10), nullable=False, index=True)
@@ -377,6 +380,14 @@ class AnalysisHistory(Base):
 
     __table_args__ = (
         Index('ix_analysis_code_time', 'code', 'created_at'),
+        Index(
+            'uix_analysis_history_job_code_report_type',
+            'job_id',
+            'code',
+            'report_type',
+            unique=True,
+            sqlite_where=text('job_id IS NOT NULL'),
+        ),
     )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -384,6 +395,7 @@ class AnalysisHistory(Base):
         return {
             'id': self.id,
             'query_id': self.query_id,
+            'job_id': self.job_id,
             'code': self.code,
             'name': self.name,
             'report_type': self.report_type,
@@ -788,6 +800,266 @@ class AgentProviderTurn(Base):
     )
 
 
+class AnalysisJobRecord(Base):
+    """Durable analysis job claimed by a single leased worker."""
+
+    __tablename__ = 'analysis_jobs'
+
+    task_id = Column(String(64), primary_key=True)
+    job_type = Column(String(64), nullable=False)
+    stock_code = Column(String(16), nullable=True)
+    stock_name = Column(String(64), nullable=True)
+    dedupe_key = Column(String(128), nullable=True)
+    status = Column(
+        String(32),
+        nullable=False,
+        server_default=text("'pending'"),
+    )
+    stage = Column(String(64), nullable=True)
+    progress = Column(Integer, nullable=False, server_default=text('0'))
+    message = Column(Text, nullable=True)
+    payload_json = Column(Text, nullable=False, server_default=text("'{}'"))
+    payload_version = Column(
+        String(32),
+        nullable=False,
+        server_default=text("'1'"),
+    )
+    notify = Column(Boolean, nullable=False, server_default=text('0'))
+    result_json = Column(Text, nullable=True)
+    error_code = Column(String(64), nullable=True)
+    error_message_sanitized = Column(Text, nullable=True)
+    report_type = Column(String(32), nullable=True)
+    analysis_phase = Column(String(32), nullable=True)
+    query_source = Column(String(32), nullable=True)
+    trace_id = Column(String(64), nullable=False)
+    idempotency_key = Column(String(128), nullable=True)
+    priority = Column(Integer, nullable=False, server_default=text('0'))
+    attempt = Column(Integer, nullable=False, server_default=text('0'))
+    max_attempts = Column(Integer, nullable=False, server_default=text('4'))
+    available_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=text('CURRENT_TIMESTAMP'),
+    )
+    lease_owner = Column(String(128), nullable=True)
+    lease_token = Column(String(64), nullable=True)
+    lease_expires_at = Column(DateTime, nullable=True)
+    heartbeat_at = Column(DateTime, nullable=True)
+    cancel_requested_at = Column(DateTime, nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=text('CURRENT_TIMESTAMP'),
+    )
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=text('CURRENT_TIMESTAMP'),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            'progress >= 0 AND progress <= 100',
+            name='ck_analysis_jobs_progress_range',
+        ),
+        CheckConstraint(
+            'attempt >= 0 AND max_attempts >= 1',
+            name='ck_analysis_jobs_attempts',
+        ),
+        Index(
+            'ix_analysis_jobs_claim',
+            'status',
+            'available_at',
+            'priority',
+            'created_at',
+        ),
+        Index('ix_analysis_jobs_lease', 'status', 'lease_expires_at'),
+        Index(
+            'ix_analysis_jobs_stock_status_created',
+            'stock_code',
+            'status',
+            'created_at',
+        ),
+        Index('ix_analysis_jobs_trace_id', 'trace_id'),
+        Index(
+            'uix_analysis_jobs_idempotency_key',
+            'idempotency_key',
+            unique=True,
+            sqlite_where=text('idempotency_key IS NOT NULL'),
+        ),
+        Index(
+            'uix_analysis_jobs_active_dedupe_key',
+            'dedupe_key',
+            unique=True,
+            sqlite_where=text(
+                "dedupe_key IS NOT NULL AND status IN "
+                "('pending', 'processing', 'cancel_requested')"
+            ),
+        ),
+    )
+
+
+class JobEventRecord(Base):
+    """Append-only durable task event; ``id`` is the global SSE sequence."""
+
+    __tablename__ = 'job_events'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_id = Column(
+        String(64),
+        ForeignKey('analysis_jobs.task_id', ondelete='CASCADE'),
+        nullable=False,
+    )
+    event_type = Column(String(64), nullable=False)
+    stage = Column(String(64), nullable=True)
+    payload_json = Column(Text, nullable=False, server_default=text("'{}'"))
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=text('CURRENT_TIMESTAMP'),
+    )
+
+    __table_args__ = (
+        Index('ix_job_events_job_id_id', 'job_id', 'id'),
+        Index('ix_job_events_created_at', 'created_at'),
+    )
+
+
+class NotificationOutboxRecord(Base):
+    """Per-channel notification delivery state isolated from job completion."""
+
+    __tablename__ = 'notification_outbox'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_id = Column(
+        String(64),
+        ForeignKey('analysis_jobs.task_id', ondelete='SET NULL'),
+        nullable=True,
+    )
+    trace_id = Column(String(64), nullable=False)
+    logical_notification_id = Column(String(128), nullable=False)
+    notification_type = Column(String(64), nullable=False)
+    channel = Column(String(32), nullable=False)
+    route = Column(String(256), nullable=False)
+    severity = Column(String(32), nullable=False)
+    recipient = Column(String(256), nullable=True)
+    payload_json = Column(Text, nullable=False)
+    content_sha256 = Column(String(64), nullable=False)
+    idempotency_key = Column(String(160), nullable=False)
+    status = Column(
+        String(32),
+        nullable=False,
+        server_default=text("'pending'"),
+    )
+    priority = Column(Integer, nullable=False, server_default=text('0'))
+    attempt = Column(Integer, nullable=False, server_default=text('0'))
+    max_attempts = Column(Integer, nullable=False, server_default=text('4'))
+    available_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=text('CURRENT_TIMESTAMP'),
+    )
+    lease_owner = Column(String(128), nullable=True)
+    lease_token = Column(String(64), nullable=True)
+    lease_expires_at = Column(DateTime, nullable=True)
+    provider_message_id = Column(String(256), nullable=True)
+    error_code = Column(String(64), nullable=True)
+    error_message_sanitized = Column(Text, nullable=True)
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=text('CURRENT_TIMESTAMP'),
+    )
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=text('CURRENT_TIMESTAMP'),
+    )
+    sent_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            'attempt >= 0 AND max_attempts >= 1',
+            name='ck_notification_outbox_attempts',
+        ),
+        Index(
+            'uix_notification_outbox_idempotency_key',
+            'idempotency_key',
+            unique=True,
+        ),
+        Index(
+            'uix_notification_outbox_logical_channel_route',
+            'logical_notification_id',
+            'channel',
+            'route',
+            unique=True,
+        ),
+        Index(
+            'ix_notification_outbox_claim',
+            'status',
+            'available_at',
+            'priority',
+            'created_at',
+        ),
+        Index('ix_notification_outbox_lease', 'status', 'lease_expires_at'),
+        Index('ix_notification_outbox_job_id', 'job_id'),
+    )
+
+
+class ProviderHealthRecord(Base):
+    """Latest durable health/circuit state for one provider capability."""
+
+    __tablename__ = 'provider_health'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    kind = Column(String(32), nullable=False)
+    provider_key = Column(String(128), nullable=False)
+    scope = Column(String(128), nullable=False)
+    status = Column(
+        String(32),
+        nullable=False,
+        server_default=text("'unknown'"),
+    )
+    success_count = Column(Integer, nullable=False, server_default=text('0'))
+    failure_count = Column(Integer, nullable=False, server_default=text('0'))
+    consecutive_failures = Column(Integer, nullable=False, server_default=text('0'))
+    consecutive_successes = Column(Integer, nullable=False, server_default=text('0'))
+    latency_ewma_ms = Column(Float, nullable=True)
+    last_latency_ms = Column(Float, nullable=True)
+    last_error_code = Column(String(64), nullable=True)
+    last_error_message_sanitized = Column(Text, nullable=True)
+    metadata_json = Column(Text, nullable=False, server_default=text("'{}'"))
+    retry_after_at = Column(DateTime, nullable=True)
+    circuit_open_until = Column(DateTime, nullable=True)
+    last_checked_at = Column(DateTime, nullable=True)
+    last_success_at = Column(DateTime, nullable=True)
+    last_failure_at = Column(DateTime, nullable=True)
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=text('CURRENT_TIMESTAMP'),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            'success_count >= 0 AND failure_count >= 0 '
+            'AND consecutive_failures >= 0 AND consecutive_successes >= 0',
+            name='ck_provider_health_counters',
+        ),
+        Index(
+            'uix_provider_health_kind_key_scope',
+            'kind',
+            'provider_key',
+            'scope',
+            unique=True,
+        ),
+        Index('ix_provider_health_status_updated', 'status', 'updated_at'),
+        Index('ix_provider_health_retry_after_at', 'retry_after_at'),
+    )
+
+
 class LLMUsage(Base):
     """One row per litellm.completion() call — token-usage audit log."""
 
@@ -802,6 +1074,21 @@ class LLMUsage(Base):
     prompt_tokens = Column(Integer, nullable=False, default=0)
     completion_tokens = Column(Integer, nullable=False, default=0)
     total_tokens = Column(Integer, nullable=False, default=0)
+
+    # Durable-job correlation remains nullable for legacy and flag-off calls.
+    job_id = Column(String(64), nullable=True)
+    stage = Column(String(64), nullable=True)
+    trace_id = Column(String(64), nullable=True)
+    prompt_version = Column(String(64), nullable=True)
+    snapshot_hash = Column(String(128), nullable=True)
+    latency_ms = Column(Integer, nullable=True)
+    status = Column(String(32), nullable=True)
+    error_code = Column(String(64), nullable=True)
+    error_message_sanitized = Column(Text, nullable=True)
+    # Unknown provider pricing remains NULL instead of being reported as zero.
+    estimated_cost_usd = Column(Float, nullable=True)
+    cost_source = Column(String(32), nullable=True)
+    attempt_no = Column(Integer, nullable=True)
 
     # Sanitized provider usage snapshot; raw prompts, messages, headers, and
     # tokenizer free-text fields are intentionally not persisted here.
@@ -860,6 +1147,12 @@ class LLMUsage(Base):
     known_dynamic_marker_positions = Column(Text, nullable=True)
     called_at = Column(DateTime, default=datetime.now, index=True)
 
+    __table_args__ = (
+        Index('ix_llm_usage_job_stage_called_at', 'job_id', 'stage', 'called_at'),
+        Index('ix_llm_usage_trace_called_at', 'trace_id', 'called_at'),
+        Index('ix_llm_usage_status_called_at', 'status', 'called_at'),
+    )
+
 
 _LLM_USAGE_TELEMETRY_COLUMN_SQL: Dict[str, str] = {
     "provider_usage_json": "TEXT",
@@ -904,6 +1197,31 @@ _LLM_USAGE_TELEMETRY_COLUMN_SQL: Dict[str, str] = {
     "approx_common_prefix_chars": "INTEGER",
     "approx_common_prefix_tokens": "INTEGER",
     "known_dynamic_marker_positions": "TEXT",
+}
+_LLM_USAGE_DURABLE_COLUMN_SQL: Dict[str, str] = {
+    "job_id": "VARCHAR(64)",
+    "stage": "VARCHAR(64)",
+    "trace_id": "VARCHAR(64)",
+    "prompt_version": "VARCHAR(64)",
+    "snapshot_hash": "VARCHAR(128)",
+    "latency_ms": "INTEGER",
+    "status": "VARCHAR(32)",
+    "error_code": "VARCHAR(64)",
+    "error_message_sanitized": "TEXT",
+    "estimated_cost_usd": "FLOAT",
+    "cost_source": "VARCHAR(32)",
+    "attempt_no": "INTEGER",
+}
+_LLM_USAGE_FORBIDDEN_GENERIC_AUDIT_COLUMNS = {
+    "latency",
+    "error",
+    "cost",
+    "attempt",
+}
+_PR1_EXISTING_TABLE_COLUMN_SQL: Dict[str, Dict[str, str]] = {
+    "llm_usage": _LLM_USAGE_DURABLE_COLUMN_SQL,
+    "analysis_history": {"job_id": "VARCHAR(64)"},
+    "decision_signals": {"idempotency_key": "VARCHAR(128)"},
 }
 _LLM_USAGE_INTEGER_TELEMETRY_COLUMNS = {
     column
@@ -1044,6 +1362,7 @@ class DecisionSignalRecord(Base):
     source_agent = Column(String(64))
     source_report_id = Column(Integer, index=True)
     trace_id = Column(String(64), index=True)
+    idempotency_key = Column(String(128), nullable=True)
     decision_profile = Column(String(16), index=True)
     market_phase = Column(String(24), index=True)
     trigger_source = Column(String(64), nullable=False, index=True)
@@ -1121,6 +1440,12 @@ class DecisionSignalRecord(Base):
             'stock_code',
             'decision_profile',
             'created_at',
+        ),
+        Index(
+            'uix_decision_signals_idempotency_key',
+            'idempotency_key',
+            unique=True,
+            sqlite_where=text('idempotency_key IS NOT NULL'),
         ),
     )
 
@@ -2562,6 +2887,19 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         if result is None:
             return 0
 
+        durable_context = None
+        try:
+            # Imported lazily to keep storage independent of the worker
+            # runtime during legacy/flag-off startup.
+            from src.services.durable_job_handlers import (
+                get_optional_durable_execution_context,
+            )
+
+            durable_context = get_optional_durable_execution_context()
+        except (ImportError, RuntimeError):
+            durable_context = None
+        durable_job_id = durable_context.job_id if durable_context is not None else None
+
         sniper_points = self._extract_sniper_points(result)
         raw_result = self._build_raw_result(result)
         context_text = None
@@ -2569,9 +2907,38 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             context_text = self._safe_json_dumps(context_snapshot)
 
         try:
-            def _write(session: Session) -> int:
+            def _write(session: Session) -> Tuple[int, Optional[Dict[str, Any]]]:
+                if durable_context is not None:
+                    live_job_id = session.execute(
+                        select(AnalysisJobRecord.task_id).where(
+                            AnalysisJobRecord.task_id == durable_context.job_id,
+                            AnalysisJobRecord.status == "processing",
+                            AnalysisJobRecord.lease_owner == durable_context.worker_id,
+                            AnalysisJobRecord.lease_token == durable_context.lease_token,
+                            AnalysisJobRecord.lease_expires_at > utc_naive_now(),
+                        )
+                    ).scalar_one_or_none()
+                    if live_job_id is None:
+                        from src.services.durable_jobs import StaleLeaseError
+
+                        raise StaleLeaseError(
+                            "durable analysis history write rejected after lease loss"
+                        )
+                    existing = session.execute(
+                        select(AnalysisHistory).where(
+                            AnalysisHistory.job_id == durable_context.job_id,
+                            AnalysisHistory.code == result.code,
+                            AnalysisHistory.report_type == report_type,
+                        )
+                    ).scalar_one_or_none()
+                    if existing is not None:
+                        return (
+                            int(existing.id),
+                            self._snapshot_frozen_analysis_history(existing),
+                        )
                 history = AnalysisHistory(
                     query_id=query_id,
+                    job_id=durable_job_id,
                     code=result.code,
                     name=result.name,
                     report_type=report_type,
@@ -2590,13 +2957,24 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                 )
                 session.add(history)
                 session.flush()
-                return int(history.id or 0)
-            return self._run_write_transaction(
+                return int(history.id or 0), None
+            history_id, frozen_history = self._run_write_transaction(
                 f"save_analysis_history[{result.code}]",
                 _write,
             )
+            if frozen_history is not None:
+                self._restore_analysis_result_from_frozen_history(
+                    result,
+                    frozen_history,
+                )
+            return history_id
         except Exception as e:
             logger.error(f"保存分析历史失败: {e}")
+            if durable_context is not None:
+                # Durable completion is invalid without its auditable report.
+                # Let the worker retry/fail under the job attempt budget;
+                # flag-off callers retain the historical zero return below.
+                raise
             return 0
 
     def update_analysis_history_diagnostics(
@@ -3342,6 +3720,72 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         return data
 
     @staticmethod
+    def _snapshot_frozen_analysis_history(row: AnalysisHistory) -> Dict[str, Any]:
+        """Detach the first committed durable report for retry convergence."""
+
+        try:
+            raw_result = json.loads(row.raw_result or "")
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "existing durable analysis history contains invalid raw_result"
+            ) from exc
+        if not isinstance(raw_result, dict):
+            raise RuntimeError(
+                "existing durable analysis history raw_result must be an object"
+            )
+
+        context_snapshot: Optional[Dict[str, Any]] = None
+        if row.context_snapshot:
+            try:
+                parsed_context = json.loads(row.context_snapshot)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    "existing durable analysis history contains invalid context_snapshot"
+                ) from exc
+            if not isinstance(parsed_context, dict):
+                raise RuntimeError(
+                    "existing durable analysis history context_snapshot must be an object"
+                )
+            context_snapshot = parsed_context
+
+        return {
+            "raw_result": raw_result,
+            "context_snapshot": context_snapshot,
+            "columns": {
+                "code": row.code,
+                "name": row.name,
+                "sentiment_score": row.sentiment_score,
+                "operation_advice": row.operation_advice,
+                "trend_prediction": row.trend_prediction,
+                "analysis_summary": row.analysis_summary,
+            },
+        }
+
+    @staticmethod
+    def _restore_analysis_result_from_frozen_history(
+        result: Any,
+        frozen_history: Dict[str, Any],
+    ) -> None:
+        """Make a recovered attempt return the first persisted report.
+
+        A provider retry may produce different prose or a different action.
+        Once the first attempt committed a report, that immutable report is the
+        authority for later signal extraction and the terminal job response.
+        """
+
+        raw_result = frozen_history["raw_result"]
+        for key, value in raw_result.items():
+            if isinstance(key, str) and hasattr(result, key):
+                setattr(result, key, value)
+        for key, value in frozen_history["columns"].items():
+            if hasattr(result, key):
+                setattr(result, key, value)
+        context_snapshot = frozen_history.get("context_snapshot")
+        if context_snapshot is not None:
+            setattr(result, "diagnostic_context_snapshot", context_snapshot)
+        setattr(result, "_durable_history_reused", True)
+
+    @staticmethod
     def _parse_sniper_value(value: Any) -> Optional[float]:
         return parse_sniper_value(value)
 
@@ -3814,6 +4258,8 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         }
         for column in _LLM_USAGE_TELEMETRY_COLUMN_SQL:
             row_values[column] = None if column in _LLM_USAGE_DROPPED_FREE_TEXT_COLUMNS else telemetry.get(column)
+        for column in _LLM_USAGE_DURABLE_COLUMN_SQL:
+            row_values[column] = telemetry.get(column)
         row = LLMUsage(**row_values)
         with self.session_scope() as session:
             session.add(row)
@@ -3953,6 +4399,279 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             }
             for r in rows
         ]
+
+
+_PR1_DURABLE_TABLES = (
+    AnalysisJobRecord.__table__,
+    JobEventRecord.__table__,
+    NotificationOutboxRecord.__table__,
+    ProviderHealthRecord.__table__,
+)
+_PR1_EXTENSION_INDEX_NAMES = {
+    'ix_llm_usage_job_stage_called_at',
+    'ix_llm_usage_trace_called_at',
+    'ix_llm_usage_status_called_at',
+    'uix_analysis_history_job_code_report_type',
+    'uix_decision_signals_idempotency_key',
+}
+
+
+def _normalize_sql_contract(value: Optional[str]) -> str:
+    """Normalize generated SQLite DDL for strict, whitespace-insensitive checks."""
+
+    return ' '.join((value or '').replace('"', '').replace('`', '').split()).lower()
+
+
+def _verify_pr1_durable_schema_contract(connection) -> None:
+    """Fail closed when the durable-job schema is absent or structurally different."""
+
+    existing_tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).all()
+    }
+    required_tables = {
+        table.name for table in _PR1_DURABLE_TABLES
+    }.union(_PR1_EXISTING_TABLE_COLUMN_SQL)
+    missing_tables = sorted(required_tables.difference(existing_tables))
+    if missing_tables:
+        raise RuntimeError(
+            'PR1 durable schema is incomplete: missing tables='
+            + ','.join(missing_tables)
+        )
+
+    for table in _PR1_DURABLE_TABLES:
+        pragma_rows = connection.exec_driver_sql(
+            f"PRAGMA table_info('{table.name}')"
+        ).all()
+        actual_columns = {row[1]: row for row in pragma_rows}
+        expected_columns = {column.name: column for column in table.columns}
+        missing_columns = sorted(set(expected_columns).difference(actual_columns))
+        unexpected_columns = sorted(set(actual_columns).difference(expected_columns))
+        if missing_columns or unexpected_columns:
+            raise RuntimeError(
+                f'PR1 durable schema table {table.name} has incompatible columns: '
+                f'missing={missing_columns}, unexpected={unexpected_columns}'
+            )
+        for column_name, column in expected_columns.items():
+            actual = actual_columns[column_name]
+            actual_type = _normalize_sql_contract(actual[2])
+            expected_type = _normalize_sql_contract(
+                column.type.compile(dialect=connection.dialect)
+            )
+            if actual_type != expected_type:
+                raise RuntimeError(
+                    f'PR1 durable schema column {table.name}.{column_name} '
+                    f'has type {actual[2]!r}; expected {expected_type!r}'
+                )
+            if not column.primary_key and bool(actual[3]) != (not column.nullable):
+                raise RuntimeError(
+                    f'PR1 durable schema column {table.name}.{column_name} '
+                    'has incompatible nullability'
+                )
+            if column.server_default is not None and actual[4] is None:
+                raise RuntimeError(
+                    f'PR1 durable schema column {table.name}.{column_name} '
+                    'is missing its server default'
+                )
+
+    for table_name, expected in _PR1_EXISTING_TABLE_COLUMN_SQL.items():
+        actual = {
+            row[1]: _normalize_sql_contract(row[2])
+            for row in connection.exec_driver_sql(
+                f"PRAGMA table_info('{table_name}')"
+            ).all()
+        }
+        missing = sorted(set(expected).difference(actual))
+        invalid_types = {
+            column: {'actual': actual.get(column), 'expected': sql_type.lower()}
+            for column, sql_type in expected.items()
+            if column in actual
+            and actual[column] != _normalize_sql_contract(sql_type)
+        }
+        if missing or invalid_types:
+            raise RuntimeError(
+                f'PR1 durable schema table {table_name} is incompatible: '
+                f'missing={missing}, invalid_types={invalid_types}'
+            )
+        if table_name == LLMUsage.__tablename__:
+            forbidden = sorted(
+                _LLM_USAGE_FORBIDDEN_GENERIC_AUDIT_COLUMNS.intersection(actual)
+            )
+            if forbidden:
+                raise RuntimeError(
+                    'PR1 durable schema llm_usage contains ambiguous audit columns: '
+                    + ','.join(forbidden)
+                )
+
+    expected_indexes = [
+        index
+        for table in _PR1_DURABLE_TABLES
+        for index in table.indexes
+    ]
+    for table in (
+        LLMUsage.__table__,
+        AnalysisHistory.__table__,
+        DecisionSignalRecord.__table__,
+    ):
+        expected_indexes.extend(
+            index
+            for index in table.indexes
+            if index.name in _PR1_EXTENSION_INDEX_NAMES
+        )
+
+    for index in expected_indexes:
+        table_name = index.table.name
+        index_rows = {
+            row[1]: row
+            for row in connection.exec_driver_sql(
+                f"PRAGMA index_list('{table_name}')"
+            ).all()
+        }
+        actual = index_rows.get(index.name)
+        if actual is None:
+            raise RuntimeError(f'PR1 durable schema is missing index {index.name}')
+        actual_columns = tuple(
+            row[2]
+            for row in connection.exec_driver_sql(
+                f"PRAGMA index_info('{index.name}')"
+            ).all()
+        )
+        expected_columns = tuple(column.name for column in index.columns)
+        if actual_columns != expected_columns or bool(actual[2]) != bool(index.unique):
+            raise RuntimeError(
+                f'PR1 durable schema index {index.name} is incompatible: '
+                f'columns={actual_columns}, unique={bool(actual[2])}'
+            )
+
+        expected_where = index.dialect_options['sqlite'].get('where')
+        is_partial = bool(actual[4])
+        if is_partial != (expected_where is not None):
+            raise RuntimeError(
+                f'PR1 durable schema index {index.name} has incompatible partial semantics'
+            )
+        if expected_where is not None:
+            actual_sql_row = connection.exec_driver_sql(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+                (index.name,),
+            ).first()
+            actual_sql = actual_sql_row[0] if actual_sql_row else ''
+            expected_sql = str(CreateIndex(index).compile(dialect=connection.dialect))
+            actual_predicate = _normalize_sql_contract(actual_sql).split(' where ', 1)[-1]
+            expected_predicate = _normalize_sql_contract(expected_sql).split(' where ', 1)[-1]
+            if actual_predicate != expected_predicate:
+                raise RuntimeError(
+                    f'PR1 durable schema index {index.name} has incompatible predicate'
+                )
+
+    expected_foreign_keys = {
+        'job_events': ('analysis_jobs', 'job_id', 'task_id', 'CASCADE'),
+        'notification_outbox': ('analysis_jobs', 'job_id', 'task_id', 'SET NULL'),
+    }
+    for table_name, expected in expected_foreign_keys.items():
+        foreign_keys = {
+            (row[2], row[3], row[4], str(row[6]).upper())
+            for row in connection.exec_driver_sql(
+                f"PRAGMA foreign_key_list('{table_name}')"
+            ).all()
+        }
+        if expected not in foreign_keys:
+            raise RuntimeError(
+                f'PR1 durable schema table {table_name} is missing foreign key {expected}'
+            )
+
+    expected_check_constraints = {
+        'analysis_jobs': (
+            'ck_analysis_jobs_progress_range',
+            'ck_analysis_jobs_attempts',
+        ),
+        'notification_outbox': ('ck_notification_outbox_attempts',),
+        'provider_health': ('ck_provider_health_counters',),
+    }
+    for table_name, constraint_names in expected_check_constraints.items():
+        table_sql_row = connection.exec_driver_sql(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table_name,),
+        ).first()
+        table_sql = _normalize_sql_contract(table_sql_row[0] if table_sql_row else '')
+        missing_constraints = [
+            name for name in constraint_names if name.lower() not in table_sql
+        ]
+        if missing_constraints:
+            raise RuntimeError(
+                f'PR1 durable schema table {table_name} is missing constraints '
+                + ','.join(missing_constraints)
+            )
+
+
+def run_pr1_durable_jobs_schema_upgrade(engine) -> None:
+    """Create and verify PR1 durable tables/columns in one SQLite transaction."""
+
+    if engine.url.get_backend_name() != 'sqlite':
+        raise RuntimeError('PR1 durable jobs migration only supports SQLite')
+
+    # Python's sqlite3 legacy transaction mode does not start a transaction for
+    # DDL.  Explicit BEGIN IMMEDIATE is therefore required; otherwise a failed
+    # final contract check can leave partially-created tables without a version
+    # marker, defeating crash-safe retry semantics.
+    with engine.connect() as connection:
+        connection.exec_driver_sql('BEGIN IMMEDIATE')
+        try:
+            _apply_pr1_durable_jobs_schema(connection)
+        except BaseException:
+            connection.rollback()
+            raise
+        else:
+            connection.commit()
+
+
+def _apply_pr1_durable_jobs_schema(connection) -> None:
+    """Apply PR1 DDL on a caller-owned explicit SQLite transaction."""
+
+    existing_tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).all()
+    }
+    missing_prerequisites = sorted(
+        set(_PR1_EXISTING_TABLE_COLUMN_SQL).difference(existing_tables)
+    )
+    if missing_prerequisites:
+        raise RuntimeError(
+            'PR1 durable jobs migration requires the PR0 schema; missing tables='
+            + ','.join(missing_prerequisites)
+        )
+
+    for table in _PR1_DURABLE_TABLES:
+        table.create(bind=connection, checkfirst=True)
+
+    for table_name, columns in _PR1_EXISTING_TABLE_COLUMN_SQL.items():
+        existing_columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                f"PRAGMA table_info('{table_name}')"
+            ).all()
+        }
+        for column_name, column_type in columns.items():
+            if column_name in existing_columns:
+                continue
+            connection.exec_driver_sql(
+                f'ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}'
+            )
+            existing_columns.add(column_name)
+
+    for table in (
+        LLMUsage.__table__,
+        AnalysisHistory.__table__,
+        DecisionSignalRecord.__table__,
+    ):
+        for index in table.indexes:
+            if index.name in _PR1_EXTENSION_INDEX_NAMES:
+                index.create(bind=connection, checkfirst=True)
+
+    _verify_pr1_durable_schema_contract(connection)
 
 
 class _StorageSchemaConvergence(DatabaseManager):
@@ -4120,6 +4839,54 @@ def persist_llm_usage(
             column: usage.get(column)
             for column in _LLM_USAGE_TELEMETRY_COLUMN_SQL
         }
+        durable_telemetry = {
+            column: usage.get(column)
+            for column in _LLM_USAGE_DURABLE_COLUMN_SQL
+        }
+        try:
+            # Import lazily: storage is imported by the diagnostics module.
+            from src.services.run_diagnostics import (
+                get_current_diagnostic_context,
+                sanitize_diagnostic_text,
+            )
+
+            diagnostic_context = get_current_diagnostic_context()
+        except Exception:
+            diagnostic_context = None
+            sanitize_diagnostic_text = None
+
+        if diagnostic_context is not None:
+            durable_telemetry["job_id"] = durable_telemetry.get("job_id") or diagnostic_context.task_id
+            durable_telemetry["trace_id"] = durable_telemetry.get("trace_id") or diagnostic_context.trace_id
+            durable_telemetry["stage"] = durable_telemetry.get("stage") or diagnostic_context.stage
+            durable_telemetry["prompt_version"] = (
+                durable_telemetry.get("prompt_version") or diagnostic_context.prompt_version
+            )
+            durable_telemetry["snapshot_hash"] = (
+                durable_telemetry.get("snapshot_hash") or diagnostic_context.snapshot_hash
+            )
+            durable_telemetry["attempt_no"] = (
+                durable_telemetry.get("attempt_no") or diagnostic_context.attempt_no
+            )
+
+        durable_telemetry["latency_ms"] = _coerce_llm_usage_non_negative_int(
+            durable_telemetry.get("latency_ms")
+        )
+        durable_telemetry["attempt_no"] = _coerce_llm_usage_positive_int(
+            durable_telemetry.get("attempt_no")
+        )
+        durable_telemetry["estimated_cost_usd"] = _coerce_llm_usage_cost(
+            durable_telemetry.get("estimated_cost_usd")
+        )
+        if durable_telemetry["estimated_cost_usd"] is None:
+            durable_telemetry["cost_source"] = None
+        error_message = durable_telemetry.get("error_message_sanitized")
+        if error_message is not None:
+            if sanitize_diagnostic_text is not None:
+                error_message = sanitize_diagnostic_text(error_message, max_length=300)
+            else:
+                error_message = str(error_message)[:300]
+        durable_telemetry["error_message_sanitized"] = error_message
         if prompt_cache_telemetry_disabled:
             for column in _LLM_PROMPT_CACHE_TELEMETRY_COLUMNS:
                 telemetry[column] = None
@@ -4157,6 +4924,9 @@ def persist_llm_usage(
             telemetry["cache_observation"] = usage.get("cache_observation") or (
                 "no_usage" if not has_usage_payload else "unknown"
             )
+        if not durable_telemetry.get("status"):
+            durable_telemetry["status"] = "success"
+        telemetry.update(durable_telemetry)
         db = DatabaseManager.get_instance()
         db.record_llm_usage(
             call_type=call_type,
@@ -4188,6 +4958,25 @@ def _coerce_llm_usage_non_negative_int(value: Any) -> Optional[int]:
             return None
         return int(text)
     return None
+
+
+def _coerce_llm_usage_positive_int(value: Any) -> Optional[int]:
+    coerced = _coerce_llm_usage_non_negative_int(value)
+    return coerced if coerced is not None and coerced > 0 else None
+
+
+def _coerce_llm_usage_cost(value: Any) -> Optional[float]:
+    """Return a finite non-negative USD estimate, otherwise unknown (NULL)."""
+
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        coerced = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(coerced) or coerced < 0:
+        return None
+    return coerced
 
 
 if __name__ == "__main__":

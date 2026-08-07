@@ -458,6 +458,7 @@ export interface TaskStatus {
   taskId: string;
   traceId?: string;
   status: 'pending' | 'processing' | 'completed' | 'failed' | 'cancel_requested' | 'cancelled';
+  stage?: string | null;
   progress?: number;
   result?: AnalysisResult;
   marketReviewReport?: string;
@@ -471,6 +472,12 @@ export interface TaskStatus {
   skills?: string[];
 }
 
+export interface TaskCancelResponse {
+  taskId: string;
+  status: TaskStatus['status'];
+  message: string;
+}
+
 /** Task details used by task list and SSE events */
 export interface TaskInfo {
   taskId: string;
@@ -478,6 +485,7 @@ export interface TaskInfo {
   stockCode: string;
   stockName?: string;
   status: 'pending' | 'processing' | 'completed' | 'failed' | 'cancel_requested' | 'cancelled';
+  stage?: string;
   progress: number;
   message?: string;
   reportType: string;

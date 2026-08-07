@@ -35,6 +35,19 @@ from src.services.run_diagnostics import (
 logger = logging.getLogger(__name__)
 
 
+def _durable_execution_active() -> bool:
+    """Return whether this call is owned by the durable Worker."""
+
+    try:
+        from src.services.durable_job_handlers import (
+            get_optional_durable_execution_context,
+        )
+
+        return get_optional_durable_execution_context() is not None
+    except (ImportError, RuntimeError):
+        return False
+
+
 class AnalysisService:
     """
     分析服务
@@ -61,6 +74,7 @@ class AnalysisService:
         query_source: str = "api",
         portfolio_context: Optional[Dict[str, Any]] = None,
         report_language: Optional[str] = None,
+        source_message: Optional[Any] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         执行股票分析
@@ -72,6 +86,7 @@ class AnalysisService:
             query_id: 查询 ID（可选）
             send_notification: 是否发送通知（API 触发默认发送）
             analysis_phase: 请求的分析阶段覆盖（auto/premarket/intraday/postmarket）
+            source_message: 可选的最小机器人回复上下文
             
         Returns:
             分析结果字典，包含:
@@ -116,6 +131,7 @@ class AnalysisService:
                 analysis_skills=skills,
                 analysis_phase=analysis_phase,
                 portfolio_context=portfolio_context,
+                source_message=source_message,
             )
             
             # 确定报告类型 (API: simple/detailed/full/brief -> ReportType)
@@ -145,6 +161,8 @@ class AnalysisService:
         except Exception as e:
             self.last_error = str(e)
             logger.error(f"分析股票 {stock_code} 失败: {e}", exc_info=True)
+            if _durable_execution_active():
+                raise
             return None
         finally:
             reset_run_diagnostic_context(locals().get("diag_token"))

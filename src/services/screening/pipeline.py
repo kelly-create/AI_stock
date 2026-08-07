@@ -70,6 +70,7 @@ def screen(
     config: Config | None = None,
     progress_callback: Callable[[int, str], None] | None = None,
     daily_history_fetcher: Callable[..., pd.DataFrame] | None = None,
+    run_id: str | None = None,
 ) -> ScreenResult:
     """Execute stock screening with the given strategy.
 
@@ -111,7 +112,9 @@ def screen(
     if market not in ("cn", "us"):
         raise ValueError(f"Unsupported market: {market!r} (supported: cn, us)")
 
-    run_id = uuid.uuid4().hex[:12]
+    run_id = str(run_id or "").strip() or uuid.uuid4().hex[:12]
+    if len(run_id) > 64:
+        raise ValueError("run_id must be at most 64 characters")
     degradation: list[str] = []
 
     # 1. Load strategy

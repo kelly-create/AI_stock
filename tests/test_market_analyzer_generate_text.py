@@ -2592,13 +2592,57 @@ class TestAnalyzerGenerateText:
             "provider/primary-model",
             "provider/fallback-model",
         ]
-        for call in persist_usage.call_args_list:
+        for attempt_no, call in enumerate(persist_usage.call_args_list, start=1):
             persisted_usage = call.args[0]
             assert persisted_usage["total_tokens"] == 12
+            assert persisted_usage["attempt_no"] == attempt_no
+            assert persisted_usage["latency_ms"] >= 0
             assert "_usage_persisted" not in persisted_usage
             assert "_usage_call_type" not in persisted_usage
             assert "_usage_stock_code" not in persisted_usage
             assert call.kwargs == {"call_type": "analysis", "stock_code": "600519"}
+        assert persist_usage.call_args_list[0].args[0]["status"] == "invalid_response"
+        assert persist_usage.call_args_list[0].args[0]["error_code"]
+        assert persist_usage.call_args_list[1].args[0]["status"] == "success"
+
+    def test_transport_failures_and_recovery_each_persist_one_attempt(self):
+        analyzer = self._make_analyzer()
+        analyzer._config_override = SimpleNamespace(
+            litellm_model="provider/primary-model",
+            litellm_fallback_models=["provider/fallback-model"],
+            llm_model_list=[],
+        )
+        valid_json = json.dumps({"sentiment_score": 70, "trend_prediction": "看多"})
+        dispatch_count = 0
+
+        def fake_dispatch(_model, _call_kwargs, **_kwargs):
+            nonlocal dispatch_count
+            dispatch_count += 1
+            if dispatch_count == 1:
+                raise TimeoutError("api_key=secret-value provider timeout")
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=valid_json))],
+                usage=SimpleNamespace(prompt_tokens=5, completion_tokens=2, total_tokens=7),
+            )
+
+        with patch.object(analyzer, "_dispatch_litellm_completion", side_effect=fake_dispatch), \
+                patch("src.analyzer.persist_llm_usage") as persist_usage:
+            text, _model, _usage = analyzer._call_litellm(
+                "test prompt",
+                {"max_tokens": 128, "temperature": 0.7},
+                response_validator=analyzer._validate_json_response,
+                audit_context={"_usage_call_type": "analysis"},
+            )
+
+        assert text == valid_json
+        assert persist_usage.call_count == dispatch_count == 2
+        failed, succeeded = [call.args[0] for call in persist_usage.call_args_list]
+        assert failed["status"] == "failed"
+        assert failed["attempt_no"] == 1
+        assert failed["error_code"] == "TimeoutError"
+        assert "secret-value" not in failed["error_message_sanitized"]
+        assert succeeded["status"] == "success"
+        assert succeeded["attempt_no"] == 2
 
     def test_all_models_invalid_json_raises_all_models_failed_error(self):
         """When all models return non-JSON, _AllModelsFailedError is raised with last_response_text."""

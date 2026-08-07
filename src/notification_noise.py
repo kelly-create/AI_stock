@@ -216,6 +216,7 @@ def evaluate_notification_noise(
     dedup_key: Optional[str] = None,
     cooldown_key: Optional[str] = None,
     now: Optional[datetime] = None,
+    use_process_state: bool = True,
 ) -> NotificationNoiseDecision:
     """Evaluate whether static notification channels should be sent.
 
@@ -231,6 +232,7 @@ def evaluate_notification_noise(
             dedup_key=dedup_key,
             cooldown_key=cooldown_key,
             now=now,
+            use_process_state=use_process_state,
         )
     except Exception as exc:  # pragma: no cover - defensive behavior is tested via monkeypatch.
         logger.warning("通知降噪判断失败，将继续发送静态通知渠道: %s", exc)
@@ -252,6 +254,7 @@ def _evaluate_notification_noise(
     dedup_key: Optional[str],
     cooldown_key: Optional[str],
     now: Optional[datetime],
+    use_process_state: bool,
 ) -> NotificationNoiseDecision:
     route = str(route_type or "default").strip().lower() or "default"
     resolved_severity = normalize_notification_severity(route, severity)
@@ -301,6 +304,20 @@ def _evaluate_notification_noise(
         dedup_key=dedup_key,
         cooldown_key=cooldown_key,
     )
+    if not use_process_state:
+        # Durable planning serializes dedup/cooldown against persisted Outbox
+        # plans. Process-local reservations cannot be an authority before the
+        # SQLite plan transaction commits.
+        return NotificationNoiseDecision(
+            should_send=True,
+            dedup_key=dedup_state_key,
+            cooldown_key=cooldown_state_key,
+            dedup_ttl_seconds=dedup_ttl,
+            cooldown_seconds=cooldown,
+            evaluated_at=effective_now,
+            route_type=route,
+            severity=resolved_severity,
+        )
     with _state_lock:
         _cleanup_expired(now_ts)
         if dedup_ttl > 0 and _dedup_expires_at.get(dedup_state_key, 0) > now_ts:

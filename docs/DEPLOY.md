@@ -61,13 +61,20 @@ docker-compose -f ./docker/docker-compose.yml ps
 
 ### 3.1 资源建议
 
-默认 `docker/docker-compose.yml` 为每个服务设置 `limits.memory: 1G`、`reservations.memory: 512M`，这是完整分析场景的推荐起点。
+默认 Compose 对进程分别限额：`server` 1.25 GiB、durable `worker` 2.5 GiB/3 CPU、`analyzer` 1 GiB。`analyzer` 在 durable 模式是唯一 Scheduler，但在开关关闭时仍执行完整 legacy 分析，因此保留二开前的 1 GiB 上限，避免 Feature Flag 全关时出现资源回归。Worker 的任务并发由 `DURABLE_WORKER_CONCURRENCY` 控制，默认 `3`；旧路径仍使用 `MAX_WORKERS`。
 
-- 最低可尝试：`512M`，仅适合轻量 Web/API、单股、低并发场景，建议设置 `MAX_WORKERS=1`。
-- 推荐：`1G`，适合单独运行 `server` 或 `analyzer` 的常规分析。
-- 高负载：`2G+`，适合同时启动 `server + analyzer`、多股票、默认 `MAX_WORKERS=3`、大盘复盘、新闻扩展、图片报告或选股。
+如果只能使用较低内存，请保持 `DURABLE_JOBS_ENABLED=false` 并只启动 legacy `server`/`analyzer` 拓扑，降低 `MAX_WORKERS`，同时关闭非必要的大盘复盘、新闻扩展和图片报告能力。
 
-如果只能使用 `512M`，请避免同时启动 `server` 和 `analyzer`，并关闭非必要的大盘复盘、新闻扩展和图片报告能力。
+### 3.2 Durable Worker + 现有 Analyzer（按需启用）
+
+先在 `.env` 设置 `DURABLE_JOBS_ENABLED=true`。切换时先启动 Worker，待其健康后再重建现有 `analyzer` 与 `server`：
+
+```bash
+docker compose -f ./docker/docker-compose.yml --profile durable up -d worker
+docker compose -f ./docker/docker-compose.yml up -d --force-recreate analyzer server
+```
+
+Worker 健康检查只读 `provider_health` 中的组件心跳，要求 `DURABLE_WORKER_ID` 对应的心跳处于 `idle`/`busy` 且不超过 `DURABLE_WORKER_HEALTH_MAX_AGE_SECONDS`。同一个 `analyzer` 在开关关闭时执行旧分析，在开启时仅入队；durable 启动时它会在注册任何定时任务前等待新鲜 Worker 心跳，超过 `DURABLE_WORKER_STARTUP_TIMEOUT_SECONDS` 后退出并由容器策略重启。API `server` 只依赖迁移成功，不依赖 Worker 健康。Compose 中不存在第二个 `scheduler` 服务，因此任何 profile 都不会产生两个调度 owner。
 
 ### 4. 常用管理命令
 
@@ -109,7 +116,7 @@ Docker 镜像启动入口会自动创建并修复 `./data`、`./logs`、`./repor
 - `/api/v1/health/ready` 是接流量前的 readiness 接口，会只读检查迁移版本，并验证 SQLite 可读及可写。写探针插入临时 migration marker 后立即回滚，不保留业务数据。
 - Durable Worker 尚未启用时，Worker 心跳项显示为 `skipped`；后续显式要求 Worker 心跳后，心跳失败会令 readiness 返回 HTTP `503`。
 
-Compose 会先运行一次性 `migrator`（`python -m src.migrations --apply`），只有迁移成功后才启动 `server` 和 `analyzer`。镜像内的模式感知探针会检查实际 DSA 进程：`--serve`、`--serve-only`、旧版 WebUI 参数或 `WEBUI_ENABLED=true` 必须使用容器内 `API_PORT`（默认 `8000`）通过 readiness；默认 `python main.py --schedule` 等非 HTTP 模式必须存在仍存活且非僵尸的 DSA 进程，未知命令不会被判为健康。Compose 的 `server` 与 `analyzer` 均继承这项探针，分别执行 API readiness 和调度进程存活检查；同时启动两个服务时，`server` 注入 `DSA_RUNTIME_SCHEDULER_SUPPRESS_START=true`，因此只有 `analyzer` 持有定时调度权。独立启动、未设置该变量的 `--serve-only` 仍会恢复已保存的调度配置。
+Compose 会先运行一次性 `migrator`（`python -m src.migrations --apply`）。legacy 拓扑只在迁移成功后启动 `server` 和 `analyzer`；durable profile 额外启动 Worker，现有 `analyzer` 自身等待数据库组件心跳新鲜后才注册 Scheduler。镜像内的模式感知探针会检查实际 DSA 进程：`--serve`、`--serve-only`、旧版 WebUI 参数或 `WEBUI_ENABLED=true` 必须使用容器内 `API_PORT`（默认 `8000`）通过 readiness；默认 `python main.py --schedule` 等非 HTTP 模式必须存在仍存活且非僵尸的 DSA 进程。`server` 注入 `DSA_RUNTIME_SCHEDULER_SUPPRESS_START=true`，因此只有 `analyzer` 持有调度权。独立启动、未设置该变量的 `--serve-only` 仍会恢复已保存的调度配置；durable 模式下如 Worker 尚未就绪，该进程会保持 Scheduler 停止，但不会让 API readiness 依赖 Worker。
 
 ```bash
 curl --fail "http://127.0.0.1:${API_PORT:-8000}/api/v1/health/ready"
@@ -371,17 +378,28 @@ deploy:
 从一台服务器迁移到另一台：
 
 ```bash
-# 源服务器：打包
+# 源服务器：先做一致性 SQLite 在线备份，再打包其它文件
 cd /opt/stock-analyzer
-tar -czvf stock-analyzer-backup.tar.gz .env data/ logs/ reports/
+mkdir -p backups
+python scripts/sqlite_backup.py backup \
+  --database data/stock_analysis.db \
+  --output backups/stock-analysis.sqlite
+tar --exclude='data/stock_analysis.db' --exclude='data/stock_analysis.db-*' \
+  -czvf stock-analyzer-backup.tar.gz .env data/ logs/ reports/ \
+  backups/stock-analysis.sqlite backups/stock-analysis.sqlite.manifest.json
 
 # 目标服务器：部署
 mkdir -p /opt/stock-analyzer
 cd /opt/stock-analyzer
 git clone <your-repo-url> .
 tar -xzvf stock-analyzer-backup.tar.gz
+python scripts/sqlite_backup.py restore \
+  --backup backups/stock-analysis.sqlite \
+  --target data/stock_analysis.db
 docker-compose -f ./docker/docker-compose.yml up -d
 ```
+
+不要用 `cp` 或 `tar` 直接复制活动的 SQLite 主文件；WAL 中已提交的数据可能尚未合并到主文件。校验、恢复演练和生产替换的完整流程见 [SQLite 在线备份、校验与恢复](operations/sqlite-backup.md)。
 
 ---
 

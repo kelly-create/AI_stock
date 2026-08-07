@@ -1228,6 +1228,9 @@ class Config:
     # === Personal research staged rollout (all disabled by default) ===
     personal_research_enabled: bool = False
     durable_jobs_enabled: bool = False
+    durable_worker_id: Optional[str] = None
+    durable_worker_health_max_age_seconds: int = 45
+    durable_worker_startup_timeout_seconds: int = 120
     tushare_research_enabled: bool = False
     research_factors_enabled: bool = False
     research_evidence_enabled: bool = False
@@ -2234,6 +2237,19 @@ class Config:
                 os.getenv('DURABLE_JOBS_ENABLED'),
                 default=False,
                 field_name='DURABLE_JOBS_ENABLED',
+            ),
+            durable_worker_id=(os.getenv('DURABLE_WORKER_ID') or '').strip() or None,
+            durable_worker_health_max_age_seconds=parse_env_int(
+                os.getenv('DURABLE_WORKER_HEALTH_MAX_AGE_SECONDS'),
+                45,
+                field_name='DURABLE_WORKER_HEALTH_MAX_AGE_SECONDS',
+                minimum=1,
+            ),
+            durable_worker_startup_timeout_seconds=parse_env_int(
+                os.getenv('DURABLE_WORKER_STARTUP_TIMEOUT_SECONDS'),
+                120,
+                field_name='DURABLE_WORKER_STARTUP_TIMEOUT_SECONDS',
+                minimum=1,
             ),
             tushare_research_enabled=parse_env_bool_strict(
                 os.getenv('TUSHARE_RESEARCH_ENABLED'),

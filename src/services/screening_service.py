@@ -1214,6 +1214,7 @@ class ScreeningService:
         market: str,
         max_results: int,
         selection_seed: str = "",
+        run_id: str | None = None,
         progress_callback: Callable[[int, str], None] | None = None,
     ) -> Dict[str, Any]:
         _ensure_screening_enabled(self.config)
@@ -1228,6 +1229,7 @@ class ScreeningService:
                 max_results,
                 self.config,
                 selection_seed=selection_seed,
+                run_id=run_id,
                 progress_callback=progress_callback,
             )
         except ValueError as exc:
@@ -1266,7 +1268,7 @@ class ScreeningService:
             "enabled": True,
             "candidates": selected,
             "candidate_count": len(selected),
-            "run_id": raw_data.get("run_id") or uuid.uuid4().hex,
+            "run_id": str(run_id or "").strip() or raw_data.get("run_id") or uuid.uuid4().hex,
             "strategy": raw_data.get("strategy") or strategy,
             "market": raw_data.get("market") or market,
             "snapshot_count": raw_data.get("snapshot_count"),
@@ -1732,6 +1734,7 @@ def _call_screening_screen(
     config: Config,
     *,
     selection_seed: str = "",
+    run_id: str | None = None,
     progress_callback: Callable[[int, str], None] | None = None,
 ) -> Any:
     # Environment bridging is process-global, so keep it brief: materialize an
@@ -1749,6 +1752,7 @@ def _call_screening_screen(
             max_output=max_results,
             use_llm=True,
             selection_seed=selection_seed,
+            run_id=run_id,
             context=pipeline_context,
             config=pipeline_config,
             progress_callback=progress_callback,

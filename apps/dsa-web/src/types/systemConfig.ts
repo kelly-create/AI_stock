@@ -47,6 +47,7 @@ export interface SystemConfigFieldSchema {
   isSensitive: boolean;
   isRequired: boolean;
   isEditable: boolean;
+  restartRequired?: boolean;
   defaultValue?: string | null;
   options: Array<string | SystemConfigOption>;
   validation: Record<string, unknown>;

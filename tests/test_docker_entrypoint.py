@@ -53,8 +53,10 @@ def test_compose_assigns_scheduler_ownership_only_to_analyzer() -> None:
     compose_path = REPO_ROOT / "docker" / "docker-compose.yml"
     compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
 
-    analyzer_env = compose["services"]["analyzer"]["environment"]
-    server_env = compose["services"]["server"]["environment"]
+    services = compose["services"]
+    analyzer_env = services["analyzer"]["environment"]
+    server_env = services["server"]["environment"]
+    assert "scheduler" not in services
     assert "DSA_RUNTIME_SCHEDULER_SUPPRESS_START" not in analyzer_env
     assert server_env["DSA_RUNTIME_SCHEDULER_SUPPRESS_START"] == "true"
     assert server_env["DATABASE_MIGRATION_MODE"] == "explicit"
@@ -74,6 +76,59 @@ def test_compose_runs_single_migrator_before_api_and_scheduler() -> None:
         assert compose["services"][service_name]["depends_on"] == {
             "migrator": {"condition": "service_completed_successfully"}
         }
+
+
+def test_compose_durable_worker_is_opt_in_without_gating_analyzer_or_api() -> None:
+    compose_path = REPO_ROOT / "docker" / "docker-compose.yml"
+    compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+
+    worker = compose["services"]["worker"]
+    analyzer = compose["services"]["analyzer"]
+    server = compose["services"]["server"]
+
+    assert worker["profiles"] == ["durable"]
+    assert worker["depends_on"] == {
+        "migrator": {"condition": "service_completed_successfully"}
+    }
+    assert analyzer["depends_on"] == {
+        "migrator": {"condition": "service_completed_successfully"}
+    }
+    assert server["depends_on"] == {
+        "migrator": {"condition": "service_completed_successfully"}
+    }
+    assert worker["command"][:3] == ["python", "-m", "src.services.durable_worker"]
+    assert "--healthcheck" in worker["healthcheck"]["test"]
+    assert "--max-heartbeat-age" in worker["healthcheck"]["test"]
+
+
+def test_compose_default_topology_keeps_flag_off_worker_opt_in() -> None:
+    compose_path = REPO_ROOT / "docker" / "docker-compose.yml"
+    compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+    services = compose["services"]
+
+    assert "profiles" not in services["migrator"]
+    assert "profiles" not in services["analyzer"]
+    assert "profiles" not in services["server"]
+    assert services["worker"]["profiles"] == ["durable"]
+    assert "scheduler" not in services
+
+
+def test_compose_applies_pr1_process_resource_limits() -> None:
+    compose_path = REPO_ROOT / "docker" / "docker-compose.yml"
+    compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+
+    limits = {
+        name: service["deploy"]["resources"]["limits"]
+        for name, service in compose["services"].items()
+        if name in {"analyzer", "worker", "server", "searxng"}
+    }
+    # The same process remains a full analyzer when the durable flag is off,
+    # so it must retain the pre-PR1 legacy ceiling.
+    assert limits["analyzer"]["memory"] == "1G"
+    assert limits["worker"] == {"cpus": "3.0", "memory": "2560M"}
+    assert limits["server"]["memory"] == "1280M"
+    if "searxng" in limits:
+        assert limits["searxng"]["memory"] == "512M"
 
 
 def test_dockerfile_bundles_builtin_screening_engine() -> None:

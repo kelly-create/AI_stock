@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -14,6 +16,7 @@ from src.services.decision_signal_extractor import (
     extract_and_persist_from_analysis_result,
 )
 from src.services.decision_signal_service import DecisionSignalService
+from src.services.durable_job_handlers import bind_durable_execution_context
 from src.storage import DatabaseManager
 
 
@@ -83,6 +86,26 @@ def test_build_payload_rejects_invalid_profile_source() -> None:
             query_source="api",
             report_type="simple",
             profile_source="typo",
+        )
+
+
+def test_durable_signal_persistence_failure_reaches_worker() -> None:
+    service = SimpleNamespace(
+        create_signal=Mock(side_effect=RuntimeError("signal write failed")),
+    )
+
+    with (
+        bind_durable_execution_context(SimpleNamespace(job_id="job-signal-failure")),
+        pytest.raises(RuntimeError, match="signal write failed"),
+    ):
+        extract_and_persist_from_analysis_result(
+            _result(),
+            source_report_id=42,
+            trace_id="job-signal-failure",
+            query_source="durable_worker",
+            report_type="full",
+            profile_source=BUILD_PROFILE_SOURCE,
+            service=service,
         )
 
 

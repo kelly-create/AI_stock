@@ -23,7 +23,9 @@ from src.services.runtime_scheduler import (
     RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV,
     RUNTIME_SCHEDULER_SUPPRESS_START_ENV,
     RuntimeSchedulerService,
+    build_agent_event_monitor_background_tasks,
     build_decision_signal_outcome_background_tasks,
+    wait_for_durable_worker,
 )
 
 
@@ -88,6 +90,147 @@ class _SynchronousThread(_NoopThread):
 
 
 class RuntimeSchedulerServiceTestCase(unittest.TestCase):
+    def test_wait_for_durable_worker_is_bounded_and_stops_on_fresh_heartbeat(self) -> None:
+        config = SimpleNamespace(durable_worker_startup_timeout_seconds=10)
+        checks = iter([False, True])
+        sleeps = []
+        clock = iter([0.0, 0.0])
+
+        ready = wait_for_durable_worker(
+            config,
+            heartbeat_checker=lambda _config: next(checks),
+            poll_interval_seconds=1.0,
+            monotonic=lambda: next(clock),
+            sleeper=sleeps.append,
+        )
+
+        self.assertTrue(ready)
+        self.assertEqual(sleeps, [1.0])
+
+        timed_out = wait_for_durable_worker(
+            config,
+            heartbeat_checker=lambda _config: False,
+            timeout_seconds=1,
+            monotonic=MagicMock(side_effect=[0.0, 2.0]),
+            sleeper=MagicMock(),
+        )
+        self.assertFalse(timed_out)
+
+    def test_runtime_scheduler_stays_stopped_when_durable_worker_is_stale(self) -> None:
+        config = SimpleNamespace(
+            durable_jobs_enabled=True,
+            schedule_enabled=True,
+            schedule_time="18:00",
+            schedule_times=["18:00"],
+        )
+        service = RuntimeSchedulerService(config_provider=lambda: config)
+
+        with patch(
+            "src.services.runtime_scheduler.durable_worker_heartbeat_is_fresh",
+            return_value=False,
+        ), patch("src.services.runtime_scheduler.Scheduler") as scheduler_cls:
+            service.start()
+
+        scheduler_cls.assert_not_called()
+        self.assertFalse(service.status()["enabled"])
+        self.assertEqual(
+            service.status()["last_error"],
+            "durable_worker_heartbeat_not_ready",
+        )
+
+    def test_durable_runtime_scheduler_enqueues_orchestration_without_local_runner(self) -> None:
+        config = SimpleNamespace(
+            durable_jobs_enabled=True,
+            schedule_enabled=True,
+            schedule_time="18:00",
+            schedule_times=["18:00"],
+        )
+        runtime_config = SimpleNamespace(durable_jobs_enabled=False)
+        runner = MagicMock()
+        queue = MagicMock(durable_enabled=True)
+        queue.submit_typed_job.return_value = SimpleNamespace(
+            task_id="scheduled-job",
+            status=SimpleNamespace(value="pending"),
+        )
+        service = RuntimeSchedulerService(
+            config_provider=lambda: config,
+            task_runner=runner,
+            schedule_args_overrides={"workers": 3, "no_notify": True},
+        )
+        service._reload_config = lambda: runtime_config
+        service._is_durable_mode(config)
+
+        with patch("src.services.task_queue.get_task_queue", return_value=queue):
+            accepted = service._run_analysis_once(["600519", "000001"])
+
+        self.assertTrue(accepted)
+        runner.assert_not_called()
+        queue.submit_typed_job.assert_called_once_with(
+            "scheduled_analysis",
+            {
+                "stock_codes": ["600519", "000001"],
+                "workers": 3,
+                "no_notify": True,
+                "no_market_review": False,
+                "force_run": False,
+                "dry_run": False,
+                "single_notify": False,
+                "no_context_snapshot": False,
+                "portfolio": None,
+            },
+            stock_code="scheduled_analysis",
+            query_source="scheduler",
+            notify=False,
+            message="Scheduled analysis queued",
+            stage="queued",
+            dedupe_key="scheduler:scheduled_analysis",
+        )
+
+    def test_durable_periodic_tasks_enqueue_typed_jobs_without_local_services(self) -> None:
+        config = SimpleNamespace(
+            durable_jobs_enabled=True,
+            agent_event_monitor_enabled=True,
+            agent_event_monitor_interval_minutes=7,
+            decision_signal_outcome_enabled=True,
+            decision_signal_outcome_interval_minutes=20,
+            decision_signal_outcome_batch_limit=37,
+        )
+        queue = MagicMock(durable_enabled=True)
+        queue.submit_typed_job.side_effect = [
+            SimpleNamespace(task_id="event-job", status=SimpleNamespace(value="pending")),
+            SimpleNamespace(task_id="outcome-job", status=SimpleNamespace(value="pending")),
+        ]
+
+        event_tasks = build_agent_event_monitor_background_tasks(
+            config,
+            config_provider=lambda: config,
+        )
+        outcome_tasks = build_decision_signal_outcome_background_tasks(
+            config,
+            config_provider=lambda: config,
+        )
+        with patch("src.services.task_queue.get_task_queue", return_value=queue), patch(
+            "src.services.alert_worker.AlertWorker"
+        ) as alert_worker, patch(
+            "src.services.decision_signal_outcome_service.DecisionSignalOutcomeService"
+        ) as outcome_service:
+            event_tasks[0]["task"]()
+            outcome_tasks[0]["task"]()
+
+        alert_worker.assert_not_called()
+        outcome_service.assert_not_called()
+        self.assertEqual(event_tasks[0]["interval_seconds"], 7 * 60)
+        self.assertEqual(outcome_tasks[0]["interval_seconds"], 20 * 60)
+        self.assertEqual(queue.submit_typed_job.call_count, 2)
+        self.assertEqual(queue.submit_typed_job.call_args_list[0].args, (
+            "event_monitor",
+            {"rules": None, "send_notification": True},
+        ))
+        self.assertEqual(queue.submit_typed_job.call_args_list[1].args, (
+            "decision_signal_outcomes",
+            {"limit": 37},
+        ))
+
     def test_builds_decision_signal_outcome_background_task_with_bounded_config(self) -> None:
         service = MagicMock()
         service.run_outcomes.return_value = {

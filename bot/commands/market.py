@@ -12,6 +12,12 @@ import threading
 from typing import Any, List, Optional
 
 from bot.commands.base import BotCommand
+from bot.durable import (
+    accepted_bot_response,
+    bot_idempotency_key,
+    build_bot_target,
+    get_durable_bot_queue,
+)
 from bot.models import BotMessage, BotResponse
 
 logger = logging.getLogger(__name__)
@@ -50,6 +56,40 @@ class MarketCommand(BotCommand):
     def execute(self, message: BotMessage, args: List[str]) -> BotResponse:
         """执行大盘复盘命令"""
         config = self._get_config()
+        durable_queue = get_durable_bot_queue()
+        if durable_queue is not None:
+            try:
+                target = build_bot_target(message)
+                configured_region = str(
+                    getattr(config, "market_review_region", "cn") or "cn"
+                )
+                task = durable_queue.submit_typed_job(
+                    "market_review",
+                    {
+                        "region": configured_region,
+                        "send_notification": True,
+                        "merge_notification": False,
+                        "save_report_file": True,
+                        "persist_history": True,
+                        "trigger_source": "bot",
+                        "apply_trading_day_filter": bool(
+                            getattr(config, "trading_day_check_enabled", True)
+                        ),
+                        "bot_target": target,
+                    },
+                    stock_code="market_review",
+                    query_source="bot",
+                    notify=True,
+                    region=configured_region,
+                    message="Bot market review accepted",
+                    stage="queued",
+                    idempotency_key=bot_idempotency_key(target, self.name),
+                )
+                return accepted_bot_response(task.task_id, "大盘复盘任务")
+            except Exception as exc:
+                logger.error("[MarketCommand] durable submit failed: %s", exc)
+                return BotResponse.error_response(f"提交大盘复盘任务失败: {str(exc)[:100]}")
+
         lock_token = self._try_acquire_market_review_lock(config)
         if lock_token is None:
             return BotResponse.markdown_response("⚠️ 大盘复盘正在执行中，请稍后再试。")

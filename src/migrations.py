@@ -38,6 +38,7 @@ except ImportError:  # pragma: no cover - POSIX
 
 BASELINE_SCHEMA_VERSION = "2026-06-05-create-all-baseline"
 PR0_CONVERGENCE_SCHEMA_VERSION = "2026-08-07-pr0-schema-convergence"
+PR1_DURABLE_JOBS_SCHEMA_VERSION = "2026-08-08-pr1-durable-jobs"
 
 
 class MigrationError(RuntimeError):
@@ -88,6 +89,14 @@ def _converge_pr0_storage_schema(engine: Engine) -> None:
     run_storage_schema_convergence(engine)
 
 
+def _upgrade_pr1_durable_jobs_schema(engine: Engine) -> None:
+    """Install the durable job, event, outbox, and provider-health contract."""
+
+    from src.storage import run_pr1_durable_jobs_schema_upgrade
+
+    run_pr1_durable_jobs_schema_upgrade(engine)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=BASELINE_SCHEMA_VERSION,
@@ -101,6 +110,14 @@ MIGRATIONS: tuple[Migration, ...] = (
             "and intelligence scope/index contracts"
         ),
         apply=_converge_pr0_storage_schema,
+    ),
+    Migration(
+        version=PR1_DURABLE_JOBS_SCHEMA_VERSION,
+        description=(
+            "Add durable analysis jobs, events, notification outbox, provider "
+            "health, and cross-record idempotency/trace columns"
+        ),
+        apply=_upgrade_pr1_durable_jobs_schema,
     ),
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version

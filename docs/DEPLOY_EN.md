@@ -57,13 +57,20 @@ docker-compose -f ./docker/docker-compose.yml ps
 
 ### 3.1 Resource Recommendations
 
-The default `docker/docker-compose.yml` sets `limits.memory: 1G` and `reservations.memory: 512M` for each service. Treat this as the recommended starting point for full analysis workloads.
+Compose applies per-process limits: 1.25 GiB for `server`, 2.5 GiB/3 CPUs for the durable `worker`, and 1 GiB for `analyzer`. The `analyzer` is the sole Scheduler in durable mode, but it still executes full legacy analysis while the flag is off, so it retains the pre-PR1 1 GiB ceiling and does not regress flag-off deployments. `DURABLE_WORKER_CONCURRENCY` controls durable handler concurrency and defaults to `3`; the legacy path still uses `MAX_WORKERS`.
 
-- Minimum trial: `512M`, only for lightweight Web/API usage, single-stock runs, and low concurrency. Set `MAX_WORKERS=1`.
-- Recommended: `1G`, suitable for normal analysis when running either `server` or `analyzer`.
-- Heavy workloads: `2G+`, suitable when running `server + analyzer` together, multi-stock analysis, default `MAX_WORKERS=3`, market review, news expansion, image reports, or screening.
+For a lower-memory host, keep `DURABLE_JOBS_ENABLED=false`, use only the legacy `server`/`analyzer` topology, lower `MAX_WORKERS`, and disable non-essential market review, news expansion, and image reports.
 
-If you can only use `512M`, avoid starting both `server` and `analyzer`, and disable non-essential market review, news expansion, and image report features.
+### 3.2 Durable Worker + existing Analyzer (opt in)
+
+Set `DURABLE_JOBS_ENABLED=true` in `.env`. Start the Worker first, then recreate the existing `analyzer` and `server` after it becomes healthy:
+
+```bash
+docker compose -f ./docker/docker-compose.yml --profile durable up -d worker
+docker compose -f ./docker/docker-compose.yml up -d --force-recreate analyzer server
+```
+
+The Worker probe reads the component heartbeat in `provider_health` and only accepts the `DURABLE_WORKER_ID` row while it is `idle`/`busy` and no older than `DURABLE_WORKER_HEALTH_MAX_AGE_SECONDS`. The same `analyzer` executes the legacy path with the flag off and only enqueues with it on. During durable startup it waits for a fresh Worker heartbeat before registering any schedule and exits after `DURABLE_WORKER_STARTUP_TIMEOUT_SECONDS` so the container restart policy can retry. API `server` depends only on a successful migration, not Worker health. Compose defines no second `scheduler` service, so no profile can create two schedule owners.
 
 ### 4. Common Management Commands
 
@@ -105,7 +112,7 @@ If you explicitly set `--user` / Compose `user:`, or use read-only mounts, rootl
 - `/api/v1/health/ready` is the traffic readiness endpoint. It inspects migration state without applying migrations, then verifies SQLite read and write access. The write probe inserts a transient migration marker and rolls the transaction back immediately.
 - Before Durable Worker is enabled, the worker-heartbeat check is reported as `skipped`. Once a deployment explicitly requires that heartbeat, a missing or stale heartbeat makes readiness return HTTP `503`.
 
-Compose first runs a one-shot `migrator` (`python -m src.migrations --apply`) and starts `server` and `analyzer` only after that command succeeds. The image probe is mode-aware: `--serve`, `--serve-only`, legacy WebUI arguments, or `WEBUI_ENABLED=true` must pass readiness on the configured container `API_PORT` (default `8000`); the default `python main.py --schedule` and other non-HTTP modes must have a live, non-zombie DSA process, and an unrelated command is never reported healthy. Both Compose services inherit the probe: `server` checks API readiness and `analyzer` checks scheduler-process liveness. When both services run, `server` receives `DSA_RUNTIME_SCHEDULER_SUPPRESS_START=true`, so only `analyzer` owns the schedule. A standalone `--serve-only` process without that variable still restores saved scheduling configuration.
+Compose first runs a one-shot `migrator` (`python -m src.migrations --apply`). The legacy topology starts `server` and `analyzer` after migration; the durable profile additionally starts the Worker, and the existing `analyzer` does not register its Scheduler until the database component heartbeat is fresh. The image probe is mode-aware: `--serve`, `--serve-only`, legacy WebUI arguments, or `WEBUI_ENABLED=true` must pass readiness on the configured container `API_PORT` (default `8000`); `python main.py --schedule` and other non-HTTP modes must have a live, non-zombie DSA process. `server` receives `DSA_RUNTIME_SCHEDULER_SUPPRESS_START=true`, so only `analyzer` owns the schedule. A standalone `--serve-only` process without that variable still restores saved scheduling configuration; in durable mode it keeps scheduling stopped when Worker is unavailable without making API readiness depend on Worker.
 
 ```bash
 curl --fail "http://127.0.0.1:${API_PORT:-8000}/api/v1/health/ready"
@@ -329,17 +336,28 @@ For a constrained `512M` deployment, set `MAX_WORKERS=1`, start only one of `ser
 Migrate from one server to another:
 
 ```bash
-# Source server: Package
+# Source server: take a consistent SQLite online backup, then package other files
 cd /opt/stock-analyzer
-tar -czvf stock-analyzer-backup.tar.gz .env data/ logs/ reports/
+mkdir -p backups
+python scripts/sqlite_backup.py backup \
+  --database data/stock_analysis.db \
+  --output backups/stock-analysis.sqlite
+tar --exclude='data/stock_analysis.db' --exclude='data/stock_analysis.db-*' \
+  -czvf stock-analyzer-backup.tar.gz .env data/ logs/ reports/ \
+  backups/stock-analysis.sqlite backups/stock-analysis.sqlite.manifest.json
 
 # Target server: Deploy
 mkdir -p /opt/stock-analyzer
 cd /opt/stock-analyzer
 git clone <your-repo-url> .
 tar -xzvf stock-analyzer-backup.tar.gz
+python scripts/sqlite_backup.py restore \
+  --backup backups/stock-analysis.sqlite \
+  --target data/stock_analysis.db
 docker-compose -f ./docker/docker-compose.yml up -d
 ```
+
+Do not copy an active SQLite main file with `cp` or `tar`; committed WAL data may not yet be merged into that file. See the [SQLite online backup, verification, and restore runbook](operations/sqlite-backup.md) (Chinese) for strict verification, restore drills, and production replacement.
 
 ---
 

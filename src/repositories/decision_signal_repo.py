@@ -8,12 +8,14 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import and_, desc, func, or_, select
+from sqlalchemy.exc import IntegrityError
 
 from src.schemas.decision_profile import (
     DECISION_PROFILE_FILTER_ALL,
     DecisionProfileFilter,
 )
 from src.storage import (
+    AnalysisJobRecord,
     DatabaseManager,
     DecisionSignalRecord,
     to_utc_naive_datetime,
@@ -62,6 +64,7 @@ class DecisionSignalRepository:
     def create(self, fields: Dict[str, Any]) -> DecisionSignalRecord:
         fields = self._normalize_datetime_fields(fields)
         with self.db.get_session() as session:
+            self._assert_current_durable_lease_in_session(session)
             row = DecisionSignalRecord(**fields)
             session.add(row)
             session.commit()
@@ -77,6 +80,11 @@ class DecisionSignalRepository:
         self.expire_due_signals()
         fields = self._normalize_datetime_fields(fields)
         with self.db.get_session() as session:
+            # The heartbeat/checkpoint in DecisionSignalService is only a safe
+            # boundary hint.  Revalidate the fencing token inside the same
+            # SQLite write transaction that can refresh or insert a signal so
+            # an expired attempt cannot race a reclaimed Worker.
+            self._assert_current_durable_lease_in_session(session)
             existing = self._find_existing_in_session(session=session, fields=fields)
             if existing is not None:
                 if self._should_refresh_existing(existing, fields):
@@ -141,7 +149,26 @@ class DecisionSignalRepository:
 
             row = DecisionSignalRecord(**fields)
             session.add(row)
-            session.commit()
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                idempotency_key = fields.get("idempotency_key")
+                if not idempotency_key:
+                    raise
+                existing = session.execute(
+                    select(DecisionSignalRecord)
+                    .where(DecisionSignalRecord.idempotency_key == idempotency_key)
+                    .limit(1)
+                ).scalar_one_or_none()
+                if existing is None:
+                    raise
+                return DecisionSignalCreateResult(
+                    row=existing,
+                    created=False,
+                    duplicate=True,
+                    invalidation_reference_at=existing.created_at,
+                )
             session.refresh(row)
             return DecisionSignalCreateResult(
                 row=row,
@@ -281,6 +308,7 @@ class DecisionSignalRepository:
         replace_metadata: bool = False,
     ) -> Optional[DecisionSignalRecord]:
         with self.db.get_session() as session:
+            self._assert_current_durable_lease_in_session(session)
             row = session.execute(
                 select(DecisionSignalRecord).where(DecisionSignalRecord.id == signal_id).limit(1)
             ).scalar_one_or_none()
@@ -297,6 +325,7 @@ class DecisionSignalRepository:
     def expire_due_signals(self, now: Optional[datetime] = None) -> int:
         now_value = to_utc_naive_datetime(now) if now is not None else utc_naive_now()
         with self.db.get_session() as session:
+            self._assert_current_durable_lease_in_session(session, now=now_value)
             rows = session.execute(
                 select(DecisionSignalRecord).where(
                     DecisionSignalRecord.status == "active",
@@ -309,6 +338,48 @@ class DecisionSignalRepository:
                 row.updated_at = now_value
             session.commit()
             return len(rows)
+
+    @staticmethod
+    def _current_durable_context() -> Optional[Any]:
+        """Resolve the optional Worker context without coupling legacy startup."""
+
+        try:
+            from src.services.durable_job_handlers import (
+                get_optional_durable_execution_context,
+            )
+
+            return get_optional_durable_execution_context()
+        except (ImportError, RuntimeError):
+            return None
+
+    @classmethod
+    def _assert_current_durable_lease_in_session(
+        cls,
+        session: Any,
+        *,
+        now: Optional[datetime] = None,
+    ) -> None:
+        """Fence every signal mutation in its own database transaction."""
+
+        context = cls._current_durable_context()
+        if context is None:
+            return
+        current = to_utc_naive_datetime(now) if now is not None else utc_naive_now()
+        live_job_id = session.execute(
+            select(AnalysisJobRecord.task_id).where(
+                AnalysisJobRecord.task_id == context.job_id,
+                AnalysisJobRecord.status == "processing",
+                AnalysisJobRecord.lease_owner == context.worker_id,
+                AnalysisJobRecord.lease_token == context.lease_token,
+                AnalysisJobRecord.lease_expires_at > current,
+            )
+        ).scalar_one_or_none()
+        if live_job_id is None:
+            from src.services.durable_jobs import StaleLeaseError
+
+            raise StaleLeaseError(
+                "durable decision signal write rejected after lease loss"
+            )
 
     @staticmethod
     def _normalize_datetime_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
@@ -345,6 +416,15 @@ class DecisionSignalRepository:
 
     @staticmethod
     def _find_existing_in_session(*, session: Any, fields: Dict[str, Any]) -> Optional[DecisionSignalRecord]:
+        idempotency_key = fields.get("idempotency_key")
+        if idempotency_key:
+            existing = session.execute(
+                select(DecisionSignalRecord)
+                .where(DecisionSignalRecord.idempotency_key == idempotency_key)
+                .limit(1)
+            ).scalar_one_or_none()
+            if existing is not None:
+                return existing
         source_report_id = fields.get("source_report_id")
         trace_id = fields.get("trace_id")
         source_type = fields.get("source_type")

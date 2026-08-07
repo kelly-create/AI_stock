@@ -83,6 +83,17 @@ _RUNTIME_ENV_FILE_KEYS = set()
 _PUBLIC_BIND_HOSTS = frozenset({"0.0.0.0", "::", "[::]", "*"})
 
 
+def _durable_execution_active() -> bool:
+    try:
+        from src.services.durable_job_handlers import (
+            get_optional_durable_execution_context,
+        )
+
+        return get_optional_durable_execution_context() is not None
+    except (ImportError, RuntimeError):
+        return False
+
+
 def _get_active_env_path() -> Path:
     env_file = os.getenv("ENV_FILE")
     if env_file:
@@ -939,6 +950,8 @@ def run_full_analysis(
                         f"# 📈 大盘复盘\n\n{market_report}",
                         email_send_to_all=True,
                         route_type="report",
+                        dedup_key="scheduled-analysis:market-review",
+                        cooldown_key="scheduled-analysis:market-review",
                     ):
                         logger.info("复用本轮大盘上下文推送大盘复盘成功")
                     else:
@@ -961,6 +974,7 @@ def run_full_analysis(
                     override_region=market_review_region,
                     query_id=query_id,
                     trigger_source=review_trigger_source,
+                    notification_dedup_key="scheduled-analysis:market-review",
                 )
                 # 如果复盘仍未执行成功，再做一次复用历史/缓存读取（防止与并发运行竞态）。
                 if not review_result and should_use_daily_market_context:
@@ -1004,7 +1018,13 @@ def run_full_analysis(
             if parts:
                 combined_content = "\n\n---\n\n".join(parts)
                 if pipeline.notifier.is_available():
-                    if pipeline.notifier.send(combined_content, email_send_to_all=True, route_type="report"):
+                    if pipeline.notifier.send(
+                        combined_content,
+                        email_send_to_all=True,
+                        route_type="report",
+                        dedup_key="scheduled-analysis:combined-report",
+                        cooldown_key="scheduled-analysis:combined-report",
+                    ):
                         logger.info("已合并推送（个股+大盘复盘）")
                     else:
                         logger.warning("合并推送失败")
@@ -1058,10 +1078,15 @@ def run_full_analysis(
                         pipeline.notifier.send(
                             f"[{now.strftime('%Y-%m-%d %H:%M')}] 复盘文档创建成功: {doc_url}",
                             route_type="report",
+                            dedup_key="scheduled-analysis:document-link",
+                            cooldown_key="scheduled-analysis:document-link",
                         )
 
         except Exception as e:
             logger.error(f"飞书文档生成失败: {e}")
+
+            if _durable_execution_active():
+                raise
 
         # === Auto backtest ===
         _run_auto_backtest(config)
@@ -1555,16 +1580,53 @@ def main() -> int:
             logger.info(f"启动时立即执行: {should_run_immediately}")
 
             from src.scheduler import run_with_schedule
+            durable_scheduler_enabled = (
+                getattr(config, "durable_jobs_enabled", False) is True
+            )
+            if durable_scheduler_enabled:
+                from src.services.runtime_scheduler import wait_for_durable_worker
+
+                logger.info("Durable scheduler is waiting for a fresh Worker heartbeat")
+                if not wait_for_durable_worker(config):
+                    logger.error(
+                        "Durable scheduler startup timed out before a fresh Worker heartbeat"
+                    )
+                    return 1
             scheduled_stock_codes = _resolve_scheduled_stock_codes(stock_codes)
             schedule_time_provider = _build_schedule_time_provider(config.schedule_time)
             schedule_times_provider = _build_schedule_times_provider(config.schedule_time)
 
             def scheduled_task():
                 runtime_config = _reload_runtime_config()
+                if durable_scheduler_enabled:
+                    from src.services.runtime_scheduler import (
+                        enqueue_durable_scheduled_analysis,
+                    )
+
+                    enqueue_durable_scheduled_analysis(
+                        runtime_config,
+                        args,
+                        scheduled_stock_codes,
+                    )
+                    return
                 run_full_analysis(runtime_config, args, scheduled_stock_codes)
 
             background_tasks = []
-            if getattr(config, 'agent_event_monitor_enabled', False):
+            if (
+                getattr(config, 'agent_event_monitor_enabled', False)
+                and durable_scheduler_enabled
+            ):
+                from src.services.runtime_scheduler import (
+                    build_agent_event_monitor_background_tasks,
+                )
+
+                background_tasks.extend(
+                    build_agent_event_monitor_background_tasks(
+                        config,
+                        config_provider=_reload_runtime_config,
+                    )
+                )
+            elif getattr(config, 'agent_event_monitor_enabled', False):
                 from src.services.alert_worker import AlertWorker
 
                 interval_minutes = max(1, getattr(config, 'agent_event_monitor_interval_minutes', 5))

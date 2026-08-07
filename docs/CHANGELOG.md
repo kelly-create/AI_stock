@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] PR1 新增长生命周期持久任务 Worker 与 durable Compose profile；现有 `analyzer` 在 durable 模式下等待 Worker 数据库心跳后只入队，事件监控和 Decision Signal Outcome 也统一入队，API readiness 不依赖 Worker，关闭开关时保留原有进程内路径且不启动 Worker。
+- [新功能] PR1 任务事件支持 `Last-Event-ID` 断线续传与安全取消，通知改为逐渠道 Outbox 并以 `delivery_unknown` 避免崩溃后自动重发；Bot 分析命令统一入队，新增带完整性 manifest 的 SQLite 在线备份与隔离恢复工具。
 - [修复] 收敛 PR0 配置与容器契约：System Config 正确识别并展示个人投研分类，SQLite 单例在释放失败时仍可安全复位，报告模板随镜像发布并纳入 `docker-app-source-v2` 漂移清单；CI 同时覆盖 PR 与直接推送 `main`。
 - [修复] 前向移植现网数据与分析链修复：A 股基本面优先复用 Tushare HTTP 网关并由 AkShare 仅补齐关键缺口，辅助基本面阶段使用独立短超时；LLM 流式 usage 显式请求并按每次真实 provider 尝试单次落库，避免 JSON 校验 fallback 漏记或最终响应重复计费。
 - [修复] 独立 `--serve-only` 重启后恢复已持久化调度但不立即执行；Compose 双服务部署显式由 `analyzer` 单独持有调度权，`server` 不会因启动或 Web 配置热更新创建第二个调度器。定时维护自动推进 Decision Signal Outcome、热读取批量上限，并跳过非方向信号和不受支持的自然周期。

@@ -16,11 +16,14 @@ A股自选股智能分析系统 - 通知层
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import math
 import time
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import List, Dict, Any, Optional, Tuple, TYPE_CHECKING
+from dataclasses import asdict, dataclass, field, is_dataclass
+from datetime import date, datetime
+from typing import List, Dict, Any, Mapping, Optional, Tuple, TYPE_CHECKING
 from enum import Enum
 
 from src.config import Config, get_config
@@ -34,6 +37,7 @@ from src.notification_contracts import is_feishu_static_configured
 from src.notification_noise import (
     NotificationNoiseDecision,
     evaluate_notification_noise,
+    normalize_notification_severity,
     record_notification_noise,
     release_notification_noise,
 )
@@ -61,7 +65,11 @@ from src.schemas.decision_action import (
     display_operation_advice_for_result,
 )
 from bot.models import BotMessage
-from src.utils.sanitize import sanitize_diagnostic_text
+from src.utils.sanitize import (
+    sanitize_decision_signal_payload,
+    sanitize_decision_signal_text,
+    sanitize_diagnostic_text,
+)
 from src.formatters import strip_hidden_markdown_metadata
 from src.utils.data_processing import (
     signal_attribution_has_content,
@@ -211,6 +219,7 @@ class ChannelAttemptResult:
     retryable: bool = False
     latency_ms: Optional[int] = None
     diagnostics: Optional[str] = None
+    queued: bool = False
 
 
 @dataclass
@@ -288,7 +297,12 @@ class NotificationService(
     注意：所有已配置的渠道都会收到推送
     """
 
-    def __init__(self, source_message: Optional[BotMessage] = None):
+    def __init__(
+        self,
+        source_message: Optional[BotMessage] = None,
+        *,
+        outbox_store: Optional[Any] = None,
+    ):
         """
         初始化通知服务
 
@@ -297,6 +311,7 @@ class NotificationService(
         config = get_config()
         self._config = config
         self._source_message = source_message
+        self._notification_outbox_store = outbox_store
         self._context_channels: List[str] = []
 
         # Markdown 转图片（Issue #289）
@@ -618,6 +633,26 @@ class NotificationService(
             cooldown_key=cooldown_key,
         )
 
+    def evaluate_durable_noise_control(
+        self,
+        content: str,
+        *,
+        route_type: Optional[str] = None,
+        severity: Optional[str] = None,
+        dedup_key: Optional[str] = None,
+        cooldown_key: Optional[str] = None,
+    ) -> NotificationNoiseDecision:
+        """Evaluate policy without using process-local dedup as authority."""
+        return evaluate_notification_noise(
+            self._config,
+            content=content,
+            route_type=route_type,
+            severity=severity,
+            dedup_key=dedup_key,
+            cooldown_key=cooldown_key,
+            use_process_state=False,
+        )
+
     @staticmethod
     def record_noise_control(decision: NotificationNoiseDecision) -> None:
         """Record static-channel notification noise state after a successful send."""
@@ -627,6 +662,36 @@ class NotificationService(
     def release_noise_control(decision: NotificationNoiseDecision) -> None:
         """Release static-channel in-flight noise reservation after send failure."""
         release_notification_noise(decision)
+
+    @staticmethod
+    def record_durable_noise_control(payload: Any) -> None:
+        """Finalize persisted noise metadata only after external delivery."""
+        if not isinstance(payload, Mapping):
+            return
+        try:
+            evaluated_raw = payload.get("evaluated_at")
+            evaluated_at = (
+                datetime.fromisoformat(str(evaluated_raw))
+                if evaluated_raw
+                else None
+            )
+            decision = NotificationNoiseDecision(
+                should_send=True,
+                route_type=str(payload.get("route_type") or "default"),
+                severity=str(payload.get("severity") or "info"),
+                dedup_key=(str(payload["dedup_key"]) if payload.get("dedup_key") else None),
+                cooldown_key=(
+                    str(payload["cooldown_key"])
+                    if payload.get("cooldown_key")
+                    else None
+                ),
+                dedup_ttl_seconds=max(0, int(payload.get("dedup_ttl_seconds") or 0)),
+                cooldown_seconds=max(0, int(payload.get("cooldown_seconds") or 0)),
+                evaluated_at=evaluated_at,
+            )
+            record_notification_noise(decision)
+        except (TypeError, ValueError) as exc:
+            logger.warning("Invalid durable notification noise metadata ignored: %s", exc)
 
     # ===== Context channel =====
     def _has_context_channel(self) -> bool:
@@ -2514,6 +2579,487 @@ class NotificationService(
     def _sanitize_notification_diagnostics(text: Any) -> str:
         return sanitize_diagnostic_text(text)
 
+    def _get_durable_execution_context(self) -> Optional[Any]:
+        """Return the active durable worker context without changing legacy calls."""
+        if not bool(getattr(self._config, "durable_jobs_enabled", False)):
+            return None
+        from src.services.durable_job_handlers import (
+            get_optional_durable_execution_context,
+        )
+
+        return get_optional_durable_execution_context()
+
+    @staticmethod
+    def _sanitize_outbox_content(content: str) -> str:
+        """Redact obvious credentials while preserving normal Markdown byte-for-byte."""
+        sanitized_lines: List[str] = []
+        for line in str(content).splitlines(keepends=True):
+            body = line.rstrip("\r\n")
+            ending = line[len(body):]
+            collapsed = " ".join(body.strip().split())
+            sanitized = sanitize_decision_signal_text(body)
+            if sanitized == collapsed:
+                sanitized_lines.append(line)
+                continue
+            indent = body[: len(body) - len(body.lstrip(" \t"))]
+            sanitized_lines.append(f"{indent}{sanitized}{ending}")
+        if not sanitized_lines and content:
+            return sanitize_decision_signal_text(content)
+        return "".join(sanitized_lines)
+
+    @classmethod
+    def _json_safe_outbox_value(cls, value: Any) -> Any:
+        """Normalize a caller-provided image payload without repr or secret fields."""
+        if value is None or isinstance(value, (str, bool, int)):
+            return value
+        if isinstance(value, float):
+            return value if math.isfinite(value) else None
+        if isinstance(value, (date, datetime)):
+            return value.isoformat()
+        if isinstance(value, Enum):
+            return cls._json_safe_outbox_value(value.value)
+        if is_dataclass(value):
+            try:
+                return cls._json_safe_outbox_value(asdict(value))
+            except (TypeError, ValueError):
+                return "[unsupported]"
+        if hasattr(value, "model_dump") and callable(value.model_dump):
+            try:
+                return cls._json_safe_outbox_value(value.model_dump(mode="json"))
+            except (TypeError, ValueError):
+                return "[unsupported]"
+        if isinstance(value, Mapping):
+            sanitized = sanitize_decision_signal_payload(dict(value))
+            result: Dict[str, Any] = {}
+            for key, item in sanitized.items():
+                compact_key = "".join(
+                    char for char in str(key).lower() if char.isalnum()
+                )
+                # ``sanitize_decision_signal_payload`` marks all recognized
+                # credential-bearing values. Drop those keys entirely so the
+                # durable envelope cannot become a second secret store.
+                if item == "[REDACTED]" or compact_key in {
+                    "rawdata",
+                    "token",
+                    "bottoken",
+                    "apitoken",
+                    "accesstoken",
+                    "refreshtoken",
+                    "webhook",
+                    "webhookurl",
+                    "password",
+                    "secret",
+                    "authorization",
+                    "cookie",
+                }:
+                    continue
+                result[str(key)] = cls._json_safe_outbox_value(item)
+            return result
+        if isinstance(value, set):
+            normalized = [cls._json_safe_outbox_value(item) for item in value]
+            return sorted(
+                normalized,
+                key=lambda item: json.dumps(
+                    item,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+        if isinstance(value, (list, tuple)):
+            return [cls._json_safe_outbox_value(item) for item in value]
+        return "[unsupported]"
+
+    @staticmethod
+    def _recipient_fingerprint(channel: str, material: Any) -> str:
+        canonical = json.dumps(
+            material,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return f"{channel}:sha256:{digest}"
+
+    @classmethod
+    def _context_recipient_identity(cls, target: Mapping[str, Any]) -> str:
+        allowed = {
+            "platform": str(target.get("platform") or "").strip().lower(),
+            "chat_id": str(target.get("chat_id") or "").strip(),
+            "message_id": str(target.get("message_id") or "").strip(),
+        }
+        return cls._recipient_fingerprint("context", allowed)
+
+    def _static_delivery_target(
+        self,
+        channel: NotificationChannel,
+        *,
+        email_stock_codes: Optional[List[str]],
+        email_send_to_all: bool,
+    ) -> Dict[str, Any]:
+        """Return only non-secret target fields that must survive a restart."""
+        if channel == NotificationChannel.EMAIL:
+            if email_send_to_all and self._stock_email_groups:
+                receivers = self.get_all_email_receivers()
+            elif email_stock_codes and self._stock_email_groups:
+                receivers = self.get_receivers_for_stocks(email_stock_codes)
+            else:
+                receivers = list(self._email_config.get("receivers") or [])
+            return {"receivers": [str(item) for item in receivers]}
+        if channel == NotificationChannel.TELEGRAM:
+            return {
+                "chat_id": str(self._telegram_config.get("chat_id") or ""),
+                "message_thread_id": str(
+                    self._telegram_config.get("message_thread_id") or ""
+                ),
+            }
+        return {}
+
+    def _static_recipient_identity(
+        self,
+        channel: NotificationChannel,
+        delivery_target: Optional[Mapping[str, Any]] = None,
+    ) -> str:
+        """Fingerprint the frozen destination without persisting credentials."""
+        target = dict(delivery_target or {})
+        if channel in {NotificationChannel.EMAIL, NotificationChannel.TELEGRAM}:
+            material: Any = target
+        elif channel == NotificationChannel.WECHAT:
+            material = {"endpoint": self._wechat_url}
+        elif channel == NotificationChannel.DINGTALK:
+            material = {"endpoint": self.webhook_url}
+        elif channel == NotificationChannel.FEISHU:
+            material = {
+                "endpoint": self._feishu_url,
+                "chat_id": None if self._feishu_url else self._feishu_chat_id,
+            }
+        elif channel == NotificationChannel.PUSHOVER:
+            material = {"user": self._pushover_config.get("user_key")}
+        elif channel == NotificationChannel.NTFY:
+            material = {"endpoint": self._ntfy_url}
+        elif channel == NotificationChannel.GOTIFY:
+            material = {"endpoint": self._gotify_url}
+        elif channel == NotificationChannel.PUSHPLUS:
+            material = {"recipient": self._pushplus_token}
+        elif channel == NotificationChannel.SERVERCHAN3:
+            material = {"recipient": self._serverchan3_sendkey}
+        elif channel == NotificationChannel.CUSTOM:
+            material = {"endpoints": list(self._custom_webhook_urls)}
+        elif channel == NotificationChannel.DISCORD:
+            material = {
+                "endpoint": self._discord_config.get("webhook_url"),
+                "channel_id": (
+                    None
+                    if self._discord_config.get("webhook_url")
+                    else self._discord_config.get("channel_id")
+                ),
+            }
+        elif channel == NotificationChannel.SLACK:
+            material = {
+                "endpoint": self._slack_webhook_url,
+                "channel_id": (
+                    None if self._slack_webhook_url else self._slack_channel_id
+                ),
+            }
+        elif channel == NotificationChannel.ASTRBOT:
+            material = {"endpoint": self._astrbot_config.get("astrbot_url")}
+        else:
+            material = {"channel": channel.value}
+        return self._recipient_fingerprint(channel.value, material)
+
+    def _durable_context_target(self) -> Tuple[Optional[str], Optional[Dict[str, str]]]:
+        """Freeze a safe bot target, or identify an unsafe DingTalk session."""
+        platform = self._source_platform()
+        if platform == "dingtalk" or self._extract_dingtalk_session_webhook() is not None:
+            return "unsupported_dingtalk_session", None
+
+        message_id = str(getattr(self._source_message, "message_id", "") or "")
+        feishu_info = self._extract_feishu_reply_info()
+        if feishu_info is not None:
+            return "context_feishu", {
+                "platform": "feishu",
+                "chat_id": str(feishu_info["chat_id"]),
+                "message_id": message_id,
+            }
+        telegram_chat_id = self._extract_telegram_context_chat_id()
+        if telegram_chat_id is not None:
+            return "context_telegram", {
+                "platform": "telegram",
+                "chat_id": str(telegram_chat_id),
+                "message_id": message_id,
+            }
+        if platform:
+            return None, None
+        return None, None
+
+    def _plan_durable_notification(
+        self,
+        content: str,
+        *,
+        email_stock_codes: Optional[List[str]],
+        email_send_to_all: bool,
+        route_type: Optional[str],
+        severity: Optional[str],
+        dedup_key: Optional[str],
+        cooldown_key: Optional[str],
+        structured_payload: Optional[Dict[str, Any]],
+    ) -> Optional[NotificationDispatchResult]:
+        """Queue a per-channel durable delivery when called by a leased worker."""
+        context = self._get_durable_execution_context()
+        if context is None:
+            return None
+        if not bool(getattr(context.claimed_job, "notify", False)):
+            return NotificationDispatchResult(
+                dispatched=False,
+                success=False,
+                status="notification_disabled",
+                message="durable job notification is disabled",
+            )
+
+        context_channel, context_target = self._durable_context_target()
+        if context_channel == "unsupported_dingtalk_session":
+            return NotificationDispatchResult(
+                dispatched=False,
+                success=False,
+                status="unsupported_context",
+                channel_results=[
+                    ChannelAttemptResult(
+                        channel="context_dingtalk",
+                        success=False,
+                        error_code="durable_context_unsupported",
+                        retryable=False,
+                        diagnostics=(
+                            "DingTalk session webhooks are ephemeral and are not persisted."
+                        ),
+                    )
+                ],
+                message="DingTalk temporary session delivery is unsupported for durable jobs",
+            )
+
+        normalized_content = self._sanitize_outbox_content(content)
+        content_sha256 = hashlib.sha256(normalized_content.encode("utf-8")).hexdigest()
+        safe_structured_payload = self._json_safe_outbox_value(structured_payload)
+        route = str(route_type or "default").strip().lower() or "default"
+
+        from src.services.durable_jobs import (
+            DurableJobConflictError,
+            OUTBOX_STATUS_PROCESSING,
+            OUTBOX_STATUS_SENT,
+            OUTBOX_STATUS_SUPPRESSED,
+            NotificationOutboxStore,
+            OutboxEnqueueRequest,
+            StaleLeaseError,
+        )
+
+        store = self._notification_outbox_store or NotificationOutboxStore()
+        logical_seed = str(dedup_key or "").strip()
+        if not logical_seed:
+            raise ValueError(
+                "durable notifications require an explicit stable dedup_key"
+            )
+        logical_notification_id = "notification:" + hashlib.sha256(
+            f"{context.job_id}\0{logical_seed}\0{route}".encode("utf-8")
+        ).hexdigest()
+
+        def _dispatch_result(enqueue_results: List[Any]) -> NotificationDispatchResult:
+            results: List[ChannelAttemptResult] = []
+            accepted = 0
+            queued = 0
+            already_sent = 0
+            for enqueue_result in enqueue_results:
+                is_accepted = enqueue_result.status in {
+                    "pending",
+                    OUTBOX_STATUS_PROCESSING,
+                    OUTBOX_STATUS_SENT,
+                }
+                is_queued = enqueue_result.status in {
+                    "pending",
+                    OUTBOX_STATUS_PROCESSING,
+                }
+                accepted += int(is_accepted)
+                queued += int(is_queued)
+                already_sent += int(enqueue_result.status == OUTBOX_STATUS_SENT)
+                results.append(
+                    ChannelAttemptResult(
+                        channel=enqueue_result.channel or "unknown",
+                        success=is_accepted,
+                        error_code=None if is_accepted else enqueue_result.status,
+                        retryable=False,
+                        diagnostics=f"outbox:{enqueue_result.status}",
+                        queued=is_queued,
+                    )
+                )
+            planned_count = len(enqueue_results)
+            if planned_count and all(
+                item.status == OUTBOX_STATUS_SUPPRESSED
+                for item in enqueue_results
+            ):
+                status = "noise_suppressed"
+            elif accepted == planned_count and queued:
+                status = "queued"
+            elif accepted == planned_count and already_sent == planned_count:
+                status = "already_sent"
+            elif accepted:
+                status = "partial_queued"
+            else:
+                status = "queue_failed"
+            return NotificationDispatchResult(
+                dispatched=False,
+                success=accepted > 0,
+                status=status,
+                channel_results=results,
+                message=(
+                    f"queued {queued} notification channel(s)"
+                    if accepted
+                    else "notification suppressed by durable noise control"
+                    if status == "noise_suppressed"
+                    else "failed to queue notification channels"
+                ),
+            )
+
+        frozen_plan = store.get_frozen_plan(
+            job_id=context.job_id,
+            logical_notification_id=logical_notification_id,
+            route=route,
+            worker_id=context.worker_id,
+            lease_token=context.lease_token,
+        )
+        if frozen_plan:
+            return _dispatch_result(frozen_plan)
+
+        rows: List[Tuple[str, str, Dict[str, Any]]] = []
+        noise_decision: Optional[NotificationNoiseDecision] = None
+
+        if context_channel and context_target:
+            recipient = self._context_recipient_identity(context_target)
+            rows.append(
+                (
+                    context_channel,
+                    recipient,
+                    {
+                        "version": 1,
+                        "kind": "context",
+                        "content": normalized_content,
+                        "content_sha256": content_sha256,
+                        "target": context_target,
+                    },
+                )
+            )
+        else:
+            target_channels = self.get_channels_for_route(route_type)
+            if not target_channels:
+                return NotificationDispatchResult(
+                    dispatched=False,
+                    success=False,
+                    status="no_channel",
+                    message=f"notification route {route_type} has no configured channel",
+                )
+            noise_decision = self.evaluate_durable_noise_control(
+                normalized_content,
+                route_type=route_type,
+                severity=severity,
+                dedup_key=dedup_key,
+                cooldown_key=cooldown_key,
+            )
+            if not noise_decision.should_send:
+                return NotificationDispatchResult(
+                    dispatched=False,
+                    success=False,
+                    status="noise_suppressed",
+                    message=noise_decision.message,
+                )
+            route = noise_decision.route_type
+            severity = noise_decision.severity
+            noise_payload = {
+                "route_type": noise_decision.route_type,
+                "severity": noise_decision.severity,
+                "dedup_key": noise_decision.dedup_key,
+                "cooldown_key": noise_decision.cooldown_key,
+                "dedup_ttl_seconds": noise_decision.dedup_ttl_seconds,
+                "cooldown_seconds": noise_decision.cooldown_seconds,
+                "evaluated_at": (
+                    noise_decision.evaluated_at.isoformat()
+                    if noise_decision.evaluated_at is not None
+                    else None
+                ),
+            }
+            for channel in target_channels:
+                delivery_target = self._static_delivery_target(
+                    channel,
+                    email_stock_codes=email_stock_codes,
+                    email_send_to_all=email_send_to_all,
+                )
+                if channel == NotificationChannel.FEISHU and (
+                    self._feishu_send_as_file and route == "report"
+                ):
+                    delivery_mode = "file"
+                elif (
+                    channel.value in self._markdown_to_image_channels
+                    and channel not in {NotificationChannel.NTFY, NotificationChannel.GOTIFY}
+                ):
+                    delivery_mode = "image"
+                else:
+                    delivery_mode = "text"
+                rows.append(
+                    (
+                        channel.value,
+                        self._static_recipient_identity(channel, delivery_target),
+                        {
+                            "version": 1,
+                            "kind": "static",
+                            "content": normalized_content,
+                            "content_sha256": content_sha256,
+                            "delivery_mode": delivery_mode,
+                            "delivery_target": delivery_target,
+                            "image_max_chars": int(self._markdown_to_image_max_chars),
+                            "structured_payload": safe_structured_payload,
+                            "noise_control": noise_payload,
+                        },
+                    )
+                )
+        severity_value = normalize_notification_severity(route, severity)
+        priority = {"info": 0, "warning": 10, "error": 20, "critical": 30}.get(
+            severity_value,
+            0,
+        )
+
+        requests = [
+            OutboxEnqueueRequest(
+                notification_type=route,
+                channel=channel_name,
+                recipient=recipient,
+                payload=payload,
+                content_sha256=content_sha256,
+                logical_notification_id=logical_notification_id,
+                route=route,
+                trace_id=context.trace_id,
+                severity=severity_value,
+                job_id=context.job_id,
+                worker_id=context.worker_id,
+                lease_token=context.lease_token,
+                priority=priority,
+            )
+            for channel_name, recipient, payload in rows
+        ]
+        try:
+            enqueue_results = store.enqueue_batch(requests)
+        except (StaleLeaseError, DurableJobConflictError):
+            if noise_decision is not None:
+                self.release_noise_control(noise_decision)
+            raise
+        except Exception:
+            # The whole selected channel set is one transaction: a persistence
+            # failure leaves zero rows and must fail the parent attempt.
+            if noise_decision is not None:
+                self.release_noise_control(noise_decision)
+            raise
+
+        if noise_decision is not None:
+            # Enqueue is not delivery.  Release the process-local reservation;
+            # the dispatcher records noise state only after an external send.
+            self.release_noise_control(noise_decision)
+        return _dispatch_result(enqueue_results)
+
     def _send_to_static_channel(
         self,
         channel: NotificationChannel,
@@ -2523,7 +3069,10 @@ class NotificationService(
         email_stock_codes: Optional[List[str]],
         email_send_to_all: bool,
         route_type: Optional[str] = None,
+        delivery_target: Optional[Mapping[str, Any]] = None,
+        delivery_mode: Optional[str] = None,
     ) -> bool:
+        delivery_target = dict(delivery_target or {})
         use_image = self._should_use_image_for_channel(channel, image_bytes)
         sanitized_content = strip_hidden_markdown_metadata(content).strip()
         if channel == NotificationChannel.WECHAT:
@@ -2531,7 +3080,12 @@ class NotificationService(
                 return self._send_wechat_image(image_bytes)
             return self.send_to_wechat(content)
         if channel == NotificationChannel.FEISHU:
-            if getattr(self, "_feishu_send_as_file", False) and route_type == "report":
+            send_as_file = (
+                delivery_mode == "file"
+                if delivery_mode is not None
+                else getattr(self, "_feishu_send_as_file", False) and route_type == "report"
+            )
+            if send_as_file:
                 date_str = datetime.now().strftime('%Y%m%d')
                 filepath = self.save_report_to_file(
                     sanitized_content, filename=f"report_{date_str}.md"
@@ -2543,10 +3097,16 @@ class NotificationService(
         if channel == NotificationChannel.TELEGRAM:
             if use_image:
                 return self._send_telegram_photo(image_bytes)
-            return self.send_to_telegram(content)
+            return self.send_to_telegram(
+                content,
+                chat_id=delivery_target.get("chat_id") or None,
+                message_thread_id=delivery_target.get("message_thread_id") or None,
+            )
         if channel == NotificationChannel.EMAIL:
-            receivers = None
-            if email_send_to_all and self._stock_email_groups:
+            receivers = delivery_target.get("receivers")
+            if receivers is not None:
+                receivers = [str(item) for item in receivers]
+            elif email_send_to_all and self._stock_email_groups:
                 receivers = self.get_all_email_receivers()
             elif email_stock_codes and self._stock_email_groups:
                 receivers = self.get_receivers_for_stocks(email_stock_codes)
@@ -2616,6 +3176,19 @@ class NotificationService(
         Returns:
             Structured dispatch diagnostics.
         """
+        durable_result = self._plan_durable_notification(
+            content,
+            email_stock_codes=email_stock_codes,
+            email_send_to_all=email_send_to_all,
+            route_type=route_type,
+            severity=severity,
+            dedup_key=dedup_key,
+            cooldown_key=cooldown_key,
+            structured_payload=structured_payload,
+        )
+        if durable_result is not None:
+            return durable_result
+
         context_success = self.send_to_context(content)
         if not self.should_broadcast_static_channels():
             if context_success:

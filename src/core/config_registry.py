@@ -79,6 +79,10 @@ _CATEGORY_DEFINITIONS: List[Dict[str, Any]] = [
 WEB_SETTINGS_HIDDEN_FROM_UI = {
     "DATABASE_PATH",
     "DATABASE_MIGRATION_MODE",
+    "DURABLE_WORKER_CONCURRENCY",
+    "DURABLE_WORKER_HEALTH_MAX_AGE_SECONDS",
+    "DURABLE_WORKER_ID",
+    "DURABLE_WORKER_STARTUP_TIMEOUT_SECONDS",
     "SQLITE_WAL_ENABLED",
     "SQLITE_BUSY_TIMEOUT_MS",
     "SQLITE_WRITE_RETRY_MAX",
@@ -1014,6 +1018,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "is_sensitive": False,
         "is_required": False,
         "is_editable": True,
+        "restart_required": True,
         "default_value": "false",
         "options": [],
         "validation": {},

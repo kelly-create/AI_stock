@@ -21,12 +21,13 @@ import copy
 import json
 import logging
 import re
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Union, Dict, Any
 
-from fastapi import APIRouter, HTTPException, Depends, Query, Body
+from fastapi import APIRouter, HTTPException, Depends, Query, Body, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from api.deps import get_config_dep
@@ -41,6 +42,7 @@ from api.v1.schemas.analysis import (
     TaskStatus,
     TaskInfo,
     TaskListResponse,
+    TaskCancelResponse,
     DuplicateTaskErrorResponse,
     MarketReviewRequest,
     MarketReviewAccepted,
@@ -269,8 +271,12 @@ def _resolve_and_normalize_input(raw_value: str) -> str:
             "model": Union[TaskAccepted, BatchTaskAcceptedResponse],
         },
         400: {"description": "请求参数错误", "model": ErrorResponse},
-        409: {"description": "股票正在分析中，拒绝重复提交", "model": DuplicateTaskErrorResponse},
+        409: {
+            "description": "重复任务，或同步等待期间任务被取消",
+            "model": Union[DuplicateTaskErrorResponse, ErrorResponse],
+        },
         500: {"description": "分析失败", "model": ErrorResponse},
+        504: {"description": "同步等待超时，任务仍在后台执行", "model": ErrorResponse},
     },
     summary="触发股票分析",
     description="启动 AI 智能分析任务，支持同步和异步模式。异步模式下相同股票代码不允许重复提交。"
@@ -344,6 +350,9 @@ def trigger_analysis(
                 "validation_error",
                 "同步模式仅支持单只股票分析，请使用 async_mode=true 进行批量分析",
             )
+        task_queue = get_task_queue()
+        if getattr(task_queue, "durable_enabled", False) is True:
+            return _handle_durable_sync_analysis(stock_codes[0], request, task_queue)
         return _handle_sync_analysis(stock_codes[0], request)
 
     # Async mode submits one task per stock.
@@ -514,6 +523,70 @@ def _handle_sync_analysis(
         raise api_error(500, "internal_error", f"分析过程发生错误: {str(e)}")
 
 
+def _handle_durable_sync_analysis(
+    stock_code: str,
+    request: AnalyzeRequest,
+    task_queue: Any,
+) -> AnalysisResultResponse:
+    """Preserve the sync 200 contract while execution stays in the Worker.
+
+    The API process only enqueues and polls SQLite.  Client disconnects do not
+    cancel the durable job; callers can use the explicit cancel endpoint.
+    """
+
+    accepted, duplicates = task_queue.submit_tasks_batch(
+        [stock_code],
+        stock_name=request.stock_name,
+        original_query=request.original_query,
+        selection_source=request.selection_source,
+        query_source="api",
+        report_type=request.report_type,
+        analysis_phase=request.analysis_phase,
+        force_refresh=request.force_refresh,
+        notify=getattr(request, "notify", True),
+        skills=getattr(request, "skills", None),
+        report_language=(
+            normalize_report_language(getattr(request, "report_language", None), default="")
+            or None
+        ),
+    )
+    if duplicates:
+        duplicate = duplicates[0]
+        raise HTTPException(
+            status_code=409,
+            detail=DuplicateTaskErrorResponse(
+                error="duplicate_task",
+                message=str(duplicate),
+                stock_code=duplicate.stock_code,
+                existing_task_id=duplicate.existing_task_id,
+            ).model_dump(),
+        )
+    if not accepted:
+        raise api_error(500, "durable_enqueue_failed", "持久任务未成功入队")
+
+    task_id = accepted[0].task_id
+    deadline = time.monotonic() + 900
+    while time.monotonic() < deadline:
+        task = task_queue.get_task(task_id)
+        if task is None:
+            raise api_error(500, "durable_task_lost", f"持久任务不可读: {task_id}")
+        if task.status == TaskStatusEnum.COMPLETED:
+            if not isinstance(task.result, dict):
+                raise api_error(500, "analysis_failed", "任务完成但未生成有效报告")
+            return _build_task_analysis_result(task)
+        if task.status == TaskStatusEnum.FAILED:
+            raise api_error(500, "analysis_failed", task.error or "持久分析任务失败")
+        if task.status == TaskStatusEnum.CANCELLED:
+            raise api_error(409, "task_cancelled", "持久分析任务已取消")
+        time.sleep(0.25)
+
+    raise api_error(
+        504,
+        "durable_wait_timeout",
+        f"等待任务完成超时，任务仍在后台执行: {task_id}",
+    )
+
+
 # ============================================================
 # POST /market-review - 触发大盘复盘
 # ============================================================
@@ -528,7 +601,7 @@ def _handle_sync_analysis(
         500: {"description": "提交失败", "model": ErrorResponse},
     },
     summary="触发大盘复盘",
-    description="提交一个后台大盘复盘任务，复用 CLI 的大盘复盘运行时装配并保存报告。该人工触发入口不按交易日检查跳过；接口内部仅提供进程内/单机防重，如多实例（多 Worker/多容器）部署，需结合外部幂等机制避免重复触发。",
+    description="提交一个后台大盘复盘任务，复用 CLI 的大盘复盘运行时装配并保存报告。Durable 模式由 SQLite active dedupe 与 Worker 侧共享锁共同防重。",
 )
 def trigger_market_review(
     request: Optional[MarketReviewRequest] = Body(None),
@@ -541,6 +614,49 @@ def trigger_market_review(
     effective_region = request.region or (
         normalize_market_review_region_lenient(runtime_config.market_review_region) or "cn"
     )
+
+    task_queue = get_task_queue()
+    if getattr(task_queue, "durable_enabled", False) is True:
+        task_id = uuid.uuid4().hex
+        from src.services.durable_jobs import DurableJobConflictError
+
+        try:
+            task = task_queue.submit_typed_job(
+                "market_review",
+                {
+                    "region": effective_region,
+                    "send_notification": request.send_notification,
+                    "merge_notification": False,
+                    "save_report_file": True,
+                    "persist_history": True,
+                    "trigger_source": "api",
+                },
+                task_id=task_id,
+                trace_id=task_id,
+                stock_code="market_review",
+                stock_name="大盘复盘",
+                report_type="market_review",
+                message="大盘复盘任务已提交",
+                dedupe_key=f"market_review:{effective_region}",
+                notify=request.send_notification,
+                region=effective_region,
+            )
+        except DurableJobConflictError:
+            raise api_error(
+                409,
+                "duplicate_market_review",
+                "大盘复盘正在执行中，请稍后再试",
+            ) from None
+        if task.task_id != task_id:
+            raise api_error(409, "duplicate_market_review", "大盘复盘正在执行中，请稍后再试")
+        return MarketReviewAccepted(
+            status="accepted",
+            message="大盘复盘任务已提交，完成后会保存报告并按配置推送通知",
+            send_notification=request.send_notification,
+            region=effective_region,
+            task_id=task.task_id,
+            trace_id=_get_task_trace_id(task),
+        )
 
     lock_token = _try_acquire_market_review_lock(runtime_config)
     if lock_token is None:
@@ -555,7 +671,7 @@ def trigger_market_review(
             effective_region,
             request.send_notification,
         )
-        task = get_task_queue().submit_background_task(
+        task = task_queue.submit_background_task(
             lambda: _run_market_review_background(
                 request.send_notification,
                 effective_region=effective_region,
@@ -634,6 +750,7 @@ def get_task_list(
             stock_code=t.stock_code,
             stock_name=t.stock_name,
             status=t.status.value,
+            stage=getattr(t, "stage", None),
             progress=t.progress,
             message=t.message,
             report_type=t.report_type,
@@ -659,6 +776,51 @@ def get_task_list(
 
 
 # ============================================================
+# POST /tasks/{task_id}/cancel - 取消任务
+# ============================================================
+
+@router.post(
+    "/tasks/{task_id}/cancel",
+    response_model=TaskCancelResponse,
+    responses={
+        200: {"description": "取消请求已处理"},
+        404: {"description": "任务不存在", "model": ErrorResponse},
+        409: {"description": "当前任务后端不支持持久取消", "model": ErrorResponse},
+    },
+    summary="取消分析任务",
+    description=(
+        "Pending 任务在尚未启动时会直接取消；Durable Processing 任务进入 "
+        "cancel_requested，Worker 会在下一个安全边界停止。Legacy 任务一旦开始执行"
+        "不会伪装可取消，而是返回 409。正在阻塞的外部调用只能等待其超时。"
+    ),
+)
+def cancel_analysis_task(task_id: str) -> TaskCancelResponse:
+    task_queue = get_task_queue()
+    try:
+        cancelled_task = task_queue.cancel_task(task_id)
+    except KeyError:
+        raise api_error(404, "task_not_found", f"任务不存在: {task_id}")
+    except RuntimeError as exc:
+        raise api_error(409, "task_cancel_unavailable", str(exc))
+    if cancelled_task is None:
+        raise api_error(404, "task_not_found", f"任务不存在: {task_id}")
+
+    raw_status = getattr(cancelled_task, "status", cancelled_task)
+    normalized_status = getattr(raw_status, "value", str(raw_status))
+    if normalized_status == TaskStatusEnum.CANCELLED.value:
+        message = "任务已取消"
+    elif normalized_status == TaskStatusEnum.CANCEL_REQUESTED.value:
+        message = "取消请求已记录，任务将在下一个安全边界停止"
+    else:
+        message = "任务已进入终态，状态未改变"
+    return TaskCancelResponse(
+        task_id=task_id,
+        status=normalized_status,
+        message=message,
+    )
+
+
+# ============================================================
 # GET /tasks/stream - SSE 实时推送
 # ============================================================
 
@@ -666,11 +828,19 @@ def get_task_list(
     "/tasks/stream",
     responses={
         200: {"description": "SSE 事件流", "content": {"text/event-stream": {}}},
+        400: {"description": "Last-Event-ID 游标无效", "model": ErrorResponse},
     },
     summary="任务状态 SSE 流",
-    description="通过 Server-Sent Events 实时推送任务状态变化"
+    description=(
+        "通过 Server-Sent Events 实时推送任务状态变化，Durable 模式支持 "
+        "Last-Event-ID 续传和保留窗口缺口重置。"
+    ),
 )
-async def task_stream():
+async def task_stream(
+    request: Request = None,
+    last_event_id: Optional[int] = Query(None, ge=0),
+    last_event_id_header: Optional[str] = Header(None, alias="Last-Event-ID"),
+):
     """
     SSE 任务状态流
     
@@ -686,8 +856,19 @@ async def task_stream():
     Returns:
         StreamingResponse: SSE 事件流
     """
-    async def event_generator():
-        task_queue = get_task_queue()
+    task_queue = get_task_queue()
+
+    cursor: Optional[int] = last_event_id if isinstance(last_event_id, int) else None
+    normalized_header = last_event_id_header if isinstance(last_event_id_header, str) else None
+    if normalized_header not in (None, ""):
+        try:
+            cursor = int(normalized_header.strip())
+        except (TypeError, ValueError):
+            raise api_error(400, "invalid_last_event_id", "Last-Event-ID 必须是非负整数")
+        if cursor < 0:
+            raise api_error(400, "invalid_last_event_id", "Last-Event-ID 必须是非负整数")
+
+    async def legacy_event_generator():
         event_queue: asyncio.Queue = asyncio.Queue()
         
         # 发送连接成功事件
@@ -717,6 +898,175 @@ async def task_stream():
             raise
         finally:
             task_queue.unsubscribe(event_queue)
+
+    def durable_batch_has_gap(events: list[Any], after_id: int) -> bool:
+        """Detect retention-created holes in the global durable event stream."""
+
+        expected_id = after_id + 1
+        for event in events:
+            if event.id != expected_id:
+                return True
+            expected_id += 1
+        return False
+
+    async def durable_event_generator():
+        durable_cursor = cursor
+        high_water = task_queue.durable_event_high_water()
+        min_event_id = task_queue.durable_event_min_id()
+        prefetched_events: Optional[list[Any]] = None
+        reset_required = bool(
+            durable_cursor is not None
+            and (
+                durable_cursor > high_water
+                or (
+                    min_event_id is not None
+                    and durable_cursor < min_event_id - 1
+                )
+            )
+        )
+        if (
+            durable_cursor is not None
+            and not reset_required
+            and durable_cursor < high_water
+        ):
+            prefetched_events = task_queue.read_durable_events(
+                after_id=durable_cursor,
+                limit=200,
+            )
+            # Per-job retention can remove IDs from the middle of the global
+            # stream while an older event from another job keeps min(id) low.
+            # A min/high-water check alone therefore cannot prove continuity.
+            reset_required = bool(
+                not prefetched_events
+                or durable_batch_has_gap(prefetched_events, durable_cursor)
+            )
+
+        if durable_cursor is None or reset_required:
+            durable_cursor = high_water
+            prefetched_events = None
+            yield _format_sse_event(
+                "connected",
+                {
+                    "message": "Connected to durable task stream",
+                    "durable": True,
+                    "cursor": durable_cursor,
+                    "reset_required": reset_required,
+                },
+            )
+            if reset_required:
+                yield _format_sse_event(
+                    "stream_reset",
+                    {
+                        "reason": "retention_gap",
+                        "cursor": durable_cursor,
+                    },
+                    event_id="",
+                )
+            for task in task_queue.list_pending_tasks():
+                yield _format_sse_event("task_created", task.to_dict())
+        else:
+            yield _format_sse_event(
+                "connected",
+                {
+                    "message": "Reconnected to durable task stream",
+                    "durable": True,
+                    "cursor": durable_cursor,
+                    "reset_required": False,
+                },
+            )
+
+        last_output_at = time.monotonic()
+        try:
+            while True:
+                observed_high_water = task_queue.durable_event_high_water()
+                if prefetched_events is not None:
+                    events = prefetched_events
+                    prefetched_events = None
+                else:
+                    events = task_queue.read_durable_events(
+                        after_id=durable_cursor,
+                        limit=200,
+                    )
+
+                stream_gap = bool(
+                    durable_cursor > observed_high_water
+                    or (
+                        durable_cursor < observed_high_water
+                        and not events
+                    )
+                    or (
+                        events
+                        and durable_batch_has_gap(events, durable_cursor)
+                    )
+                )
+                if stream_gap:
+                    # Reset to a fresh high-water mark and publish active
+                    # snapshots. An empty SSE id clears the browser's native
+                    # Last-Event-ID buffer; snapshot frames then keep that
+                    # cursor empty instead of resurrecting the stale id.
+                    durable_cursor = task_queue.durable_event_high_water()
+                    yield _format_sse_event(
+                        "stream_reset",
+                        {
+                            "reason": "retention_gap",
+                            "cursor": durable_cursor,
+                        },
+                        event_id="",
+                    )
+                    for task in task_queue.list_pending_tasks():
+                        yield _format_sse_event("task_created", task.to_dict())
+                    last_output_at = time.monotonic()
+                    continue
+
+                if events:
+                    for event in events:
+                        durable_cursor = event.id
+                        task = task_queue.get_task(event.job_id)
+                        data = task.to_dict() if task is not None else {"task_id": event.job_id}
+                        if event.stage is not None:
+                            data["stage"] = event.stage
+                        if event.event_type == "task_flow":
+                            data["flow_event"] = event.payload
+                        elif isinstance(event.payload, dict):
+                            detail = event.payload.get("detail")
+                            if isinstance(detail, dict):
+                                data["flow_event"] = detail
+                        external_event_type = {
+                            "queued": "task_created",
+                            "claimed": "task_started",
+                            "progress": "task_progress",
+                            "task_flow": "task_progress",
+                            "retry_scheduled": "task_progress",
+                            "lease_recovered": "task_progress",
+                            "completed": "task_completed",
+                            "failed": "task_failed",
+                            "cancel_requested": "task_cancel_requested",
+                            "cancelled": "task_cancelled",
+                        }.get(event.event_type, "task_progress")
+                        yield _format_sse_event(
+                            external_event_type,
+                            data,
+                            event_id=event.id,
+                        )
+                        last_output_at = time.monotonic()
+                    continue
+
+                if time.monotonic() - last_output_at >= 30:
+                    yield _format_sse_event(
+                        "heartbeat",
+                        {"timestamp": datetime.now().isoformat()},
+                    )
+                    last_output_at = time.monotonic()
+                await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            logger.debug("Durable SSE client disconnected")
+            raise
+
+    event_generator = (
+        durable_event_generator
+        if getattr(task_queue, "durable_enabled", False) is True
+        else legacy_event_generator
+    )
     
     return StreamingResponse(
         event_generator(),
@@ -729,7 +1079,12 @@ async def task_stream():
     )
 
 
-def _format_sse_event(event_type: str, data: Dict[str, Any]) -> str:
+def _format_sse_event(
+    event_type: str,
+    data: Dict[str, Any],
+    *,
+    event_id: Optional[Union[int, str]] = None,
+) -> str:
     """
     格式化 SSE 事件
     
@@ -740,7 +1095,8 @@ def _format_sse_event(event_type: str, data: Dict[str, Any]) -> str:
     Returns:
         SSE 格式字符串
     """
-    return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+    id_line = f"id: {event_id}\n" if event_id is not None else ""
+    return f"{id_line}event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 def _load_history_run_flow_by_query_id(
@@ -1077,6 +1433,7 @@ def get_analysis_status(task_id: str) -> TaskStatus:
             task_id=task.task_id,
             trace_id=_get_task_trace_id(task),
             status=task.status.value,
+            stage=getattr(task, "stage", None),
             progress=task.progress,
             result=result,
             market_review_report=market_review_report,

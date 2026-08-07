@@ -51,6 +51,17 @@ _MARKET_REVIEW_MARKETS = (
 _MARKET_REVIEW_REGION_ORDER = MARKET_REVIEW_REGION_ORDER
 
 
+def _durable_execution_active() -> bool:
+    try:
+        from src.services.durable_job_handlers import (
+            get_optional_durable_execution_context,
+        )
+
+        return get_optional_durable_execution_context() is not None
+    except (ImportError, RuntimeError):
+        return False
+
+
 @dataclass
 class MarketReviewRunResult:
     """Structured result for API/Web consumers while keeping Markdown compatibility."""
@@ -184,6 +195,7 @@ def run_market_review(
     save_report_file: bool = True,
     persist_history: bool = True,
     trigger_source: str = "cli",
+    notification_dedup_key: Optional[str] = None,
 ) -> Optional[str] | Optional[MarketReviewRunResult]:
     """
     执行大盘复盘分析
@@ -200,6 +212,8 @@ def run_market_review(
         save_report_file: 是否保存 Markdown 文件；上下文生成路径可关闭以避免多区域临时复盘互相覆盖
         persist_history: 是否写入 analysis_history；预热路径可关闭以避免覆盖用户可见的同日大盘复盘记录
         trigger_source: 触发来源，用于日志排障（cli/schedule/api/bot/service 等）
+
+        notification_dedup_key: Stable key used to converge durable notification retries.
 
     Returns:
         复盘报告文本
@@ -369,6 +383,9 @@ def run_market_review(
                     "email_send_to_all": True,
                     "route_type": "report",
                 }
+                if notification_dedup_key:
+                    send_kwargs["dedup_key"] = notification_dedup_key
+                    send_kwargs["cooldown_key"] = notification_dedup_key
                 try:
                     supports_payload = (
                         "structured_payload" in inspect.signature(notifier.send).parameters
@@ -457,6 +474,8 @@ def run_market_review(
             history_query_id,
             persist_region,
         )
+        if _durable_execution_active():
+            raise
     
     return None
 

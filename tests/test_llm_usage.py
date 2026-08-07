@@ -39,6 +39,10 @@ from src.llm.usage import (
     _reset_usage_hmac_secret_cache_for_tests,
 )
 from src.llm.provider_cache import filter_prompt_cache_telemetry
+from src.services.run_diagnostics import (
+    activate_run_diagnostic_context,
+    reset_run_diagnostic_context,
+)
 from src.storage import (
     DatabaseManager,
     LLMUsage,
@@ -1570,6 +1574,49 @@ class TestPersistUsageHelper(unittest.TestCase):
             rows = session.query(LLMUsage).all()
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0].total_tokens, 30)
+
+    def test_persist_usage_inherits_durable_context_and_sanitizes_errors(self):
+        token = activate_run_diagnostic_context(
+            trace_id="trace-1",
+            task_id="job-1",
+            stock_code="600519",
+            stage="analyzing",
+            prompt_version="prompt-v2",
+            snapshot_hash="snapshot-abc",
+            attempt_no=3,
+        )
+        try:
+            persist_llm_usage(
+                {
+                    "total_tokens": 9,
+                    "latency_ms": 321,
+                    "status": "failed",
+                    "error_code": "provider_timeout",
+                    "error_message_sanitized": "api_key=super-secret timed out",
+                    "estimated_cost_usd": "not-known",
+                    "cost_source": "provider",
+                },
+                "provider/model",
+                call_type="analysis",
+                stock_code="600519",
+            )
+        finally:
+            reset_run_diagnostic_context(token)
+
+        with self.db.session_scope() as session:
+            row = session.query(LLMUsage).one()
+            self.assertEqual(row.job_id, "job-1")
+            self.assertEqual(row.trace_id, "trace-1")
+            self.assertEqual(row.stage, "analyzing")
+            self.assertEqual(row.prompt_version, "prompt-v2")
+            self.assertEqual(row.snapshot_hash, "snapshot-abc")
+            self.assertEqual(row.attempt_no, 3)
+            self.assertEqual(row.latency_ms, 321)
+            self.assertEqual(row.status, "failed")
+            self.assertEqual(row.error_code, "provider_timeout")
+            self.assertNotIn("super-secret", row.error_message_sanitized)
+            self.assertIsNone(row.estimated_cost_usd)
+            self.assertIsNone(row.cost_source)
 
     def test_persist_usage_handles_empty_usage(self):
         # Should not raise even with an empty dict

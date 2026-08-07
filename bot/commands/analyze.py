@@ -12,6 +12,12 @@ import logging
 from typing import List, Optional
 
 from bot.commands.base import BotCommand
+from bot.durable import (
+    accepted_bot_response,
+    bot_idempotency_key,
+    build_bot_target,
+    get_durable_bot_queue,
+)
 from bot.models import BotMessage, BotResponse
 from src.services.stock_code_utils import resolve_index_stock_code_for_analysis
 
@@ -76,6 +82,28 @@ class AnalyzeCommand(BotCommand):
         logger.info(f"[AnalyzeCommand] 分析股票: {code}, 报告类型: {report_type}")
         
         try:
+            durable_queue = get_durable_bot_queue()
+            if durable_queue is not None:
+                target = build_bot_target(message)
+                task = durable_queue.submit_typed_job(
+                    "stock_analysis",
+                    {
+                        "stock_code": code,
+                        "report_type": report_type,
+                        "notify": True,
+                        "query_source": "bot",
+                        "bot_target": target,
+                    },
+                    stock_code=code,
+                    report_type=report_type,
+                    query_source="bot",
+                    notify=True,
+                    message="Bot stock analysis accepted",
+                    stage="queued",
+                    idempotency_key=bot_idempotency_key(target, self.name),
+                )
+                return accepted_bot_response(task.task_id, "股票分析任务")
+
             # 调用分析服务
             from src.services.task_service import get_task_service
             from src.enums import ReportType

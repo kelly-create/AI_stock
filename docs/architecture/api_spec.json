@@ -211,17 +211,34 @@
             }
           },
           "409": {
-            "description": "股票正在分析中，拒绝重复提交",
+            "description": "重复任务，或同步等待期间任务被取消",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/DuplicateTaskError"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/DuplicateTaskError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ErrorResponse"
+                    }
+                  ]
                 }
               }
             }
           },
           "500": {
             "description": "分析失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "同步等待超时，任务仍在后台执行",
             "content": {
               "application/json": {
                 "schema": {
@@ -283,8 +300,29 @@
           "Analysis"
         ],
         "summary": "任务状态 SSE 流",
-        "description": "通过 Server-Sent Events 实时推送任务状态变化。\n\n## 事件类型\n- `connected`: 连接成功\n- `task_created`: 新任务创建\n- `task_started`: 任务开始执行\n- `task_completed`: 任务完成\n- `task_failed`: 任务失败\n- `heartbeat`: 心跳（每 30 秒）",
+        "description": "通过 Server-Sent Events 实时推送任务状态变化。Durable 模式支持 Last-Event-ID 断线续传；游标落在保留窗口缺口时发送 `stream_reset` 及活动任务快照。\n\n## 事件类型\n- `connected`: 连接成功\n- `task_created`: 新任务创建或重置快照\n- `task_started`: 任务开始执行\n- `task_progress`: 任务阶段或运行流进度\n- `task_completed`: 任务完成\n- `task_failed`: 任务失败\n- `task_cancel_requested`: 已记录取消请求\n- `task_cancelled`: 任务已取消\n- `stream_reset`: 保留窗口缺口，客户端应以后续快照重建活动状态\n- `heartbeat`: 心跳（每 30 秒）",
         "operationId": "taskStream",
+        "parameters": [
+          {
+            "name": "last_event_id",
+            "in": "query",
+            "required": false,
+            "description": "Durable event cursor fallback for clients that cannot set Last-Event-ID.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "required": false,
+            "description": "Resume durable events strictly after this global event id.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "SSE 事件流",
@@ -293,6 +331,68 @@
                 "schema": {
                   "type": "string",
                   "example": "event: task_created\ndata: {\"task_id\": \"abc123\", \"stock_code\": \"600519\", \"status\": \"pending\"}\n\n"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Last-Event-ID 游标无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/analysis/tasks/{task_id}/cancel": {
+      "post": {
+        "tags": [
+          "Analysis"
+        ],
+        "summary": "Cancel an analysis task",
+        "description": "Pending jobs are cancelled before they start. Durable processing jobs stop at the next safe worker boundary; running legacy jobs return 409 because the in-memory executor has no cooperative cancellation checkpoint.",
+        "operationId": "cancelAnalysisTask",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancellation request processed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskCancelResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Task not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Cancellation is unavailable for the active backend",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -3022,8 +3122,15 @@
               "pending",
               "processing",
               "completed",
-              "failed"
+              "failed",
+              "cancel_requested",
+              "cancelled"
             ]
+          },
+          "stage": {
+            "type": "string",
+            "nullable": true,
+            "description": "Durable worker stage, separate from the coarse status."
           },
           "progress": {
             "type": "integer",
@@ -3075,9 +3182,16 @@
               "pending",
               "processing",
               "completed",
-              "failed"
+              "failed",
+              "cancel_requested",
+              "cancelled"
             ],
             "description": "任务状态"
+          },
+          "stage": {
+            "type": "string",
+            "nullable": true,
+            "description": "Durable worker stage, separate from the coarse status."
           },
           "progress": {
             "type": "integer",
@@ -3133,6 +3247,34 @@
           "stock_code",
           "status",
           "created_at"
+        ]
+      },
+      "TaskCancelResponse": {
+        "type": "object",
+        "description": "Result of a durable task cancellation request.",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "processing",
+              "completed",
+              "failed",
+              "cancel_requested",
+              "cancelled"
+            ]
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id",
+          "status",
+          "message"
         ]
       },
       "TaskListResponse": {
@@ -3577,6 +3719,11 @@
           },
           "is_editable": {
             "type": "boolean"
+          },
+          "restart_required": {
+            "type": "boolean",
+            "default": false,
+            "description": "Whether the saved value is latched until process restart"
           },
           "default_value": {
             "type": "string",

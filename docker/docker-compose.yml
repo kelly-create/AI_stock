@@ -77,6 +77,55 @@ services:
         condition: service_completed_successfully
     # Inherit the image's mode-aware healthcheck; scheduler mode verifies the
     # live, non-zombie DSA process without requiring an HTTP endpoint.
+    deploy:
+      resources:
+        limits:
+          # This process is Scheduler-only in durable mode, but it still runs
+          # full legacy analysis when DURABLE_JOBS_ENABLED=false. Keep the
+          # pre-PR1 legacy ceiling instead of making flag-off deployments OOM.
+          memory: 1G
+        reservations:
+          memory: 512M
+
+  # The durable Worker is opt-in; the existing analyzer remains the sole
+  # Scheduler process and waits for this Worker's fresh database heartbeat.
+  worker:
+    <<: *common
+    profiles: ["durable"]
+    container_name: stock-worker
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+    command:
+      - python
+      - -m
+      - src.services.durable_worker
+      - --worker-id
+      - ${DURABLE_WORKER_ID:-compose-worker}
+      - --workers
+      - ${DURABLE_WORKER_CONCURRENCY:-3}
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -m
+        - src.services.durable_worker
+        - --healthcheck
+        - --worker-id
+        - ${DURABLE_WORKER_ID:-compose-worker}
+        - --max-heartbeat-age
+        - ${DURABLE_WORKER_HEALTH_MAX_AGE_SECONDS:-45}
+      interval: 15s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "3.0"
+          memory: 2560M
+        reservations:
+          memory: 1G
 
   # FastAPI 模式
   server:
@@ -87,9 +136,15 @@ services:
         condition: service_completed_successfully
     environment:
       <<: *common-environment
-      # analyzer is the sole schedule owner in the two-service Compose topology.
+      # analyzer is the sole schedule owner in both legacy and durable modes.
       DSA_RUNTIME_SCHEDULER_SUPPRESS_START: "true"
     command: ["python", "main.py", "--serve-only", "--host", "0.0.0.0", "--port", "${API_PORT:-8000}"]
     # 若使用 network_mode: host，则以下 ports 映射无效，端口由 command 中的 --port 指定
     ports:
       - "${API_PORT:-8000}:${API_PORT:-8000}"
+    deploy:
+      resources:
+        limits:
+          memory: 1280M
+        reservations:
+          memory: 512M

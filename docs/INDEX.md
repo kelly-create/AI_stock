@@ -36,6 +36,7 @@
 | [LiteLLM YAML 示例](examples/litellm_config.example.yaml) | LiteLLM 多渠道配置示例 |
 | [通知能力基线](notifications.md) | 企业微信、飞书、Telegram、Discord、Slack、邮件等通知渠道配置 |
 | [Tushare 股票列表指南](TUSHARE_STOCK_LIST_GUIDE.md) | Tushare 股票列表相关配置和使用说明 |
+| [个人投研迁移与功能开关](personal-research-rollout.md) | 显式迁移、Durable Worker、Outbox、Bot 队列和分阶段开关 |
 
 ## 使用专题
 
@@ -55,6 +56,7 @@
 | 文档 | 内容 |
 | --- | --- |
 | [部署指南](DEPLOY.md) | 服务器部署、Docker、systemd、Supervisor 等部署方式 |
+| [SQLite 在线备份与恢复](operations/sqlite-backup.md) | 在线一致性备份、严格校验、隔离恢复与生产替换 |
 | [云端 WebUI 部署](deploy-webui-cloud.md) | 云服务器访问 WebUI 的部署说明 |
 | [Zeabur 部署](docker/zeabur-deployment.md) | Zeabur 平台部署说明 |
 | [桌面端打包说明](desktop-package.md) | Electron 桌面端和 Web 构建产物打包说明 |
@@ -65,6 +67,7 @@
 | --- | --- |
 | [API 规格](architecture/api_spec.json) | FastAPI OpenAPI 规格产物 |
 | [个人投研 PR0 生产基线](architecture/personal-research-pr0-baseline.md) | 现网源码对账、脱敏基线采集、Golden 用例与版本契约 |
+| [个人投研迁移与功能开关](personal-research-rollout.md) | PR0/PR1 迁移、任务持久化、通知 Outbox 和启用顺序 |
 | [贡献指南](CONTRIBUTING.md) | Issue、PR、测试、文档同步和协作要求 |
 
 ## 多语言

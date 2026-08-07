@@ -12,6 +12,7 @@ from src.migrations import (
     BASELINE_SCHEMA_VERSION,
     MIGRATIONS,
     PR0_CONVERGENCE_SCHEMA_VERSION,
+    PR1_DURABLE_JOBS_SCHEMA_VERSION,
     Migration,
     MigrationError,
     _sqlite_database_path,
@@ -23,6 +24,87 @@ from src.migrations import (
 
 def _sqlite_url(path: Path) -> str:
     return f"sqlite:///{path.as_posix()}"
+
+
+_PR1_LLM_USAGE_AUDIT_COLUMN_TYPES = {
+    "job_id": "VARCHAR(64)",
+    "stage": "VARCHAR(64)",
+    "trace_id": "VARCHAR(64)",
+    "prompt_version": "VARCHAR(64)",
+    "snapshot_hash": "VARCHAR(128)",
+    "latency_ms": "INTEGER",
+    "status": "VARCHAR(32)",
+    "error_code": "VARCHAR(64)",
+    "error_message_sanitized": "TEXT",
+    "estimated_cost_usd": "FLOAT",
+    "cost_source": "VARCHAR(32)",
+    "attempt_no": "INTEGER",
+}
+_PR1_LLM_USAGE_AUDIT_COLUMNS = set(_PR1_LLM_USAGE_AUDIT_COLUMN_TYPES)
+_PR1_LLM_USAGE_FORBIDDEN_GENERIC_COLUMNS = {
+    "latency",
+    "error",
+    "cost",
+    "attempt",
+}
+_PR1_LLM_USAGE_AUDIT_INDEXES = {
+    "ix_llm_usage_job_stage_called_at": ("job_id", "stage", "called_at"),
+    "ix_llm_usage_trace_called_at": ("trace_id", "called_at"),
+    "ix_llm_usage_status_called_at": ("status", "called_at"),
+}
+
+
+def _llm_usage_audit_column_contract(
+    connection: sqlite3.Connection,
+) -> dict[str, tuple[str, bool]]:
+    return {
+        row[1]: (row[2], bool(row[3]))
+        for row in connection.execute("PRAGMA table_info('llm_usage')")
+        if row[1] in _PR1_LLM_USAGE_AUDIT_COLUMNS
+    }
+
+
+def _create_pr0_shaped_schema(
+    database_path: Path,
+    *,
+    include_migration_history: bool = True,
+) -> None:
+    """Create the smallest pre-PR1 shape needed to exercise only PR1 DDL."""
+
+    with sqlite3.connect(database_path) as connection:
+        migration_sql = ""
+        if include_migration_history:
+            migration_sql = f"""
+            CREATE TABLE schema_migrations (
+                version VARCHAR(64) PRIMARY KEY,
+                description VARCHAR(255) NOT NULL,
+                applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO schema_migrations (version, description) VALUES
+                ('{BASELINE_SCHEMA_VERSION}', 'baseline'),
+                ('{PR0_CONVERGENCE_SCHEMA_VERSION}', 'pr0 convergence');
+            """
+        connection.executescript(
+            f"""
+            {migration_sql}
+            CREATE TABLE llm_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                called_at DATETIME
+            );
+            CREATE TABLE analysis_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code VARCHAR(10) NOT NULL,
+                report_type VARCHAR(16)
+            );
+            CREATE TABLE decision_signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT
+            );
+            INSERT INTO llm_usage (called_at) VALUES (CURRENT_TIMESTAMP);
+            INSERT INTO analysis_history (code, report_type)
+                VALUES ('600519', 'detailed');
+            INSERT INTO decision_signals DEFAULT VALUES;
+            """
+        )
 
 
 _SUBPROCESS_MIGRATION_SCRIPT = """
@@ -248,6 +330,7 @@ def test_existing_baseline_is_converged_by_ordered_pr0_migration(
     assert state.applied_versions == (
         BASELINE_SCHEMA_VERSION,
         PR0_CONVERGENCE_SCHEMA_VERSION,
+        PR1_DURABLE_JOBS_SCHEMA_VERSION,
     )
     with sqlite3.connect(database_path) as connection:
         llm_columns = {
@@ -255,6 +338,9 @@ def test_existing_baseline_is_converged_by_ordered_pr0_migration(
         }
         decision_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(decision_signals)")
+        }
+        analysis_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(analysis_history)")
         }
         unique_index_columns = {
             row[1]: tuple(
@@ -268,7 +354,11 @@ def test_existing_baseline_is_converged_by_ordered_pr0_migration(
         }
 
     assert "provider_usage_json" in llm_columns
+    assert _PR1_LLM_USAGE_AUDIT_COLUMNS.issubset(llm_columns)
+    assert _PR1_LLM_USAGE_FORBIDDEN_GENERIC_COLUMNS.isdisjoint(llm_columns)
     assert "decision_profile" in decision_columns
+    assert "idempotency_key" in decision_columns
+    assert "job_id" in analysis_columns
     assert (
         "source_id",
         "url",
@@ -276,6 +366,232 @@ def test_existing_baseline_is_converged_by_ordered_pr0_migration(
         "scope_value",
         "market",
     ) in unique_index_columns.values()
+
+
+def test_fresh_pr1_schema_has_durable_tables_and_partial_unique_indexes(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "fresh-pr1.db"
+
+    state = apply_migrations(_sqlite_url(database_path))
+
+    assert state.is_current is True
+    with sqlite3.connect(database_path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        assert {
+            "analysis_jobs",
+            "job_events",
+            "notification_outbox",
+            "provider_health",
+        }.issubset(tables)
+
+        llm_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info('llm_usage')")
+        }
+        llm_indexes = {
+            row[1]: tuple(
+                info[2]
+                for info in connection.execute(f"PRAGMA index_info('{row[1]}')")
+            )
+            for row in connection.execute("PRAGMA index_list('llm_usage')")
+            if row[1] in _PR1_LLM_USAGE_AUDIT_INDEXES
+        }
+        assert _PR1_LLM_USAGE_AUDIT_COLUMNS.issubset(llm_columns)
+        assert _PR1_LLM_USAGE_FORBIDDEN_GENERIC_COLUMNS.isdisjoint(llm_columns)
+        assert _llm_usage_audit_column_contract(connection) == {
+            name: (column_type, False)
+            for name, column_type in _PR1_LLM_USAGE_AUDIT_COLUMN_TYPES.items()
+        }
+        assert llm_indexes == _PR1_LLM_USAGE_AUDIT_INDEXES
+
+        partial_unique_indexes = {
+            row[1]: (bool(row[2]), bool(row[4]))
+            for table_name in (
+                "analysis_jobs",
+                "analysis_history",
+                "decision_signals",
+            )
+            for row in connection.execute(f"PRAGMA index_list('{table_name}')")
+        }
+        assert partial_unique_indexes["uix_analysis_jobs_idempotency_key"] == (
+            True,
+            True,
+        )
+        assert partial_unique_indexes["uix_analysis_jobs_active_dedupe_key"] == (
+            True,
+            True,
+        )
+        assert partial_unique_indexes[
+            "uix_analysis_history_job_code_report_type"
+        ] == (True, True)
+        assert partial_unique_indexes[
+            "uix_decision_signals_idempotency_key"
+        ] == (True, True)
+
+
+def test_pr1_migrates_pr0_shaped_schema_preserves_rows_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "pr0-shaped.db"
+    database_url = _sqlite_url(database_path)
+    _create_pr0_shaped_schema(database_path)
+
+    before = check_migration_state(database_url)
+    first = apply_migrations(database_url)
+    with sqlite3.connect(database_path) as connection:
+        first_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+        first_rows = (
+            connection.execute("SELECT COUNT(*) FROM llm_usage").fetchone()[0],
+            connection.execute(
+                "SELECT COUNT(*) FROM analysis_history"
+            ).fetchone()[0],
+            connection.execute(
+                "SELECT COUNT(*) FROM decision_signals"
+            ).fetchone()[0],
+        )
+        llm_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info('llm_usage')")
+        }
+        llm_indexes = {
+            row[1]: tuple(
+                info[2]
+                for info in connection.execute(f"PRAGMA index_info('{row[1]}')")
+            )
+            for row in connection.execute("PRAGMA index_list('llm_usage')")
+            if row[1] in _PR1_LLM_USAGE_AUDIT_INDEXES
+        }
+        audit_values = connection.execute(
+            "SELECT latency_ms, error_code, error_message_sanitized, "
+            "estimated_cost_usd, cost_source, attempt_no FROM llm_usage"
+        ).fetchone()
+        llm_audit_contract = _llm_usage_audit_column_contract(connection)
+        history_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info('analysis_history')")
+        }
+        signal_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info('decision_signals')")
+        }
+
+    second = apply_migrations(database_url)
+    with sqlite3.connect(database_path) as connection:
+        second_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+        second_rows = (
+            connection.execute("SELECT COUNT(*) FROM llm_usage").fetchone()[0],
+            connection.execute(
+                "SELECT COUNT(*) FROM analysis_history"
+            ).fetchone()[0],
+            connection.execute(
+                "SELECT COUNT(*) FROM decision_signals"
+            ).fetchone()[0],
+        )
+
+    assert before.pending_versions == (PR1_DURABLE_JOBS_SCHEMA_VERSION,)
+    assert first.is_current is True
+    assert second.is_current is True
+    assert first_schema == second_schema
+    assert first_rows == second_rows == (1, 1, 1)
+    assert _PR1_LLM_USAGE_AUDIT_COLUMNS.issubset(llm_columns)
+    assert _PR1_LLM_USAGE_FORBIDDEN_GENERIC_COLUMNS.isdisjoint(llm_columns)
+    assert llm_audit_contract == {
+        name: (column_type, False)
+        for name, column_type in _PR1_LLM_USAGE_AUDIT_COLUMN_TYPES.items()
+    }
+    assert llm_indexes == _PR1_LLM_USAGE_AUDIT_INDEXES
+    assert audit_values == (None, None, None, None, None, None)
+    assert "job_id" in history_columns
+    assert "idempotency_key" in signal_columns
+
+
+def test_pr1_rejects_ambiguous_generic_llm_audit_columns(tmp_path: Path) -> None:
+    database_path = tmp_path / "ambiguous-llm-audit.db"
+    database_url = _sqlite_url(database_path)
+    _create_pr0_shaped_schema(database_path)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("ALTER TABLE llm_usage ADD COLUMN error TEXT")
+
+    with pytest.raises(RuntimeError, match="ambiguous audit columns: error"):
+        apply_migrations(database_url)
+
+    state = check_migration_state(database_url)
+    assert state.pending_versions == (PR1_DURABLE_JOBS_SCHEMA_VERSION,)
+    with sqlite3.connect(database_path) as connection:
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info('llm_usage')")
+        }
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+    assert columns == {"id", "called_at", "error"}
+    assert "analysis_jobs" not in tables
+
+
+def test_pr1_schema_failure_rolls_back_ddl_and_does_not_record_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src import storage
+
+    database_path = tmp_path / "pr1-rollback.db"
+    database_url = _sqlite_url(database_path)
+    _create_pr0_shaped_schema(
+        database_path,
+        include_migration_history=False,
+    )
+    with sqlite3.connect(database_path) as connection:
+        before_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+
+    def fail_contract(_connection) -> None:
+        raise RuntimeError("injected PR1 schema verification failure")
+
+    monkeypatch.setattr(
+        storage,
+        "_verify_pr1_durable_schema_contract",
+        fail_contract,
+    )
+    with pytest.raises(RuntimeError, match="injected PR1"):
+        apply_migrations(
+            database_url,
+            migrations=(
+                Migration(
+                    PR1_DURABLE_JOBS_SCHEMA_VERSION,
+                    "injected rollback probe",
+                    storage.run_pr1_durable_jobs_schema_upgrade,
+                ),
+            ),
+        )
+
+    with sqlite3.connect(database_path) as connection:
+        after_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' "
+            "AND name NOT IN ('schema_migrations', 'ix_schema_migrations_applied_at') "
+            "ORDER BY type, name"
+        ).fetchall()
+        migration_rows = connection.execute(
+            "SELECT version FROM schema_migrations"
+        ).fetchall()
+
+    assert after_schema == before_schema
+    assert migration_rows == []
 
 
 def test_apply_serializes_concurrent_writers(tmp_path: Path) -> None:

@@ -140,6 +140,34 @@ def screening_start_screen_task(
     task_id = uuid.uuid4().hex
     task_queue = get_task_queue()
 
+    if getattr(task_queue, "durable_enabled", False) is True:
+        task = task_queue.submit_typed_job(
+            "screening_screen",
+            {
+                "strategy": request.strategy,
+                "market": request.market,
+                "max_results": request.max_results,
+                "selection_seed": request.variant_seed or "",
+            },
+            task_id=task_id,
+            trace_id=task_id,
+            stock_code="screening_screen",
+            stock_name=f"{request.strategy} / {request.market}",
+            report_type="screening_screen",
+            message="选股任务已提交",
+            idempotency_key=f"screening_screen:{task_id}",
+            notify=False,
+        )
+        return ScreeningScreenAccepted(
+            task_id=task.task_id,
+            trace_id=task.trace_id or task.task_id,
+            status=task.status.value if isinstance(task.status, QueueTaskStatus) else str(task.status),
+            message=task.message or "选股任务已提交",
+            strategy=request.strategy,
+            market=request.market,
+            max_results=request.max_results,
+        )
+
     def run_screen() -> Dict[str, Any]:
         task_queue.update_task_progress(
             task_id,

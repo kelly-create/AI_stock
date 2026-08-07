@@ -20,6 +20,9 @@ def test_personal_research_flags_default_to_compatible_off_state() -> None:
     assert config.database_migration_mode == "auto"
     assert config.personal_research_enabled is False
     assert config.durable_jobs_enabled is False
+    assert config.durable_worker_id is None
+    assert config.durable_worker_health_max_age_seconds == 45
+    assert config.durable_worker_startup_timeout_seconds == 120
     assert config.tushare_research_enabled is False
     assert config.research_factors_enabled is False
     assert config.research_evidence_enabled is False
@@ -110,6 +113,28 @@ def test_runtime_env_loader_rejects_research_flag_typo() -> None:
     ):
         with pytest.raises(ValueError, match="PERSONAL_RESEARCH_ENABLED"):
             Config._load_from_env()
+
+
+def test_runtime_env_loader_reads_durable_worker_startup_contract() -> None:
+    with patch.dict(
+        "os.environ",
+        {
+            "STOCK_LIST": "600519",
+            "DURABLE_WORKER_ID": "worker-a",
+            "DURABLE_WORKER_HEALTH_MAX_AGE_SECONDS": "30",
+            "DURABLE_WORKER_STARTUP_TIMEOUT_SECONDS": "75",
+        },
+        clear=True,
+    ), patch("src.config.setup_env"), patch.object(
+        Config,
+        "_parse_litellm_yaml",
+        return_value=[],
+    ):
+        config = Config._load_from_env()
+
+    assert config.durable_worker_id == "worker-a"
+    assert config.durable_worker_health_max_age_seconds == 30
+    assert config.durable_worker_startup_timeout_seconds == 75
 
 
 def test_system_config_cross_field_validation_rejects_incomplete_save() -> None:

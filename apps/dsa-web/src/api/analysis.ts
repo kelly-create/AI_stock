@@ -9,6 +9,7 @@ import type {
   MarketReviewAccepted,
   MarketReviewRequest,
   TaskStatus,
+  TaskCancelResponse,
   TaskListResponse,
 } from '../types/analysis';
 import type { RunFlowSnapshot } from '../types/runFlow';
@@ -164,6 +165,14 @@ export const analysisApi = {
     return data;
   },
 
+  /** Request cancellation at the next safe worker boundary. */
+  cancelTask: async (taskId: string): Promise<TaskCancelResponse> => {
+    const response = await apiClient.post<Record<string, unknown>>(
+      `/api/v1/analysis/tasks/${encodeURIComponent(taskId)}/cancel`
+    );
+    return toCamelCase<TaskCancelResponse>(response.data);
+  },
+
   /**
    * Get a run-flow snapshot for an active analysis task.
    * @param taskId Task ID
@@ -179,10 +188,15 @@ export const analysisApi = {
   /**
    * Get the SSE stream URL.
    */
-  getTaskStreamUrl: (): string => {
+  getTaskStreamUrl: (lastEventId?: string): string => {
     // Read API base URL from the shared client.
     const baseUrl = apiClient.defaults.baseURL || '';
-    return `${baseUrl}/api/v1/analysis/tasks/stream`;
+    const streamUrl = `${baseUrl}/api/v1/analysis/tasks/stream`;
+    if (!lastEventId) {
+      return streamUrl;
+    }
+    const separator = streamUrl.includes('?') ? '&' : '?';
+    return `${streamUrl}${separator}last_event_id=${encodeURIComponent(lastEventId)}`;
   },
 };
 

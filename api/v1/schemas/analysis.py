@@ -298,6 +298,10 @@ class TaskStatus(BaseModel):
         ..., 
         description="任务状态",
     )
+    stage: Optional[str] = Field(
+        None,
+        description="Durable worker execution stage, separate from the coarse task status.",
+    )
     progress: Optional[int] = Field(
         None, 
         description="进度百分比 (0-100)",
@@ -354,6 +358,14 @@ class TaskStatus(BaseModel):
     })
 
 
+class TaskCancelResponse(BaseModel):
+    """Result of a durable task cancellation request."""
+
+    task_id: str = Field(..., description="任务 ID")
+    status: TaskStatusEnum = Field(..., description="取消请求后的任务状态")
+    message: str = Field(..., description="取消结果说明")
+
+
 class TaskInfo(BaseModel):
     """
     Task details model
@@ -366,6 +378,10 @@ class TaskInfo(BaseModel):
     stock_code: str = Field(..., description="股票代码")
     stock_name: Optional[str] = Field(None, description="股票名称")
     status: TaskStatusEnum = Field(..., description="任务状态")
+    stage: Optional[str] = Field(
+        None,
+        description="Durable worker execution stage, separate from the coarse task status.",
+    )
     progress: int = Field(0, description="进度百分比 (0-100)", ge=0, le=100)
     message: Optional[str] = Field(None, description="状态消息")
     report_type: str = Field("detailed", description="报告类型")

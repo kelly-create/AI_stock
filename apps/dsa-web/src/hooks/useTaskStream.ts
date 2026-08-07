@@ -14,6 +14,9 @@ export type SSEEventType =
   | 'task_progress'
   | 'task_completed'
   | 'task_failed'
+  | 'task_cancel_requested'
+  | 'task_cancelled'
+  | 'stream_reset'
   | 'heartbeat';
 
 /**
@@ -40,6 +43,10 @@ export interface UseTaskStreamOptions {
   onTaskProgress?: (task: TaskInfo) => void;
   /** Task failed callback */
   onTaskFailed?: (task: TaskInfo) => void;
+  /** Task cancellation accepted callback */
+  onTaskCancelRequested?: (task: TaskInfo) => void;
+  /** Task cancelled callback */
+  onTaskCancelled?: (task: TaskInfo) => void;
   /** Incremental run-flow event callback carried by task_progress */
   onTaskFlowEvent?: (task: TaskInfo, event: RunFlowEvent) => void;
   /** Connected callback */
@@ -73,6 +80,8 @@ type TaskStreamCallbacks = Pick<
   | 'onTaskCompleted'
   | 'onTaskProgress'
   | 'onTaskFailed'
+  | 'onTaskCancelRequested'
+  | 'onTaskCancelled'
   | 'onTaskFlowEvent'
   | 'onConnected'
   | 'onError'
@@ -93,6 +102,7 @@ type TaskStreamSubscriber = {
 let sharedEventSource: EventSource | null = null;
 let sharedReconnectTimeout: ReturnType<typeof setTimeout> | null = null;
 let sharedConnected = false;
+let sharedLastEventId: string | null = null;
 let nextSubscriberId = 1;
 const subscribers = new Map<number, TaskStreamSubscriber>();
 
@@ -103,6 +113,7 @@ const toTaskInfo = (data: Record<string, unknown>): TaskInfo => {
     stockCode: data.stock_code as string,
     stockName: data.stock_name as string | undefined,
     status: data.status as TaskInfo['status'],
+    stage: typeof data.stage === 'string' ? data.stage : undefined,
     progress: data.progress as number,
     message: data.message as string | undefined,
     reportType: data.report_type as string,
@@ -149,6 +160,13 @@ const forEachSubscriber = (notify: (callbacks: TaskStreamCallbacks) => void) => 
   subscribers.forEach((subscriber) => notify(subscriber.callbacksRef.current));
 };
 
+const rememberEventCursor = (event: Event) => {
+  const lastEventId = (event as MessageEvent<string>).lastEventId;
+  if (typeof lastEventId === 'string' && lastEventId.trim()) {
+    sharedLastEventId = lastEventId.trim();
+  }
+};
+
 const clearSharedReconnect = () => {
   if (sharedReconnectTimeout) {
     clearTimeout(sharedReconnectTimeout);
@@ -192,16 +210,26 @@ function connectSharedStream() {
     return;
   }
 
-  const url = analysisApi.getTaskStreamUrl();
+  const url = analysisApi.getTaskStreamUrl(sharedLastEventId ?? undefined);
   const eventSource = new window.EventSource(url, { withCredentials: true });
   sharedEventSource = eventSource;
 
-  eventSource.addEventListener('connected', () => {
+  eventSource.addEventListener('connected', (event) => {
+    rememberEventCursor(event);
+    try {
+      const payload = JSON.parse((event as MessageEvent<string>).data || '{}');
+      if (payload.reset_required === true) {
+        sharedLastEventId = null;
+      }
+    } catch {
+      // A legacy connected event may not carry JSON; keep compatibility.
+    }
     notifyConnectionState(true);
     forEachSubscriber((callbacks) => callbacks.onConnected?.());
   });
 
   eventSource.addEventListener('task_created', (e) => {
+    rememberEventCursor(e);
     const payload = parseEventData((e as MessageEvent<string>).data);
     if (payload) {
       forEachSubscriber((callbacks) => callbacks.onTaskCreated?.(payload.task));
@@ -209,6 +237,7 @@ function connectSharedStream() {
   });
 
   eventSource.addEventListener('task_started', (e) => {
+    rememberEventCursor(e);
     const payload = parseEventData((e as MessageEvent<string>).data);
     if (payload) {
       forEachSubscriber((callbacks) => callbacks.onTaskStarted?.(payload.task));
@@ -216,6 +245,7 @@ function connectSharedStream() {
   });
 
   eventSource.addEventListener('task_progress', (e) => {
+    rememberEventCursor(e);
     const payload = parseEventData((e as MessageEvent<string>).data);
     if (payload) {
       forEachSubscriber((callbacks) => {
@@ -228,6 +258,7 @@ function connectSharedStream() {
   });
 
   eventSource.addEventListener('task_completed', (e) => {
+    rememberEventCursor(e);
     const payload = parseEventData((e as MessageEvent<string>).data);
     if (payload) {
       forEachSubscriber((callbacks) => callbacks.onTaskCompleted?.(payload.task));
@@ -235,10 +266,31 @@ function connectSharedStream() {
   });
 
   eventSource.addEventListener('task_failed', (e) => {
+    rememberEventCursor(e);
     const payload = parseEventData((e as MessageEvent<string>).data);
     if (payload) {
       forEachSubscriber((callbacks) => callbacks.onTaskFailed?.(payload.task));
     }
+  });
+
+  eventSource.addEventListener('task_cancel_requested', (e) => {
+    rememberEventCursor(e);
+    const payload = parseEventData((e as MessageEvent<string>).data);
+    if (payload) {
+      forEachSubscriber((callbacks) => callbacks.onTaskCancelRequested?.(payload.task));
+    }
+  });
+
+  eventSource.addEventListener('task_cancelled', (e) => {
+    rememberEventCursor(e);
+    const payload = parseEventData((e as MessageEvent<string>).data);
+    if (payload) {
+      forEachSubscriber((callbacks) => callbacks.onTaskCancelled?.(payload.task));
+    }
+  });
+
+  eventSource.addEventListener('stream_reset', () => {
+    sharedLastEventId = null;
   });
 
   eventSource.addEventListener('heartbeat', () => {
@@ -271,6 +323,8 @@ export function useTaskStream(options: UseTaskStreamOptions = {}): UseTaskStream
     onTaskCompleted,
     onTaskProgress,
     onTaskFailed,
+    onTaskCancelRequested,
+    onTaskCancelled,
     onTaskFlowEvent,
     onConnected,
     onError,
@@ -290,6 +344,8 @@ export function useTaskStream(options: UseTaskStreamOptions = {}): UseTaskStream
     onTaskCompleted,
     onTaskProgress,
     onTaskFailed,
+    onTaskCancelRequested,
+    onTaskCancelled,
     onTaskFlowEvent,
     onConnected,
     onError,
@@ -303,6 +359,8 @@ export function useTaskStream(options: UseTaskStreamOptions = {}): UseTaskStream
       onTaskCompleted,
       onTaskProgress,
       onTaskFailed,
+      onTaskCancelRequested,
+      onTaskCancelled,
       onTaskFlowEvent,
       onConnected,
       onError,

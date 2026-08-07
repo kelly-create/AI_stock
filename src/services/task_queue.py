@@ -70,6 +70,7 @@ class TaskInfo:
     stock_code: str
     stock_name: Optional[str] = None
     status: TaskStatus = TaskStatus.PENDING
+    stage: Optional[str] = None
     progress: int = 0
     message: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
@@ -109,6 +110,8 @@ class TaskInfo:
             "selection_source": self.selection_source,
             "skills": self.skills,
         }
+        if self.stage is not None:
+            payload["stage"] = self.stage
         if self.region is not None:
             payload["region"] = self.region
         return payload
@@ -120,6 +123,7 @@ class TaskInfo:
             stock_code=self.stock_code,
             stock_name=self.stock_name,
             status=self.status,
+            stage=self.stage,
             progress=self.progress,
             message=self.message,
             result=self.result,
@@ -180,6 +184,21 @@ class AnalysisTaskQueue:
         # 防止重复初始化
         if hasattr(self, '_initialized') and self._initialized:
             return
+
+        # The durable backend is deliberately latched once, when the process
+        # singleton is first initialized.  Changing the persisted setting at
+        # runtime must not leave one process half in-memory and half durable;
+        # the settings API marks this flag as restart-required.
+        from src.config import get_config
+
+        config = get_config()
+        self._durable_enabled = getattr(config, "durable_jobs_enabled", False) is True
+        self._durable_store = None
+        if self._durable_enabled:
+            from src.services.durable_job_handlers import build_default_durable_job_registry
+            from src.services.durable_jobs import DurableJobStore
+
+            self._durable_store = DurableJobStore(build_default_durable_job_registry())
         
         self._max_workers = max_workers
         self._executor: Optional[ThreadPoolExecutor] = None
@@ -204,11 +223,25 @@ class AnalysisTaskQueue:
         self._max_flow_events_per_task = 200
         
         self._initialized = True
-        logger.info(f"[TaskQueue] 初始化完成，最大并发: {max_workers}")
+        logger.info(
+            "[TaskQueue] 初始化完成，后端: %s，最大并发: %s",
+            "durable" if self._durable_enabled else "memory",
+            max_workers,
+        )
+
+    @property
+    def durable_enabled(self) -> bool:
+        """Whether this process singleton was started with durable jobs enabled."""
+
+        return self._durable_enabled
     
     @property
     def executor(self) -> ThreadPoolExecutor:
         """懒加载线程池"""
+        if self._durable_enabled:
+            raise RuntimeError(
+                "Durable task queues do not execute callables in the API process"
+            )
         if self._executor is None:
             self._executor = ThreadPoolExecutor(
                 max_workers=self._max_workers,
@@ -258,6 +291,19 @@ class AnalysisTaskQueue:
             if target == previous:
                 return "unchanged"
 
+            if self._durable_enabled:
+                # Worker concurrency belongs to the dedicated worker process.
+                # Keep the configured value observable without ever creating
+                # or rotating an API-side executor.
+                self._max_workers = target
+                if log:
+                    logger.info(
+                        "[TaskQueue] durable 模式记录 MAX_WORKERS: %s -> %s",
+                        previous,
+                        target,
+                    )
+                return "applied"
+
             if self._has_inflight_tasks_locked():
                 if log:
                     logger.info(
@@ -290,6 +336,8 @@ class AnalysisTaskQueue:
         Returns:
             True 表示正在分析中
         """
+        if self._durable_enabled:
+            return self.get_analyzing_task_id(stock_code) is not None
         dedupe_key = _dedupe_stock_code_key(stock_code)
         with self._data_lock:
             return dedupe_key in self._analyzing_stocks
@@ -305,6 +353,11 @@ class AnalysisTaskQueue:
             任务 ID，如果没有则返回 None
         """
         dedupe_key = _dedupe_stock_code_key(stock_code)
+        if self._durable_enabled:
+            for job in self._durable_store.list_active_jobs(limit=5000):
+                if job.stock_code and _dedupe_stock_code_key(job.stock_code) == dedupe_key:
+                    return job.task_id
+            return None
         with self._data_lock:
             return self._analyzing_stocks.get(dedupe_key)
 
@@ -409,6 +462,22 @@ class AnalysisTaskQueue:
             if normalized
         ]
 
+        if self._durable_enabled:
+            return self._submit_durable_stock_tasks(
+                canonical_codes,
+                stock_name=stock_name,
+                original_query=original_query,
+                selection_source=selection_source,
+                query_source=query_source,
+                portfolio_context=portfolio_context,
+                report_type=report_type,
+                analysis_phase=analysis_phase,
+                force_refresh=force_refresh,
+                notify=notify,
+                skills=skills,
+                report_language=report_language,
+            )
+
         with self._data_lock:
             for stock_code in canonical_codes:
                 dedupe_key = _dedupe_stock_code_key(stock_code)
@@ -467,6 +536,227 @@ class AnalysisTaskQueue:
 
         return accepted, duplicates
 
+    def _submit_durable_stock_tasks(
+        self,
+        stock_codes: List[str],
+        *,
+        stock_name: Optional[str],
+        original_query: Optional[str],
+        selection_source: Optional[str],
+        query_source: str,
+        portfolio_context: Optional[Dict[str, Any]],
+        report_type: str,
+        analysis_phase: str,
+        force_refresh: bool,
+        notify: bool,
+        skills: Optional[List[str]],
+        report_language: Optional[str],
+    ) -> Tuple[List[TaskInfo], List[DuplicateTaskError]]:
+        """Atomically enqueue versioned stock-analysis jobs without executing them."""
+
+        from src.services.durable_jobs import (
+            DurableJobConflictError,
+            JobEnqueueRequest,
+        )
+
+        active_by_key = {
+            _dedupe_stock_code_key(job.stock_code): job
+            for job in self._durable_store.list_active_jobs(limit=5000)
+            if job.stock_code
+        }
+        duplicates: List[DuplicateTaskError] = []
+        prepared: List[Tuple[Any, TaskInfo, str]] = []
+        reserved_by_key: Dict[str, str] = {}
+
+        for stock_code in stock_codes:
+            dedupe_key = _dedupe_stock_code_key(stock_code)
+            existing = active_by_key.get(dedupe_key)
+            existing_task_id = (
+                existing.task_id if existing is not None else reserved_by_key.get(dedupe_key)
+            )
+            if existing_task_id:
+                duplicates.append(DuplicateTaskError(stock_code, existing_task_id))
+                continue
+
+            task_id = uuid.uuid4().hex
+            trace_id = task_id
+            task_skills = list(skills) if skills is not None else None
+            copied_portfolio = (
+                copy.deepcopy(portfolio_context)
+                if isinstance(portfolio_context, dict)
+                else None
+            )
+            payload = {
+                "stock_code": stock_code,
+                "stock_name": stock_name,
+                "original_query": original_query,
+                "selection_source": selection_source,
+                "report_type": report_type,
+                "force_refresh": bool(force_refresh),
+                "notify": bool(notify),
+                "skills": task_skills or [],
+                "analysis_phase": analysis_phase or "auto",
+                "query_source": query_source or "api",
+                "portfolio_context": copied_portfolio,
+                "report_language": report_language,
+            }
+            request = JobEnqueueRequest(
+                job_type="stock_analysis",
+                payload=payload,
+                payload_version=1,
+                task_id=task_id,
+                stock_code=stock_code,
+                stock_name=stock_name,
+                dedupe_key=dedupe_key,
+                idempotency_key=f"stock_analysis:{task_id}",
+                message="任务已加入队列",
+                report_type=report_type,
+                analysis_phase=analysis_phase or "auto",
+                query_source=query_source or "api",
+                trace_id=trace_id,
+                notify=bool(notify),
+            )
+            task_info = TaskInfo(
+                task_id=task_id,
+                trace_id=trace_id,
+                stock_code=stock_code,
+                stock_name=stock_name,
+                status=TaskStatus.PENDING,
+                message="任务已加入队列",
+                report_type=report_type,
+                analysis_phase=analysis_phase or "auto",
+                original_query=original_query,
+                selection_source=selection_source,
+                query_source=query_source or "api",
+                portfolio_context=copied_portfolio,
+                skills=task_skills,
+                report_language=report_language,
+            )
+            prepared.append((request, task_info, dedupe_key))
+            reserved_by_key[dedupe_key] = task_id
+
+        # A competing API process may win an active-stock insert after the
+        # read above.  The store rolls the whole transaction back on conflict;
+        # reclassify only observed active-stock conflicts, then retry the
+        # remaining batch atomically.  Idempotency/payload conflicts propagate.
+        while prepared:
+            try:
+                results = self._durable_store.enqueue_many(
+                    [request for request, _task, _key in prepared]
+                )
+                break
+            except DurableJobConflictError:
+                refreshed = {
+                    _dedupe_stock_code_key(job.stock_code): job
+                    for job in self._durable_store.list_active_jobs(limit=5000)
+                    if job.stock_code
+                }
+                remaining: List[Tuple[Any, TaskInfo, str]] = []
+                resolved_race = False
+                for item in prepared:
+                    _request, task_info, dedupe_key = item
+                    existing = refreshed.get(dedupe_key)
+                    if existing is None:
+                        remaining.append(item)
+                        continue
+                    duplicates.append(
+                        DuplicateTaskError(task_info.stock_code, existing.task_id)
+                    )
+                    resolved_race = True
+                if not resolved_race:
+                    raise
+                prepared = remaining
+        else:
+            results = []
+
+        accepted: List[TaskInfo] = []
+        for result, (_request, task_info, _dedupe_key) in zip(results, prepared):
+            if result.created:
+                snapshot = self._durable_store.get_job(result.task_id)
+                if snapshot is None:
+                    raise RuntimeError(
+                        f"Durable job disappeared after batch enqueue: {result.task_id}"
+                    )
+                accepted.append(self._durable_snapshot_to_task_info(snapshot))
+                logger.info(
+                    "[TaskQueue] durable 任务已入队: %s -> %s",
+                    task_info.stock_code,
+                    task_info.task_id,
+                )
+                continue
+            duplicates.append(
+                DuplicateTaskError(task_info.stock_code, result.task_id)
+            )
+
+        return accepted, duplicates
+
+    def submit_typed_job(
+        self,
+        job_type: str,
+        payload: Dict[str, Any],
+        *,
+        payload_version: int = 1,
+        stock_code: Optional[str] = None,
+        stock_name: Optional[str] = None,
+        report_type: Optional[str] = None,
+        analysis_phase: str = "auto",
+        query_source: Optional[str] = None,
+        notify: bool = True,
+        message: Optional[str] = None,
+        stage: Optional[str] = None,
+        task_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
+        region: Optional[str] = None,
+        dedupe_key: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+        priority: int = 0,
+        max_attempts: int = 4,
+    ) -> TaskInfo:
+        """Enqueue one registered JSON job for execution by a durable worker."""
+
+        if not self._durable_enabled:
+            raise RuntimeError("Typed jobs require DURABLE_JOBS_ENABLED=true")
+        if not isinstance(payload, dict):
+            raise TypeError("payload must be a dictionary")
+        if region is not None and payload.get("region") != region:
+            raise ValueError("region must be persisted unchanged in the typed payload")
+
+        from src.services.durable_jobs import JobEnqueueRequest
+
+        resolved_task_id = task_id or uuid.uuid4().hex
+        resolved_trace_id = trace_id or resolved_task_id
+        resolved_stock_code = stock_code or str(payload.get("stock_code") or job_type)
+        resolved_query_source = (
+            query_source
+            or payload.get("query_source")
+            or payload.get("trigger_source")
+            or "api"
+        )
+        request = JobEnqueueRequest(
+            job_type=job_type,
+            payload=copy.deepcopy(payload),
+            payload_version=payload_version,
+            task_id=resolved_task_id,
+            stock_code=resolved_stock_code,
+            stock_name=stock_name,
+            dedupe_key=dedupe_key,
+            idempotency_key=idempotency_key,
+            priority=priority,
+            max_attempts=max_attempts,
+            stage=stage,
+            message=message,
+            report_type=report_type,
+            analysis_phase=analysis_phase,
+            query_source=str(resolved_query_source),
+            trace_id=resolved_trace_id,
+            notify=notify,
+        )
+        result = self._durable_store.enqueue(request)
+        snapshot = self._durable_store.get_job(result.task_id)
+        if snapshot is None:
+            raise RuntimeError(f"Durable job disappeared after enqueue: {result.task_id}")
+        return self._durable_snapshot_to_task_info(snapshot)
+
     def submit_background_task(
         self,
         run_task: Callable[[], Optional[Any]],
@@ -485,6 +775,11 @@ class AnalysisTaskQueue:
         This is used by callers that need task status visibility but do not
         map to standard per-stock async analysis flow.
         """
+        if self._durable_enabled:
+            raise RuntimeError(
+                "submit_background_task(callable) is unavailable in durable mode; "
+                "register a versioned handler and call submit_typed_job()"
+            )
         task_id = task_id or uuid.uuid4().hex
         task_info = TaskInfo(
             task_id=task_id,
@@ -535,6 +830,9 @@ class AnalysisTaskQueue:
         Returns:
             TaskInfo 或 None
         """
+        if self._durable_enabled:
+            snapshot = self._durable_store.get_job(task_id)
+            return self._durable_snapshot_to_task_info(snapshot) if snapshot else None
         with self._data_lock:
             task = self._tasks.get(task_id)
             return task.copy() if task else None
@@ -549,6 +847,10 @@ class AnalysisTaskQueue:
         The event cache is deliberately bounded and fail-open; diagnostics must
         never affect the analysis pipeline.
         """
+        if self._durable_enabled:
+            raise RuntimeError(
+                "Durable flow events must be emitted by the lease-owning worker"
+            )
         try:
             event_payload = copy.deepcopy(flow_event)
         except Exception:
@@ -571,6 +873,18 @@ class AnalysisTaskQueue:
 
     def get_task_flow_events(self, task_id: str) -> List[Dict[str, Any]]:
         """Return a copy of the recent run-flow events for a task."""
+        if self._durable_enabled:
+            events = self._durable_store.read_events(
+                after_id=0,
+                job_id=task_id,
+                limit=5000,
+            )
+            flow_events = [
+                copy.deepcopy(event.payload)
+                for event in events
+                if event.event_type == "task_flow" and isinstance(event.payload, dict)
+            ]
+            return flow_events[-self._max_flow_events_per_task:]
         with self._data_lock:
             task = self._tasks.get(task_id)
             if not task:
@@ -584,6 +898,11 @@ class AnalysisTaskQueue:
         Returns:
             任务列表（副本）
         """
+        if self._durable_enabled:
+            return [
+                self._durable_snapshot_to_task_info(snapshot)
+                for snapshot in self._durable_store.list_active_jobs(limit=5000)
+            ]
         with self._data_lock:
             return [
                 task.copy() for task in self._tasks.values()
@@ -600,6 +919,11 @@ class AnalysisTaskQueue:
         Returns:
             任务列表（副本）
         """
+        if self._durable_enabled:
+            return [
+                self._durable_snapshot_to_task_info(snapshot)
+                for snapshot in self._durable_store.list_jobs(limit=limit)
+            ]
         with self._data_lock:
             tasks = sorted(
                 self._tasks.values(),
@@ -615,6 +939,18 @@ class AnalysisTaskQueue:
         Returns:
             统计信息字典
         """
+        if self._durable_enabled:
+            raw = self._durable_store.get_status_counts()
+            stats = {
+                "total": sum(raw.values()),
+                "pending": raw.get("pending", 0),
+                "processing": raw.get("processing", 0),
+                "completed": raw.get("succeeded", 0),
+                "failed": raw.get("failed", 0),
+                "cancel_requested": raw.get("cancel_requested", 0),
+                "cancelled": raw.get("cancelled", 0),
+            }
+            return stats
         with self._data_lock:
             stats = {
                 "total": len(self._tasks),
@@ -626,6 +962,156 @@ class AnalysisTaskQueue:
             for task in self._tasks.values():
                 stats[task.status.value] = stats.get(task.status.value, 0) + 1
             return stats
+
+    def cancel_task(self, task_id: str) -> Optional[TaskInfo]:
+        """Request cancellation and return the latest detached task state."""
+
+        if self._durable_enabled:
+            from src.services.durable_jobs import JobNotFoundError
+
+            try:
+                self._durable_store.cancel(task_id)
+            except JobNotFoundError:
+                return None
+            snapshot = self._durable_store.get_job(task_id)
+            return self._durable_snapshot_to_task_info(snapshot) if snapshot else None
+
+        with self._data_lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                return None
+            if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
+                return task.copy()
+
+            future = self._futures.get(task_id)
+            cancelled_before_start = bool(
+                task.status == TaskStatus.PENDING
+                and future is not None
+                and future.cancel()
+            )
+            if not cancelled_before_start:
+                # The legacy executor has no cooperative cancellation
+                # checkpoints.  Reporting cancel_requested here would be
+                # dishonest because the callable will continue and overwrite
+                # that state with completed/failed.  Durable workers own the
+                # only processing-job cancellation contract.
+                raise RuntimeError(
+                    "Legacy 任务已开始执行，当前后端不支持中途取消"
+                )
+
+            task.completed_at = datetime.now()
+            task.status = TaskStatus.CANCELLED
+            task.message = "任务已取消"
+            dedupe_key = _dedupe_stock_code_key(task.stock_code)
+            if self._analyzing_stocks.get(dedupe_key) == task_id:
+                del self._analyzing_stocks[dedupe_key]
+            snapshot = task.copy()
+
+        self._broadcast_event(
+            "task_cancelled",
+            snapshot.to_dict(),
+        )
+        return snapshot
+
+    def read_durable_events(
+        self,
+        after_id: int = 0,
+        limit: int = 500,
+        job_id: Optional[str] = None,
+    ) -> List[Any]:
+        """Read globally ordered, detached durable events for SSE replay."""
+
+        self._require_durable_backend()
+        return self._durable_store.read_events(
+            after_id=after_id,
+            limit=limit,
+            job_id=job_id,
+        )
+
+    def durable_event_high_water(self) -> int:
+        """Return the current maximum durable event cursor."""
+
+        self._require_durable_backend()
+        return self._durable_store.get_high_water_event_id()
+
+    def durable_event_min_id(self) -> Optional[int]:
+        """Return the oldest retained durable event cursor, if any."""
+
+        self._require_durable_backend()
+        return self._durable_store.get_min_event_id()
+
+    def _require_durable_backend(self) -> None:
+        if not self._durable_enabled or self._durable_store is None:
+            raise RuntimeError("DURABLE_JOBS_ENABLED is not active for this process")
+
+    @staticmethod
+    def _durable_snapshot_to_task_info(snapshot: Any) -> TaskInfo:
+        """Map a lease-token-free DB snapshot onto the legacy Web contract."""
+
+        status_map = {
+            "pending": TaskStatus.PENDING,
+            "processing": TaskStatus.PROCESSING,
+            "succeeded": TaskStatus.COMPLETED,
+            "failed": TaskStatus.FAILED,
+            "cancel_requested": TaskStatus.CANCEL_REQUESTED,
+            "cancelled": TaskStatus.CANCELLED,
+        }
+        try:
+            task_status = status_map[snapshot.status]
+        except KeyError as exc:
+            raise ValueError(
+                f"Unsupported durable job status: {snapshot.status!r}"
+            ) from exc
+
+        payload = snapshot.payload if isinstance(snapshot.payload, dict) else {}
+        result = snapshot.result
+        result_mapping = result if isinstance(result, dict) else {}
+        skills = payload.get("skills")
+        if not isinstance(skills, list) or not skills:
+            skills = None
+        portfolio_context = payload.get("portfolio_context")
+        if not isinstance(portfolio_context, dict):
+            portfolio_context = None
+
+        error = snapshot.error_message_sanitized
+        if error is None and task_status == TaskStatus.FAILED:
+            error = snapshot.error_code or "Durable job failed"
+
+        return TaskInfo(
+            task_id=snapshot.task_id,
+            trace_id=snapshot.trace_id or snapshot.task_id,
+            stock_code=snapshot.stock_code or str(payload.get("stock_code") or snapshot.job_type),
+            stock_name=(
+                snapshot.stock_name
+                or payload.get("stock_name")
+                or result_mapping.get("stock_name")
+                or result_mapping.get("name")
+            ),
+            status=task_status,
+            stage=snapshot.stage,
+            progress=snapshot.progress,
+            message=snapshot.message,
+            result=copy.deepcopy(result),
+            error=error,
+            report_type=snapshot.report_type or str(payload.get("report_type") or "detailed"),
+            analysis_phase=(
+                snapshot.analysis_phase
+                or str(payload.get("analysis_phase") or "auto")
+            ),
+            created_at=snapshot.created_at,
+            started_at=snapshot.started_at,
+            completed_at=snapshot.completed_at,
+            original_query=payload.get("original_query"),
+            selection_source=payload.get("selection_source"),
+            query_source=(
+                snapshot.query_source
+                or str(payload.get("query_source") or payload.get("trigger_source") or "api")
+            ),
+            portfolio_context=copy.deepcopy(portfolio_context),
+            skills=copy.deepcopy(skills),
+            report_language=payload.get("report_language"),
+            region=payload.get("region"),
+        )
 
     def update_task_progress(
         self,
@@ -641,6 +1127,10 @@ class AnalysisTaskQueue:
         Only pending/processing tasks are updated. Progress is clamped to
         [0, 99] so terminal states remain controlled by completion/failure.
         """
+        if self._durable_enabled:
+            raise RuntimeError(
+                "Durable progress must be updated by the lease-owning worker"
+            )
         with self._data_lock:
             task = self._tasks.get(task_id)
             if not task or task.status not in (TaskStatus.PENDING, TaskStatus.PROCESSING):

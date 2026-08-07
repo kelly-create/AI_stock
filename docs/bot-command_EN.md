@@ -157,10 +157,17 @@ class BotCommand(ABC):
 | `/batch` | Batch-analyze your configured watchlist | `/batch` |
 | `/chat` | Multi-turn strategy chat (maintains conversation context) | `/chat` |
 | `/market` | Market review (A-shares / US stocks) | `/market` |
+| `/research` | Deep stock research | `/research 600519 key risks` |
 | `/help` | Show help text | `/help` |
 | `/status` | Show system status | `/status` |
 
 > **Stock code formats:** A-shares use 6-digit codes (e.g. `600519`); HK stocks prefix `hk` (e.g. `hk00700`); US stocks use ticker symbols (e.g. `AAPL`, `TSLA`).
+
+### Durable Jobs mode
+
+With `DURABLE_JOBS_ENABLED=false`, Bot commands keep their existing synchronous, `TaskService`, and background-thread behavior. With the flag enabled, `/analyze`, `/batch`, `/market`, `/ask`, and `/research` only enqueue a versioned SQLite job and immediately return its task ID. Data-provider, LLM, and notification calls run only in the dedicated Worker.
+
+Final Feishu and Telegram replies are delivered through the notification Outbox. Persisted routing is limited to `platform`, `chat_id`, and `message_id`; user content, raw messages, webhooks, and tokens are not stored. A DingTalk temporary session webhook cannot be safely carried across processes, so durable commands reject it before enqueue and create no task. Informational commands such as `/help`, `/status`, history, and chat are not moved into the analysis queue.
 
 ---
 

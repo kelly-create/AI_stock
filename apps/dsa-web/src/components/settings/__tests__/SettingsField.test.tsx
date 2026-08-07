@@ -7,6 +7,38 @@ import { UI_LANGUAGE_STORAGE_KEY } from '../../../utils/uiLanguage';
 import { SettingsField } from '../SettingsField';
 
 describe('SettingsField', () => {
+  it('marks restart-latched settings without disabling edits', () => {
+    render(
+      <SettingsField
+        item={{
+          key: 'DURABLE_JOBS_ENABLED',
+          value: 'false',
+          rawValueExists: false,
+          isMasked: false,
+          schema: {
+            key: 'DURABLE_JOBS_ENABLED',
+            title: 'Durable Analysis Jobs',
+            category: 'research',
+            dataType: 'boolean',
+            uiControl: 'switch',
+            isSensitive: false,
+            isRequired: false,
+            isEditable: true,
+            restartRequired: true,
+            options: [],
+            validation: {},
+            displayOrder: 20,
+          },
+        }}
+        value="false"
+        onChange={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText('重启后生效')).toBeInTheDocument();
+    expect(screen.getByRole('checkbox')).not.toBeDisabled();
+  });
+
   it('prefers localized Chinese field titles over backend schema titles', () => {
     render(
       <SettingsField

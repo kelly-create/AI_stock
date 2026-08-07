@@ -20,6 +20,7 @@ ensure_litellm_stub()
 from src.analyzer import AnalysisResult
 from src.core.pipeline import StockAnalysisPipeline
 from src.enums import ReportType
+from src.services.durable_job_handlers import bind_durable_execution_context
 
 
 class _TrackingNotifier:
@@ -218,6 +219,64 @@ class TestPipelineSingleStockNotify(unittest.TestCase):
         self.assertFalse(result.success)
         pipeline.notifier.generate_brief_report.assert_not_called()
         pipeline.notifier.send.assert_not_called()
+
+    def test_durable_single_stock_notification_failure_reaches_worker(self):
+        pipeline = StockAnalysisPipeline.__new__(StockAnalysisPipeline)
+        pipeline.fetch_and_save_stock_data = MagicMock(return_value=(True, None))
+        pipeline.analyze_stock = MagicMock(return_value=_make_result("600519"))
+        pipeline.notifier = _TrackingNotifier()
+        pipeline.notifier.send.side_effect = RuntimeError("outbox write failed")
+
+        with (
+            bind_durable_execution_context(SimpleNamespace(job_id="job-notify-failure")),
+            self.assertRaisesRegex(RuntimeError, "outbox write failed"),
+        ):
+            pipeline.process_single_stock(
+                code="600519",
+                skip_analysis=False,
+                single_stock_notify=True,
+                report_type=ReportType.SIMPLE,
+                analysis_query_id="job-notify-failure",
+            )
+
+    def test_durable_aggregate_notification_uses_outbox_entrypoint_only(self):
+        pipeline = StockAnalysisPipeline.__new__(StockAnalysisPipeline)
+        pipeline.save_context_snapshot = False
+        pipeline.db = MagicMock()
+        pipeline.config = SimpleNamespace(stock_email_groups=[])
+        pipeline.notifier = MagicMock()
+        pipeline.notifier.generate_aggregate_report.return_value = "durable aggregate report"
+        pipeline.notifier.send.return_value = True
+        results = [_make_result("000001"), _make_result("600519")]
+
+        with bind_durable_execution_context(SimpleNamespace(job_id="job-aggregate")):
+            pipeline._send_notifications(results, ReportType.SIMPLE)
+
+        pipeline.notifier.send.assert_called_once_with(
+            "durable aggregate report",
+            route_type="report",
+            severity="info",
+            dedup_key="report:aggregate:simple:000001,600519",
+            cooldown_key="report:aggregate:simple:000001,600519",
+        )
+        pipeline.notifier.send_to_context.assert_not_called()
+        pipeline.notifier._send_to_static_channel.assert_not_called()
+
+    def test_durable_batch_does_not_swallow_worker_future_failure(self):
+        pipeline = self._build_batch_pipeline()
+        pipeline.process_single_stock = MagicMock(
+            side_effect=RuntimeError("durable child failed"),
+        )
+
+        with (
+            bind_durable_execution_context(SimpleNamespace(job_id="job-batch-failure")),
+            self.assertRaisesRegex(RuntimeError, "durable child failed"),
+        ):
+            pipeline.run(
+                stock_codes=["000001", "600519"],
+                dry_run=False,
+                send_notification=True,
+            )
 
 
 if __name__ == "__main__":

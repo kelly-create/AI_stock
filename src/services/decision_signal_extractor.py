@@ -40,6 +40,19 @@ _CONFIDENCE_MAP = {
 }
 
 
+def _durable_execution_active() -> bool:
+    """Durable side-effect failures must reach the Worker state machine."""
+
+    try:
+        from src.services.durable_job_handlers import (
+            get_optional_durable_execution_context,
+        )
+
+        return get_optional_durable_execution_context() is not None
+    except (ImportError, RuntimeError):
+        return False
+
+
 def build_decision_signal_payload_from_report(
     result: AnalysisResult,
     *,
@@ -228,6 +241,8 @@ def extract_and_persist_from_analysis_result(
         writer = service or DecisionSignalService()
         return writer.create_signal(payload)
     except Exception as exc:
+        if _durable_execution_active():
+            raise
         logger.warning(
             "Decision signal extraction failed: query_id=%s stock_code=%s error=%s",
             trace_id,

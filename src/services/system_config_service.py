@@ -2069,9 +2069,19 @@ class SystemConfigService:
             mask_token=mask_token,
         )
 
+        restart_required_updated_keys = sorted(
+            key
+            for key in updated_keys
+            if bool(get_field_definition(key).get("restart_required", False))
+        )
         warnings: List[str] = []
+        if restart_required_updated_keys:
+            warnings.append(
+                "Configuration saved; process restart required for: "
+                + ", ".join(restart_required_updated_keys)
+            )
         reload_triggered = False
-        if reload_now:
+        if reload_now and not restart_required_updated_keys:
             try:
                 Config.reset_instance()
                 self._reload_runtime_singletons()

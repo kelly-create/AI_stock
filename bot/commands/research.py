@@ -14,6 +14,12 @@ import time
 from typing import List, Optional
 
 from bot.commands.base import BotCommand
+from bot.durable import (
+    accepted_bot_response,
+    bot_idempotency_key,
+    build_bot_target,
+    get_durable_bot_queue,
+)
 from bot.models import BotMessage, BotResponse
 from src.config import get_config
 
@@ -86,6 +92,39 @@ class ResearchCommand(BotCommand):
         if stock_code:
             question = f"[Stock: {stock_code}] {question}"
 
+        durable_queue = get_durable_bot_queue()
+        if durable_queue is not None:
+            try:
+                target = build_bot_target(message)
+                task = durable_queue.submit_typed_job(
+                    "bot_research",
+                    {
+                        "target": target,
+                        "stock_code": stock_code,
+                        "question": question,
+                    },
+                    stock_code=stock_code or "bot_research",
+                    query_source="bot",
+                    notify=True,
+                    message="Bot research accepted",
+                    stage="queued",
+                    idempotency_key=bot_idempotency_key(target, self.name),
+                )
+                return accepted_bot_response(task.task_id, "深度研究任务")
+            except Exception as exc:
+                logger.error("[ResearchCommand] durable submit failed: %s", exc)
+                return BotResponse.error_response(f"提交深度研究任务失败: {str(exc)[:100]}")
+
+        return self._run_research(config, stock_code, question)
+
+    def _run_research(
+        self,
+        config: object,
+        stock_code: Optional[str],
+        question: str,
+    ) -> BotResponse:
+        """Run one pre-validated research request in the worker process."""
+
         # Run the research agent
         try:
             from src.agent.research import ResearchAgent
@@ -120,7 +159,7 @@ class ResearchCommand(BotCommand):
 
             if result.success:
                 # Build rich response
-                header = f"🔬 **Deep Research Report**\n"
+                header = "🔬 **Deep Research Report**\n"
                 if stock_code:
                     header += f"Stock: {stock_code}\n"
                 header += f"Sub-questions: {len(result.sub_questions)} | Sources: {result.findings_count}\n"

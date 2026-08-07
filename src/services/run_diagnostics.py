@@ -323,6 +323,12 @@ class RunDiagnosticContext:
     stock_code: Optional[str] = None
     trigger_source: Optional[str] = None
     scope: Optional[str] = None
+    # Durable-job audit context.  These values are deliberately metadata-only:
+    # prompts, provider credentials, and raw responses never belong here.
+    stage: Optional[str] = None
+    prompt_version: Optional[str] = None
+    snapshot_hash: Optional[str] = None
+    attempt_no: Optional[int] = None
     provider_runs: List[ProviderRun] = field(default_factory=list)
     llm_runs: List[LLMRun] = field(default_factory=list)
     notification_runs: List[NotificationRun] = field(default_factory=list)
@@ -480,6 +486,10 @@ class RunDiagnosticContext:
             "stock_code": self.stock_code,
             "trigger_source": self.trigger_source,
             "scope": self.scope,
+            "stage": self.stage,
+            "prompt_version": self.prompt_version,
+            "snapshot_hash": self.snapshot_hash,
+            "attempt_no": self.attempt_no,
             "provider_runs": [run.to_dict() for run in self.provider_runs],
             "llm_runs": [run.to_dict() for run in self.llm_runs],
             "notification_runs": [run.to_dict() for run in self.notification_runs],
@@ -499,6 +509,10 @@ def activate_run_diagnostic_context(
     stock_code: Optional[str] = None,
     trigger_source: Optional[str] = None,
     scope: Optional[str] = None,
+    stage: Optional[str] = None,
+    prompt_version: Optional[str] = None,
+    snapshot_hash: Optional[str] = None,
+    attempt_no: Optional[int] = None,
     event_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Token:
     """Activate a diagnostic context and return its reset token."""
@@ -509,9 +523,25 @@ def activate_run_diagnostic_context(
         stock_code=stock_code,
         trigger_source=trigger_source,
         scope=scope,
+        stage=stage,
+        prompt_version=prompt_version,
+        snapshot_hash=snapshot_hash,
+        attempt_no=attempt_no,
         event_sink=event_sink,
     )
     return _CURRENT_CONTEXT.set(context)
+
+
+def update_current_diagnostic_stage(stage: Optional[str]) -> None:
+    """Update the active durable stage without replacing the ContextVar.
+
+    A worker owns one context per execution thread, so mutating the detached
+    dataclass is safe and lets later LLM calls inherit the current stage.
+    """
+
+    context = get_current_diagnostic_context()
+    if context is not None:
+        context.stage = stage
 
 
 def reset_run_diagnostic_context(token: Optional[Token]) -> None:

@@ -14,6 +14,7 @@ from tests.litellm_stub import ensure_litellm_stub
 
 ensure_litellm_stub()
 
+
 def _build_optional_module_stubs() -> dict[str, ModuleType]:
     stubs: dict[str, ModuleType] = {}
     google_module: ModuleType | None = None
@@ -107,6 +108,38 @@ class MarketReviewLocalizationTestCase(unittest.TestCase):
         self.assertEqual(notifier.send.call_args.kwargs["route_type"], "report")
         persist_history.assert_called_once()
         self.assertTrue(persist_history.call_args.kwargs["query_id"].startswith("market_review_"))
+
+    def test_durable_market_review_notification_failure_is_not_swallowed(self) -> None:
+        notifier = self._make_notifier()
+        notifier.send.side_effect = RuntimeError("outbox persistence failed")
+        market_analyzer = MagicMock()
+        market_analyzer.run_daily_review_with_snapshot.return_value = SimpleNamespace(
+            report="Market body",
+            market_light_snapshot={"region": "cn", "trade_date": "2026-08-08"},
+        )
+
+        with patch.object(
+            market_review_module,
+            "get_config",
+            return_value=SimpleNamespace(report_language="en", market_review_region="cn"),
+        ), patch.object(
+            market_review_module,
+            "MarketAnalyzer",
+            return_value=market_analyzer,
+        ), patch.object(
+            market_review_module,
+            "_persist_market_review_history",
+        ), patch.object(
+            market_review_module,
+            "_durable_execution_active",
+            return_value=True,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "outbox persistence failed"):
+                run_market_review(
+                    notifier,
+                    send_notification=True,
+                    notification_dedup_key="durable-market-review",
+                )
 
     def test_run_market_review_can_skip_report_file_for_context_generation(self) -> None:
         notifier = self._make_notifier()

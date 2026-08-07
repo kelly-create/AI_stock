@@ -80,6 +80,39 @@ class ScreeningHistoryTestCase(unittest.TestCase):
         self.assertEqual(history["run_count"], 1)
         self.assertNotIn("result", history["runs"][0])
 
+    def test_explicit_run_id_is_forwarded_for_retry_safe_persistence(self) -> None:
+        raw_result = {
+            "strategy": "dual_low",
+            "market": "cn",
+            "candidates": [],
+        }
+        service = ScreeningService(self.config, db_manager=self.db)
+
+        with (
+            patch(
+                "src.services.screening_service._get_screening_status_snapshot",
+                return_value=({}, True, None),
+            ),
+            patch(
+                "src.services.screening_service._call_screening_screen",
+                return_value=raw_result,
+            ) as pipeline,
+            patch(
+                "src.services.screening_service._enrich_candidates_with_dsa",
+                return_value=([], {"enabled": True, "warnings": []}),
+            ),
+        ):
+            response = service.screen(
+                strategy="dual_low",
+                market="cn",
+                max_results=3,
+                run_id="durable-screen-job",
+            )
+
+        self.assertEqual(pipeline.call_args.kwargs["run_id"], "durable-screen-job")
+        self.assertEqual(response["run_id"], "durable-screen-job")
+        self.assertIsNotNone(self.db.get_screening_run("durable-screen-job"))
+
     def test_screen_maps_pipeline_degradation_into_warning_contract(self) -> None:
         raw_result = {
             "run_id": "screen-run-degradation",

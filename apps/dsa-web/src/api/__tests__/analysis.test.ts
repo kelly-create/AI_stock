@@ -56,3 +56,27 @@ describe('analysisApi.triggerMarketReview', () => {
     );
   });
 });
+
+describe('analysisApi.cancelTask', () => {
+  it('encodes the task id and converts the durable response', async () => {
+    post.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        task_id: 'job/with space',
+        status: 'cancel_requested',
+        message: 'queued',
+      },
+    });
+
+    const result = await analysisApi.cancelTask('job/with space');
+
+    expect(post).toHaveBeenCalledWith(
+      '/api/v1/analysis/tasks/job%2Fwith%20space/cancel',
+    );
+    expect(result).toEqual({
+      taskId: 'job/with space',
+      status: 'cancel_requested',
+      message: 'queued',
+    });
+  });
+});

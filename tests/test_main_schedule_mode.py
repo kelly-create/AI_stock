@@ -527,6 +527,70 @@ class MainScheduleModeTestCase(unittest.TestCase):
         )
         run_full_analysis.assert_called_once_with(runtime_config, args, None)
 
+    def test_schedule_mode_durable_path_only_enqueues_orchestration_job(self) -> None:
+        args = self._make_args(schedule=True, workers=3, no_notify=True)
+        config = self._make_config(
+            schedule_enabled=True,
+            durable_jobs_enabled=True,
+        )
+        runtime_config = self._make_config(
+            schedule_enabled=True,
+            durable_jobs_enabled=False,
+        )
+
+        def fake_run_with_schedule(
+            task,
+            schedule_time,
+            run_immediately,
+            background_tasks=None,
+            schedule_time_provider=None,
+        ):
+            task()
+
+        with patch("main.parse_arguments", return_value=args), \
+             patch("main.get_config", return_value=config), \
+             patch("main._reload_runtime_config", return_value=runtime_config), \
+             patch("main._build_schedule_time_provider", return_value=lambda: "18:00"), \
+             patch("main.setup_logging"), \
+             patch("main.run_full_analysis") as run_full_analysis, \
+             patch(
+                 "src.services.runtime_scheduler.enqueue_durable_scheduled_analysis"
+             ) as enqueue_scheduled, \
+             patch(
+                 "src.services.runtime_scheduler.wait_for_durable_worker",
+                 return_value=True,
+             ) as wait_for_worker, \
+             patch("src.scheduler.run_with_schedule", side_effect=fake_run_with_schedule):
+            exit_code = main.main()
+
+        self.assertEqual(exit_code, 0)
+        wait_for_worker.assert_called_once_with(config)
+        run_full_analysis.assert_not_called()
+        enqueue_scheduled.assert_called_once_with(runtime_config, args, None)
+
+    def test_schedule_mode_durable_path_fails_before_scheduler_when_worker_is_stale(self) -> None:
+        args = self._make_args(schedule=True)
+        config = self._make_config(
+            schedule_enabled=True,
+            durable_jobs_enabled=True,
+        )
+
+        with patch("main.parse_arguments", return_value=args), \
+             patch("main.get_config", return_value=config), \
+             patch("main.setup_logging"), \
+             patch(
+                 "src.services.runtime_scheduler.wait_for_durable_worker",
+                 return_value=False,
+             ) as wait_for_worker, \
+             patch("src.scheduler.run_with_schedule") as run_with_schedule, \
+             patch("main.run_full_analysis") as run_full_analysis:
+            exit_code = main.main()
+
+        self.assertEqual(exit_code, 1)
+        wait_for_worker.assert_called_once_with(config)
+        run_with_schedule.assert_not_called()
+        run_full_analysis.assert_not_called()
+
     def test_schedule_mode_registers_event_monitor_background_task(self) -> None:
         args = self._make_args(schedule=True)
         config = self._make_config(
@@ -2109,6 +2173,56 @@ class MainScheduleModeTestCase(unittest.TestCase):
         call_args = run_with_lock.call_args
         self.assertIs(call_args.args[1], run_market_review)
         self.assertEqual(call_args.kwargs["trigger_source"], "schedule")
+
+    def test_durable_feishu_document_notification_failure_reaches_scheduler(self) -> None:
+        args = self._make_args(no_market_review=True)
+        config = self._make_config(
+            trading_day_check_enabled=False,
+            market_review_enabled=False,
+            market_review_region="cn",
+            single_stock_notify=False,
+            merge_email_notification=False,
+            analysis_delay=0,
+            report_type="simple",
+            backtest_enabled=False,
+            stock_list=["600519"],
+            database_path=str(Path(self.temp_dir.name) / "stock_analysis.db"),
+        )
+        result = SimpleNamespace(
+            sentiment_score=80,
+            name="Kweichow Moutai",
+            code="600519",
+            operation_advice="hold",
+            trend_prediction="up",
+            get_emoji=lambda: "green",
+        )
+        pipeline = MagicMock()
+        pipeline.run.return_value = [result]
+        pipeline.notifier.generate_aggregate_report.return_value = "aggregate report"
+        pipeline.notifier.send.side_effect = RuntimeError("outbox document link write failed")
+
+        with patch.object(main, "_refresh_stock_index_cache_for_analysis"), \
+             patch.object(main, "_compute_trading_day_filter", return_value=(["600519"], "cn", False)), \
+             patch("src.core.pipeline.StockAnalysisPipeline", return_value=pipeline), \
+             patch("src.feishu_doc.FeishuDocManager") as feishu_manager, \
+             patch.object(main, "_durable_execution_active", return_value=True):
+            feishu_manager.return_value.is_configured.return_value = True
+            feishu_manager.return_value.create_daily_doc.return_value = (
+                "https://example.invalid/durable-report"
+            )
+            with self.assertRaisesRegex(RuntimeError, "outbox document link write failed"):
+                main.run_full_analysis(
+                    config,
+                    args,
+                    ["600519"],
+                    raise_errors=True,
+                )
+
+        pipeline.notifier.send.assert_called_once()
+        self.assertEqual(
+            pipeline.notifier.send.call_args.kwargs["dedup_key"],
+            "scheduled-analysis:document-link",
+        )
 
     def test_market_review_mode_uses_shared_runtime_assembly(self) -> None:
         args = self._make_args(market_review=True)

@@ -64,6 +64,7 @@ class SystemConfigFieldSchema(BaseModel):
     is_sensitive: bool
     is_required: bool
     is_editable: bool
+    restart_required: bool = False
     default_value: Optional[str] = None
     options: List[str | SystemConfigOption] = Field(default_factory=list)
     validation: Dict[str, Any] = Field(default_factory=dict)
