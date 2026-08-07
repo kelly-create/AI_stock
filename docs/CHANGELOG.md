@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] 收敛 PR0 配置与容器契约：System Config 正确识别并展示个人投研分类，SQLite 单例在释放失败时仍可安全复位，报告模板随镜像发布并纳入 `docker-app-source-v2` 漂移清单；CI 同时覆盖 PR 与直接推送 `main`。
 - [修复] 前向移植现网数据与分析链修复：A 股基本面优先复用 Tushare HTTP 网关并由 AkShare 仅补齐关键缺口，辅助基本面阶段使用独立短超时；LLM 流式 usage 显式请求并按每次真实 provider 尝试单次落库，避免 JSON 校验 fallback 漏记或最终响应重复计费。
 - [修复] 独立 `--serve-only` 重启后恢复已持久化调度但不立即执行；Compose 双服务部署显式由 `analyzer` 单独持有调度权，`server` 不会因启动或 Web 配置热更新创建第二个调度器。定时维护自动推进 Decision Signal Outcome、热读取批量上限，并跳过非方向信号和不受支持的自然周期。
 - [改进] 补齐生产 Decision Signal Outcome 维护、Tushare 优先级和基本面辅助超时的环境变量、Web 配置元数据与中英文运维说明。

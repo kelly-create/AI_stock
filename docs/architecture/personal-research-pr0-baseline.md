@@ -13,7 +13,7 @@
 - 镜像只读取 reference、image ID、RepoDigest 和 OCI revision label；禁止读取完整 `docker inspect`，避免把容器环境变量带入产物。
 - Compose 和 runtime 配置只做原始字节 SHA-256。工具不解析、不保存、不打印配置键值。
 - SQLite 通过 `mode=ro` 和 `PRAGMA query_only=ON` 读取；记录 Schema/Index 哈希、核心表行数、`quick_check` 和 `foreign_key_check`，不导出业务行内容。默认清单（包含 `portfolio_daily_snapshots`）是生产验收的 required 集合，任一缺表都会生成失败报告并返回非零退出码。
-- 源码清单只覆盖 Dockerfile 复制的后端源码边界：根目录 Python 文件、`requirements.txt`、`api/`、`bot/`、`data_provider/`、`src/`、`strategies/`。运行数据和缓存不进入清单；如果该 COPY 范围内出现 `secrets.*`、credentials、runtime env 或密钥/证书后缀，工具会在读取文件内容前安全失败，而不是静默跳过。
+- 源码清单使用 `docker-app-source-v2`，只覆盖 Dockerfile 复制的后端源码边界：根目录 Python 文件、`requirements.txt`、`api/`、`bot/`、`data_provider/`、`src/`、`strategies/`、`templates/`。v2 将运行时报告模板纳入镜像与漂移检查；运行数据和缓存不进入清单。如果该 COPY 范围内出现 `secrets.*`、credentials、runtime env 或密钥/证书后缀，工具会在读取文件内容前安全失败，而不是静默跳过。
 - 构建后的 `static/` 使用独立 `docker-static-assets-v1` profile。源码一致不代表前端构建产物一致，两条证据必须分开生成。
 - 为避免 Windows `core.autocrlf` 与 Linux 镜像造成整树误报，已知文本文件只规范化 CRLF/LF 后计算哈希；二进制文件仍按原始字节比较，其它空白差异不会被忽略。
 

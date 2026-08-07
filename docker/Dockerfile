@@ -56,6 +56,7 @@ COPY data_provider/ ./data_provider/
 COPY bot/ ./bot/
 COPY src/ ./src/
 COPY strategies/ ./strategies/
+COPY templates/ ./templates/
 COPY --from=web-builder /app/static ./static/
 COPY docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY docker/healthcheck.sh /usr/local/bin/dsa-healthcheck

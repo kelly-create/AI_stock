@@ -13,6 +13,7 @@ from api.v1.schemas.analysis import AnalyzeRequest, MarketReviewRequest
 from api.v1.schemas.common import RootResponse
 from api.v1.schemas.history import HistoryItem
 from api.v1.schemas.stocks import StockQuote
+from api.v1.schemas.system_config import SystemConfigFieldSchema
 
 
 DECISION_SIGNAL_PATHS = (
@@ -207,6 +208,29 @@ def test_analyze_request_rejects_invalid_analysis_phase() -> None:
         assert "analysis_phase" in str(exc)
     else:
         raise AssertionError("invalid analysis_phase should be rejected")
+
+
+def test_system_config_category_static_spec_matches_runtime_schema() -> None:
+    static_spec_path = (
+        Path(__file__).resolve().parents[1]
+        / "docs"
+        / "architecture"
+        / "api_spec.json"
+    )
+    static_spec = json.loads(static_spec_path.read_text(encoding="utf-8"))
+    static_enum = static_spec["components"]["schemas"]["SystemConfigFieldSchema"][
+        "properties"
+    ]["category"]["enum"]
+    runtime_enum = create_app().openapi()["components"]["schemas"][
+        "SystemConfigFieldSchema"
+    ]["properties"]["category"]["enum"]
+    model_enum = SystemConfigFieldSchema.model_json_schema()["properties"][
+        "category"
+    ]["enum"]
+
+    assert static_enum == runtime_enum == model_enum
+    assert "agent" in static_enum
+    assert "research" in static_enum
 
 
 def test_decision_signal_static_api_spec_matches_runtime_paths() -> None:

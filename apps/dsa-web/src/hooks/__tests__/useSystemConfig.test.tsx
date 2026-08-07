@@ -154,6 +154,47 @@ describe('useSystemConfig', () => {
     expect(result.current.load).toBe(firstLoad);
   });
 
+  it('keeps research as a first-class ordered settings category', async () => {
+    getConfig.mockResolvedValue({
+      ...sampleConfig,
+      items: [
+        ...sampleConfig.items,
+        {
+          key: 'PERSONAL_RESEARCH_ENABLED',
+          value: 'false',
+          rawValueExists: false,
+          isMasked: false,
+          schema: {
+            key: 'PERSONAL_RESEARCH_ENABLED',
+            category: 'research',
+            dataType: 'boolean',
+            uiControl: 'switch',
+            isSensitive: false,
+            isRequired: false,
+            isEditable: true,
+            options: [],
+            validation: {},
+            displayOrder: 1,
+          },
+        },
+      ],
+    });
+
+    const { result } = renderHook(() => useSystemConfig());
+    await act(async () => {
+      await result.current.load();
+    });
+
+    expect(result.current.categories.map((category) => category.category)).toEqual([
+      'base',
+      'research',
+    ]);
+    expect(result.current.categories[1]).toMatchObject({
+      category: 'research',
+      displayOrder: 57,
+    });
+  });
+
   it('normalizes STOCK_LIST separators before saving', async () => {
     const savedConfig = {
       ...sampleConfig,

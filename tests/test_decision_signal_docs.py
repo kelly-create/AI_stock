@@ -53,7 +53,12 @@ def test_decision_signal_topic_references_live_api_schema_and_docs() -> None:
 
     assert "sanitize_decision_signal_text()" in topic
     assert "sanitize_decision_signal_payload()" in topic
-    assert "DECISION_SIGNAL_*" in topic
+    for config_key in (
+        "DECISION_SIGNAL_OUTCOME_ENABLED",
+        "DECISION_SIGNAL_OUTCOME_INTERVAL_MINUTES",
+        "DECISION_SIGNAL_OUTCOME_BATCH_LIMIT",
+    ):
+        assert f"`{config_key}`" in topic
     assert "revert" in topic
     assert "persist=true" in topic
     assert "guardrail_blocked" in topic
@@ -117,7 +122,7 @@ def test_decision_signal_topic_source_anchors_exist() -> None:
         assert (ROOT / source_path).exists()
 
 
-def test_decision_signal_has_no_web_settings_schema_entry() -> None:
+def test_decision_signal_web_settings_only_expose_outcome_maintenance() -> None:
     schema = SystemConfigService().get_schema()
     field_keys = {
         field["key"]
@@ -125,5 +130,9 @@ def test_decision_signal_has_no_web_settings_schema_entry() -> None:
         for field in category["fields"]
     }
 
-    assert not any(key.startswith("DECISION_SIGNAL") for key in field_keys)
+    assert {key for key in field_keys if key.startswith("DECISION_SIGNAL")} == {
+        "DECISION_SIGNAL_OUTCOME_ENABLED",
+        "DECISION_SIGNAL_OUTCOME_INTERVAL_MINUTES",
+        "DECISION_SIGNAL_OUTCOME_BATCH_LIMIT",
+    }
     assert "DECISION_SIGNAL_ENABLED" not in _read("docs/decision-signals.md")

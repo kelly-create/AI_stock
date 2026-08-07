@@ -3537,7 +3537,9 @@
               "ai_model",
               "notification",
               "system",
+              "agent",
               "backtest",
+              "research",
               "uncategorized"
             ],
             "description": "分类"

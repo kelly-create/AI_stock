@@ -143,6 +143,25 @@ class SystemConfigApiTestCase(unittest.TestCase):
         self.assertTrue(stock_schema["examples"])
         self.assertTrue(stock_schema["docs"])
 
+    def test_get_config_schema_accepts_research_category(self) -> None:
+        payload = system_config.get_system_config(include_schema=True, service=self.service).model_dump(by_alias=True)
+        item_map = {item["key"]: item for item in payload["items"]}
+
+        research_keys = {
+            "PERSONAL_RESEARCH_ENABLED",
+            "DURABLE_JOBS_ENABLED",
+            "TUSHARE_RESEARCH_ENABLED",
+            "RESEARCH_FACTORS_ENABLED",
+            "RESEARCH_EVIDENCE_ENABLED",
+            "RESEARCH_DEBATE_ENABLED",
+            "RESEARCH_THESIS_ENABLED",
+            "DECISION_OUTCOME_V2_ENABLED",
+            "PORTFOLIO_POLICY_GATE_MODE",
+        }
+        self.assertTrue(research_keys.issubset(item_map))
+        for key in research_keys:
+            self.assertEqual(item_map[key]["schema"]["category"], "research")
+
     def test_get_config_schema_exposes_generation_backend_bounds_and_agent_options(self) -> None:
         payload = system_config.get_system_config(include_schema=True, service=self.service).model_dump(by_alias=True)
         item_map = {item["key"]: item for item in payload["items"]}

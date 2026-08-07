@@ -21,10 +21,12 @@ from scripts.source_manifest import (
 def _write_source_tree(root: Path, *, analyzer_body: str = "VALUE = 1\n") -> None:
     (root / "src").mkdir(parents=True)
     (root / "api").mkdir()
+    (root / "templates").mkdir()
     (root / "main.py").write_text("from src.analyzer import VALUE\n", encoding="utf-8")
     (root / "requirements.txt").write_text("fastapi==1.0\n", encoding="utf-8")
     (root / "src" / "analyzer.py").write_text(analyzer_body, encoding="utf-8")
     (root / "api" / "routes.py").write_text("ROUTE = '/health'\n", encoding="utf-8")
+    (root / "templates" / "report.j2").write_text("{{ report }}\n", encoding="utf-8")
 
 
 def test_source_manifest_matches_docker_source_boundary_and_ignores_non_copy_runtime_data(tmp_path: Path) -> None:
@@ -38,7 +40,14 @@ def test_source_manifest_matches_docker_source_boundary_and_ignores_non_copy_run
     paths = {entry["path"] for entry in manifest["entries"]}
     serialized = json.dumps(manifest)
 
-    assert paths == {"api/routes.py", "main.py", "requirements.txt", "src/analyzer.py"}
+    assert paths == {
+        "api/routes.py",
+        "main.py",
+        "requirements.txt",
+        "src/analyzer.py",
+        "templates/report.j2",
+    }
+    assert manifest["profile"] == "docker-app-source-v2"
     assert "do-not-read" not in serialized
     assert "stock_analysis.db" not in serialized
 

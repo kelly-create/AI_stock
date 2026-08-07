@@ -86,6 +86,14 @@ def test_dockerfile_bundles_builtin_screening_engine() -> None:
     assert "import src.services.screening.pipeline" in dockerfile
 
 
+def test_dockerfile_bundles_report_templates() -> None:
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "COPY templates/ ./templates/" in dockerfile
+    assert (REPO_ROOT / "templates" / "report_markdown.j2").is_file()
+    assert (REPO_ROOT / "templates" / "report_wechat.j2").is_file()
+
+
 def test_docker_entrypoint_repairs_ownership_and_user_permissions() -> None:
     entrypoint = (REPO_ROOT / "docker" / "entrypoint.sh").read_text(encoding="utf-8")
 

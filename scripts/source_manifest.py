@@ -2,10 +2,11 @@
 """Build and compare secret-safe manifests for the Docker application source tree.
 
 The backend source profile covers root-level Python modules plus the ``api``,
-``bot``, ``data_provider``, ``src`` and ``strategies`` trees.  Compiled Web
-``static/`` files use a separate asset profile so source and build evidence
-cannot be mistaken for each other.  Neither profile walks arbitrary runtime
-data or credential mounts under ``/app``.
+``bot``, ``data_provider``, ``src``, ``strategies`` and report ``templates``
+trees copied by the Dockerfile.  Compiled Web ``static/`` files use a separate
+asset profile so source and build evidence cannot be mistaken for each other.
+Neither profile walks arbitrary runtime data or credential mounts under
+``/app``.
 """
 
 from __future__ import annotations
@@ -21,9 +22,9 @@ from typing import Any, Iterable, Sequence
 
 
 FORMAT_VERSION = 1
-PROFILE_NAME = "docker-app-source-v1"
+PROFILE_NAME = "docker-app-source-v2"
 STATIC_PROFILE_NAME = "docker-static-assets-v1"
-SOURCE_DIRECTORIES = ("api", "bot", "data_provider", "src", "strategies")
+SOURCE_DIRECTORIES = ("api", "bot", "data_provider", "src", "strategies", "templates")
 ROOT_FILES = ("requirements.txt",)
 IGNORED_DIRECTORY_NAMES = {
     ".git",
@@ -48,6 +49,7 @@ TEXT_SUFFIXES = (
     ".css",
     ".html",
     ".ini",
+    ".j2",
     ".js",
     ".json",
     ".map",

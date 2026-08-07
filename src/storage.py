@@ -1906,10 +1906,13 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         """重置单例（用于测试）"""
         with cls._init_lock:
             if cls._instance is not None:
-                if hasattr(cls._instance, '_engine') and cls._instance._engine is not None:
-                    cls._instance._engine.dispose()
-                cls._instance._initialized = False
-                cls._instance = None
+                instance = cls._instance
+                try:
+                    if hasattr(instance, '_engine') and instance._engine is not None:
+                        instance._engine.dispose()
+                finally:
+                    instance._initialized = False
+                    cls._instance = None
 
     @classmethod
     def _cleanup_engine(cls, engine) -> None:

@@ -1097,7 +1097,7 @@ class TestStorage(unittest.TestCase):
 
         try:
             with patch("src.storage.create_engine", side_effect=create_engine_with_failing_dispose):
-                with patch.object(Base.metadata, "create_all", side_effect=original_error):
+                with patch("src.storage.apply_migrations_locked", side_effect=original_error):
                     with self.assertRaisesRegex(RuntimeError, "create all failed") as ctx:
                         DatabaseManager.get_instance()
 
@@ -1105,6 +1105,19 @@ class TestStorage(unittest.TestCase):
             self.assertIsNone(DatabaseManager._instance)
         finally:
             DatabaseManager.reset_instance()
+
+    def test_reset_instance_clears_singleton_when_dispose_fails(self):
+        DatabaseManager.reset_instance()
+        db = DatabaseManager(db_url="sqlite:///:memory:")
+        cleanup_error = RuntimeError("dispose failed")
+
+        with patch.object(db._engine, "dispose", side_effect=cleanup_error):
+            with self.assertRaisesRegex(RuntimeError, "dispose failed") as ctx:
+                DatabaseManager.reset_instance()
+
+        self.assertIs(ctx.exception, cleanup_error)
+        self.assertIsNone(DatabaseManager._instance)
+        self.assertFalse(db._initialized)
 
     def test_sqlite_write_transactions_begin_immediate(self):
         DatabaseManager.reset_instance()

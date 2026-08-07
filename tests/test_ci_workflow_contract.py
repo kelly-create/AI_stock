@@ -31,12 +31,20 @@ def _change_filters(ci: dict) -> tuple[dict, dict, dict]:
     return changes_job, filter_step, backend_filter_step
 
 
+def test_ci_runs_for_pull_requests_and_direct_main_pushes() -> None:
+    ci = _workflow(".github/workflows/ci.yml")
+
+    assert ci["on"]["pull_request"]["branches"] == ["main"]
+    assert ci["on"]["push"]["branches"] == ["main"]
+
+
 def test_heavy_ci_jobs_are_path_filtered_and_backend_tests_are_sharded() -> None:
     ci = _workflow(".github/workflows/ci.yml")
     changes_job, filter_step, backend_filter_step = _change_filters(ci)
     filters = str(filter_step["with"]["filters"])
     parsed_filters = yaml.load(filters, Loader=yaml.BaseLoader)
     backend_contract_paths = set(parsed_filters["backend_web_contract"])
+    docker_paths = set(parsed_filters["docker"])
     backend_filters = yaml.load(
         str(backend_filter_step["with"]["filters"]),
         Loader=yaml.BaseLoader,
@@ -51,6 +59,7 @@ def test_heavy_ci_jobs_are_path_filtered_and_backend_tests_are_sharded() -> None
     assert backend_filters["backend_non_web"] == ["**", "!apps/dsa-web/**"]
     assert "docker:" in filters
     assert "docker/**" in filters
+    assert "templates/**" in docker_paths
     assert {
         "apps/dsa-web/public/**",
         "apps/dsa-web/src/components/settings/llmProviderTemplates.ts",
@@ -105,10 +114,12 @@ def test_backend_filter_covers_mixed_changes_and_shared_web_assets() -> None:
     """Model the complete backend output, including shared Web-owned assets."""
     ci = _workflow(".github/workflows/ci.yml")
     _, filter_step, backend_filter_step = _change_filters(ci)
-    backend_web_contract = yaml.load(
+    parsed_path_filters = yaml.load(
         str(filter_step["with"]["filters"]),
         Loader=yaml.BaseLoader,
-    )["backend_web_contract"]
+    )
+    backend_web_contract = parsed_path_filters["backend_web_contract"]
+    docker_filters = parsed_path_filters["docker"]
     backend_filters = yaml.load(
         str(backend_filter_step["with"]["filters"]),
         Loader=yaml.BaseLoader,
@@ -137,3 +148,7 @@ def test_backend_filter_covers_mixed_changes_and_shared_web_assets() -> None:
     assert backend_output(["apps/dsa-web/src/App.tsx", "docs/CHANGELOG.md"]) is True
     assert backend_output(["apps/dsa-web/public/stocks.index.json"]) is True
     assert backend_output(["apps/dsa-web/public/runtime/new-asset.json"]) is True
+    assert any(
+        fnmatchcase("templates/report_markdown.j2", rule)
+        for rule in docker_filters
+    )
