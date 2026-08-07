@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] 前向移植现网数据与分析链修复：A 股基本面优先复用 Tushare HTTP 网关并由 AkShare 仅补齐关键缺口，辅助基本面阶段使用独立短超时；LLM 流式 usage 显式请求并按每次真实 provider 尝试单次落库，避免 JSON 校验 fallback 漏记或最终响应重复计费。
+- [修复] 独立 `--serve-only` 重启后恢复已持久化调度但不立即执行；Compose 双服务部署显式由 `analyzer` 单独持有调度权，`server` 不会因启动或 Web 配置热更新创建第二个调度器。定时维护自动推进 Decision Signal Outcome、热读取批量上限，并跳过非方向信号和不受支持的自然周期。
+- [改进] 补齐生产 Decision Signal Outcome 维护、Tushare 优先级和基本面辅助超时的环境变量、Web 配置元数据与中英文运维说明。
+- [改进] 新增不执行迁移的 `/api/v1/health/ready` 就绪接口，检查迁移状态、SQLite 读写和可选 Worker 心跳；Docker 探针按实际启动模式选择配置端口 readiness 或非 HTTP DSA 进程存活检查，不再无条件成功，Compose 的 API 与纯调度服务均启用对应模式的真实探针。
+- [新功能] 新增 SQLite 有序迁移的只读检查与显式应用入口，Compose 由单独 migrator 收敛全部历史 schema/回填且长运行服务只读验证，非 Compose 旧部署保留共享单写者锁的自动兼容路径；注册个人 A 股投研九项默认关闭的分阶段开关，并对不完整依赖组合执行启动及 Web 保存校验。
+- [新功能] 新增个人投研 PR0 只读生产基线与源码清单对账工具，脱敏记录 Git、镜像、Compose/配置指纹及 SQLite Schema、核心表计数和完整性检查，并登记 600519、601398、300750 与边缘场景 Golden 契约。
 - [新功能] Agent Chat 按会话持久化 Skill 选择，支持刷新和会话切换恢复，并区分省略 `skills`、显式空列表与非空选择；无持久化状态的历史会话继续使用运行时默认且不会被静默转为显式选择，复用分析 `context` 中残留的 legacy `skills` / `strategies` 也不会覆盖顶层三态或会话状态，非空但全部无效的 Skill 请求不会被当成显式空列表并清空既有选择
 - [改进] 后端 CI 在不跳过离线测试的前提下按完整测试文件分成三个独立 runner 并行执行，由单一 `backend-gate` 汇总门禁结果；实测文件耗时和首分片静态检查成本共同参与负载平衡，新测试文件自动纳入，现有 pip 安装和测试参数保持不变，避免 xdist 进程内并发的全局状态竞态。
 - [测试] 后端 CI 默认覆盖所有非 Web 改动，仅对已证明安全的纯 Web 路径跳过，并将整个 Web public 目录及前端渠道模板、设置帮助视为跨层运行合同；补充纯 Web、共享 Web 资产及 Web/非 Web 混合改动的过滤语义回归，明确 `predicate-quantifier: every` 按单文件匹配全部规则、再以任一匹配文件触发门禁。Docker CI 继续按构建输入过滤。离线测试保留稳定的串行执行与慢用例摘要，并移除重复用例和测试内真实等待。

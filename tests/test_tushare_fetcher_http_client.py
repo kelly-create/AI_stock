@@ -24,6 +24,7 @@ from data_provider.tushare_fetcher import (
     TushareFetcher,
     _TushareHttpClient,
     _resolve_tushare_http_url,
+    _resolve_tushare_priority,
 )
 
 
@@ -105,6 +106,37 @@ class TestResolveTushareHttpUrl(unittest.TestCase):
         with patch.dict("os.environ", {"TUSHARE_HTTP_URL": "gw.example.com"}):
             with self.assertRaises(ValueError):
                 _resolve_tushare_http_url()
+
+
+class TestResolveTusharePriority(unittest.TestCase):
+    """Explicit priority remains optional and invalid values fail closed."""
+
+    def test_unset_or_blank_uses_dynamic_priority(self) -> None:
+        with patch.dict("os.environ", {}, clear=False):
+            import os
+            os.environ.pop("TUSHARE_PRIORITY", None)
+            self.assertIsNone(_resolve_tushare_priority())
+        with patch.dict("os.environ", {"TUSHARE_PRIORITY": "  "}):
+            self.assertIsNone(_resolve_tushare_priority())
+
+    def test_valid_explicit_priority_is_returned(self) -> None:
+        with patch.dict("os.environ", {"TUSHARE_PRIORITY": " 7 "}):
+            self.assertEqual(_resolve_tushare_priority(), 7)
+
+    def test_invalid_or_out_of_range_priority_uses_normal_fallback(self) -> None:
+        for value in ("first", "-1", "100"):
+            with self.subTest(value=value), patch.dict(
+                "os.environ",
+                {"TUSHARE_PRIORITY": value},
+            ):
+                self.assertEqual(_resolve_tushare_priority(), 2)
+
+    def test_explicit_priority_overrides_token_auto_promotion(self) -> None:
+        config = SimpleNamespace(tushare_token="demo-token")
+        with patch("data_provider.tushare_fetcher.get_config", return_value=config), \
+                patch.dict("os.environ", {"TUSHARE_PRIORITY": "5"}):
+            fetcher = TushareFetcher()
+        self.assertEqual(fetcher.priority, 5)
 
 
 class TestTushareFetcherCustomHttpUrl(unittest.TestCase):

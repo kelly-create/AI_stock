@@ -2106,6 +2106,9 @@ class SystemConfigService:
             "SCHEDULE_ENABLED",
             "SCHEDULE_TIME",
             "SCHEDULE_TIMES",
+            "DECISION_SIGNAL_OUTCOME_ENABLED",
+            "DECISION_SIGNAL_OUTCOME_INTERVAL_MINUTES",
+            "DECISION_SIGNAL_OUTCOME_BATCH_LIMIT",
         }:
             try:
                 self._runtime_scheduler.reconcile_from_config(
@@ -4474,6 +4477,68 @@ class SystemConfigService:
     def _validate_cross_field(effective_map: Dict[str, str], updated_keys: Set[str]) -> List[Dict[str, Any]]:
         """Validate dependencies across multiple keys."""
         issues: List[Dict[str, Any]] = []
+
+        research_keys = {
+            "PERSONAL_RESEARCH_ENABLED",
+            "DURABLE_JOBS_ENABLED",
+            "TUSHARE_RESEARCH_ENABLED",
+            "RESEARCH_FACTORS_ENABLED",
+            "RESEARCH_EVIDENCE_ENABLED",
+            "RESEARCH_DEBATE_ENABLED",
+            "RESEARCH_THESIS_ENABLED",
+            "DECISION_OUTCOME_V2_ENABLED",
+            "PORTFOLIO_POLICY_GATE_MODE",
+        }
+        if research_keys & updated_keys:
+            research_config = Config(
+                stock_list=[],
+                personal_research_enabled=parse_env_bool(
+                    effective_map.get("PERSONAL_RESEARCH_ENABLED"),
+                    default=False,
+                ),
+                durable_jobs_enabled=parse_env_bool(
+                    effective_map.get("DURABLE_JOBS_ENABLED"),
+                    default=False,
+                ),
+                tushare_research_enabled=parse_env_bool(
+                    effective_map.get("TUSHARE_RESEARCH_ENABLED"),
+                    default=False,
+                ),
+                research_factors_enabled=parse_env_bool(
+                    effective_map.get("RESEARCH_FACTORS_ENABLED"),
+                    default=False,
+                ),
+                research_evidence_enabled=parse_env_bool(
+                    effective_map.get("RESEARCH_EVIDENCE_ENABLED"),
+                    default=False,
+                ),
+                research_debate_enabled=parse_env_bool(
+                    effective_map.get("RESEARCH_DEBATE_ENABLED"),
+                    default=False,
+                ),
+                research_thesis_enabled=parse_env_bool(
+                    effective_map.get("RESEARCH_THESIS_ENABLED"),
+                    default=False,
+                ),
+                decision_outcome_v2_enabled=parse_env_bool(
+                    effective_map.get("DECISION_OUTCOME_V2_ENABLED"),
+                    default=False,
+                ),
+                portfolio_policy_gate_mode=(
+                    effective_map.get("PORTFOLIO_POLICY_GATE_MODE") or "off"
+                ).strip().lower(),
+            )
+            for issue in research_config.research_feature_dependency_issues():
+                issues.append(
+                    {
+                        "key": issue.field,
+                        "code": issue.code,
+                        "message": issue.message,
+                        "severity": issue.severity,
+                        "expected": "complete personal-research dependency chain",
+                        "actual": effective_map.get(issue.field, ""),
+                    }
+                )
 
         agent_backend = (effective_map.get("AGENT_BACKEND") or "auto").strip().lower()
         agent_arch = (effective_map.get("AGENT_ARCH") or "single").strip().lower()

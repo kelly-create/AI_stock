@@ -21,6 +21,7 @@ EXEMPT_PATHS = frozenset({
     "/api/v1/auth/status",
     "/api/health",
     "/api/v1/health",
+    "/api/v1/health/ready",
     "/health",
     "/docs",
     "/redoc",

@@ -99,6 +99,18 @@ The Docker image startup entrypoint automatically creates and fixes ownership fo
 
 If you explicitly set `--user` / Compose `user:`, or use read-only mounts, rootless Docker, NFS, or another environment that prevents the container from fixing ownership, make sure the actual runtime user can write to these directories.
 
+### 7. Liveness and readiness probes
+
+- `/health`, `/api/health`, and `/api/v1/health` remain compatible liveness endpoints. They only prove that the API process can respond.
+- `/api/v1/health/ready` is the traffic readiness endpoint. It inspects migration state without applying migrations, then verifies SQLite read and write access. The write probe inserts a transient migration marker and rolls the transaction back immediately.
+- Before Durable Worker is enabled, the worker-heartbeat check is reported as `skipped`. Once a deployment explicitly requires that heartbeat, a missing or stale heartbeat makes readiness return HTTP `503`.
+
+Compose first runs a one-shot `migrator` (`python -m src.migrations --apply`) and starts `server` and `analyzer` only after that command succeeds. The image probe is mode-aware: `--serve`, `--serve-only`, legacy WebUI arguments, or `WEBUI_ENABLED=true` must pass readiness on the configured container `API_PORT` (default `8000`); the default `python main.py --schedule` and other non-HTTP modes must have a live, non-zombie DSA process, and an unrelated command is never reported healthy. Both Compose services inherit the probe: `server` checks API readiness and `analyzer` checks scheduler-process liveness. When both services run, `server` receives `DSA_RUNTIME_SCHEDULER_SUPPRESS_START=true`, so only `analyzer` owns the schedule. A standalone `--serve-only` process without that variable still restores saved scheduling configuration.
+
+```bash
+curl --fail "http://127.0.0.1:${API_PORT:-8000}/api/v1/health/ready"
+```
+
 ---
 
 ## Option 2: Direct Deployment

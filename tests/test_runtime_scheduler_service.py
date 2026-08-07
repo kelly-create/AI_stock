@@ -23,6 +23,7 @@ from src.services.runtime_scheduler import (
     RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV,
     RUNTIME_SCHEDULER_SUPPRESS_START_ENV,
     RuntimeSchedulerService,
+    build_decision_signal_outcome_background_tasks,
 )
 
 
@@ -87,6 +88,81 @@ class _SynchronousThread(_NoopThread):
 
 
 class RuntimeSchedulerServiceTestCase(unittest.TestCase):
+    def test_builds_decision_signal_outcome_background_task_with_bounded_config(self) -> None:
+        service = MagicMock()
+        service.run_outcomes.return_value = {
+            "evaluated": 1,
+            "created": 1,
+            "updated": 0,
+            "skipped": 0,
+        }
+        config = SimpleNamespace(
+            decision_signal_outcome_enabled=True,
+            decision_signal_outcome_interval_minutes=2,
+            decision_signal_outcome_batch_limit=999,
+        )
+        runtime_config = SimpleNamespace(
+            decision_signal_outcome_enabled=True,
+            decision_signal_outcome_interval_minutes=20,
+            decision_signal_outcome_batch_limit=37,
+        )
+
+        with patch(
+            "src.services.decision_signal_outcome_service.DecisionSignalOutcomeService",
+            return_value=service,
+        ):
+            tasks = build_decision_signal_outcome_background_tasks(
+                config,
+                config_provider=lambda: runtime_config,
+            )
+
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0]["name"], "decision_signal_outcomes")
+        self.assertEqual(tasks[0]["interval_seconds"], 5 * 60)
+        self.assertTrue(tasks[0]["run_immediately"])
+        tasks[0]["task"]()
+        service.run_outcomes.assert_called_once_with(limit=37)
+
+    def test_reconcile_reuses_outcome_task_and_only_runs_immediately_once(self) -> None:
+        outcome_service = MagicMock()
+        outcome_service.run_outcomes.return_value = {
+            "evaluated": 0,
+            "created": 0,
+            "updated": 0,
+            "skipped": 0,
+        }
+        config = SimpleNamespace(
+            decision_signal_outcome_enabled=True,
+            decision_signal_outcome_interval_minutes=30,
+            decision_signal_outcome_batch_limit=25,
+        )
+        scheduler_service = RuntimeSchedulerService(config_provider=lambda: config)
+        scheduler_service._reload_config = lambda: config
+
+        with patch(
+            "src.services.decision_signal_outcome_service.DecisionSignalOutcomeService",
+            return_value=outcome_service,
+        ) as service_cls:
+            first = scheduler_service._current_decision_signal_outcome_background_tasks(config)
+            config.decision_signal_outcome_interval_minutes = 45
+            second = scheduler_service._current_decision_signal_outcome_background_tasks(config)
+            config.decision_signal_outcome_batch_limit = 41
+            second[0]["task"]()
+            config.decision_signal_outcome_enabled = False
+            disabled = scheduler_service._current_decision_signal_outcome_background_tasks(config)
+            config.decision_signal_outcome_enabled = True
+            third = scheduler_service._current_decision_signal_outcome_background_tasks(config)
+
+        self.assertEqual(service_cls.call_count, 2)
+        self.assertTrue(first[0]["run_immediately"])
+        self.assertFalse(second[0]["run_immediately"])
+        self.assertEqual(second[0]["interval_seconds"], 45 * 60)
+        self.assertIs(first[0]["task"], second[0]["task"])
+        outcome_service.run_outcomes.assert_called_once_with(limit=41)
+        self.assertEqual(disabled, [])
+        self.assertTrue(third[0]["run_immediately"])
+        self.assertIsNot(first[0]["task"], third[0]["task"])
+
     def test_run_analysis_args_include_workers(self) -> None:
         config = SimpleNamespace(
             schedule_enabled=True,

@@ -58,6 +58,7 @@ COPY src/ ./src/
 COPY strategies/ ./strategies/
 COPY --from=web-builder /app/static ./static/
 COPY docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY docker/healthcheck.sh /usr/local/bin/dsa-healthcheck
 
 # Verify globally bundled runtime dependencies without leaving SDK logs in the image.
 RUN mkdir -p /tmp/futu-sdk-smoke-home && \
@@ -67,7 +68,7 @@ RUN mkdir -p /tmp/futu-sdk-smoke-home && \
 # 确保数据目录存在并授权给 non-root 用户
 RUN mkdir -p /app/data /app/logs /app/reports && \
     chown -R dsa:dsa /app && \
-    chmod +x /usr/local/bin/docker-entrypoint.sh
+    chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/dsa-healthcheck
 
 # efinance 将搜索缓存（search-cache.json）写入自身安装包内的 data 目录，
 # 该目录默认归 root 所有；容器以非 root 用户 dsa 运行时写入会 PermissionError，
@@ -91,10 +92,9 @@ EXPOSE 8000
 # 数据卷（持久化数据）
 VOLUME ["/app/data", "/app/logs", "/app/reports"]
 
-# 健康检查（FastAPI 模式）
+# 模式感知健康检查：API 模式检查 readiness，纯调度模式检查 DSA 进程存活。
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8000/api/health || curl -f http://localhost:8000/health \
-    || python -c "import sys; sys.exit(0)"
+    CMD ["/usr/local/bin/dsa-healthcheck"]
 
 # 启动入口先修复 bind mount 目录权限，再降权为 dsa 执行应用；
 # 文档化 docker-compose exec 命令需显式使用 -u dsa，避免手动进程写入 root-owned 文件。

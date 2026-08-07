@@ -293,6 +293,40 @@ class _AllModelsFailedError(Exception):
         self.last_usage = last_usage or {}
 
 
+_USAGE_CALL_TYPE_CONTEXT_KEY = "_usage_call_type"
+_USAGE_STOCK_CODE_CONTEXT_KEY = "_usage_stock_code"
+_USAGE_PERSISTED_MARKER = "_usage_persisted"
+
+
+def _persist_usage_once(
+    usage: Dict[str, Any],
+    model: Optional[str],
+    *,
+    call_type: str,
+    stock_code: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Persist provider usage once and mark the in-memory payload.
+
+    LiteLLM usage is recorded inside the provider fallback loop before
+    response validation, so a paid response rejected as invalid JSON is not
+    lost. Other generation backends still use the outer caller path. The
+    private marker prevents double counting and is not written to telemetry.
+    """
+    payload = usage or {}
+    result = dict(payload)
+    if result.get(_USAGE_PERSISTED_MARKER):
+        return result
+    if should_persist_usage_telemetry(result):
+        persist_llm_usage(
+            payload,
+            str(model or "unknown"),
+            call_type=call_type,
+            stock_code=stock_code,
+        )
+        result[_USAGE_PERSISTED_MARKER] = True
+    return result
+
+
 from src.utils.data_processing import normalize_report_signal_attribution
 
 
@@ -2930,7 +2964,10 @@ class GeminiAnalyzer:
                     model=usage_model or model,
                     provider=provider,
                 )
-                if normalized_usage:
+                # A trailing chunk without provider usage normalizes to a
+                # metadata-only shape. Do not overwrite an earlier real usage
+                # payload with it.
+                if should_persist_usage_telemetry(normalized_usage):
                     usage = normalized_usage
 
                 delta_text = self._extract_stream_text(chunk)
@@ -2942,6 +2979,17 @@ class GeminiAnalyzer:
                 if progress_callback and chars_received >= next_emit_at:
                     progress_callback(chars_received)
                     next_emit_at = chars_received + 160
+
+            # Some wrappers expose aggregate usage on the stream object only
+            # after iteration. Use it when no chunk carried usable usage.
+            if not should_persist_usage_telemetry(usage):
+                wrapper_usage = self._normalize_usage(
+                    extract_usage_payload(stream_response),
+                    model=usage_model or model,
+                    provider=provider,
+                )
+                if should_persist_usage_telemetry(wrapper_usage):
+                    usage = wrapper_usage
         except Exception as exc:
             raise _LiteLLMStreamError(
                 f"{model} stream interrupted: {exc}",
@@ -3120,6 +3168,36 @@ class GeminiAnalyzer:
         requested_temperature = generation_config.get('temperature', 0.7)
         requested_timeout = generation_config.get("timeout")
 
+        usage_call_type = ""
+        usage_stock_code: Optional[str] = None
+        effective_audit_context = audit_context
+        if isinstance(audit_context, dict):
+            usage_call_type = str(audit_context.get(_USAGE_CALL_TYPE_CONTEXT_KEY) or "")
+            raw_usage_stock_code = audit_context.get(_USAGE_STOCK_CODE_CONTEXT_KEY)
+            if raw_usage_stock_code not in (None, ""):
+                usage_stock_code = str(raw_usage_stock_code)
+            effective_audit_context = {
+                key: value
+                for key, value in audit_context.items()
+                if key not in {
+                    _USAGE_CALL_TYPE_CONTEXT_KEY,
+                    _USAGE_STOCK_CODE_CONTEXT_KEY,
+                }
+            } or None
+
+        def _record_provider_usage(
+            usage: Dict[str, Any],
+            actual_model: Optional[str],
+        ) -> Dict[str, Any]:
+            if not usage_call_type:
+                return usage
+            return _persist_usage_once(
+                usage,
+                actual_model,
+                call_type=usage_call_type,
+                stock_code=usage_stock_code,
+            )
+
         models_to_try = [config.litellm_model] + (config.litellm_fallback_models or [])
         models_to_try = [m for m in models_to_try if m]
 
@@ -3145,21 +3223,21 @@ class GeminiAnalyzer:
                     usage: Dict[str, Any],
                     messages: List[Dict[str, Any]],
                 ) -> Dict[str, Any]:
-                    if audit_context is None:
+                    if effective_audit_context is None:
                         return filter_prompt_cache_telemetry(
                             attach_message_hmacs(usage, messages),
                             config,
                         )
-                    effective_audit_context = dict(audit_context)
-                    effective_audit_context["provider"] = usage_provider
-                    effective_audit_context["transport"] = (
-                        effective_audit_context.get("transport") or "litellm"
+                    provider_audit_context = dict(effective_audit_context)
+                    provider_audit_context["provider"] = usage_provider
+                    provider_audit_context["transport"] = (
+                        provider_audit_context.get("transport") or "litellm"
                     )
                     return filter_prompt_cache_telemetry(
                         attach_legacy_message_stability_audit(
                             usage,
                             messages,
-                            effective_audit_context,
+                            provider_audit_context,
                         ),
                         config,
                     )
@@ -3218,6 +3296,11 @@ class GeminiAnalyzer:
 
                 if model_stream:
                     try:
+                        stream_call_kwargs = {**call_kwargs, "stream": True}
+                        stream_call_kwargs["stream_options"] = {
+                            **(stream_call_kwargs.get("stream_options") or {}),
+                            "include_usage": True,
+                        }
                         stream_response = call_litellm_with_param_recovery(
                             lambda kwargs: self._dispatch_litellm_completion(
                                 model,
@@ -3227,7 +3310,7 @@ class GeminiAnalyzer:
                                 router_model_names=router_model_names,
                             ),
                             model=model,
-                            call_kwargs={**call_kwargs, "stream": True},
+                            call_kwargs=stream_call_kwargs,
                             model_list=recovery_model_list,
                             cache_recovery=False,
                             logger=logger,
@@ -3266,6 +3349,7 @@ class GeminiAnalyzer:
                     last_response_text = _stream_text
                     last_model = model
                     _stream_usage = _attach_usage_audit(_stream_usage, call_kwargs["messages"])
+                    _stream_usage = _record_provider_usage(_stream_usage, model)
                     last_usage = _stream_usage
                     if response_validator is not None:
                         response_validator(_stream_text)
@@ -3287,15 +3371,18 @@ class GeminiAnalyzer:
 
                 content = self._extract_completion_text(response)
                 if content:
-                    usage_messages = None if audit_context is not None else call_kwargs["messages"]
+                    usage_messages = (
+                        None if effective_audit_context is not None else call_kwargs["messages"]
+                    )
                     usage = self._normalize_usage(
                         extract_usage_payload(response),
                         model=usage_model or model,
                         provider=usage_provider,
                         messages=usage_messages,
                     )
-                    if audit_context is not None:
+                    if effective_audit_context is not None:
                         usage = _attach_usage_audit(usage, call_kwargs["messages"])
+                    usage = _record_provider_usage(usage, model)
                     last_response_text = content
                     last_model = model
                     last_usage = usage
@@ -3341,11 +3428,15 @@ class GeminiAnalyzer:
             result = self._call_litellm(
                 prompt,
                 generation_config={"max_tokens": max_tokens, "temperature": temperature},
+                audit_context={_USAGE_CALL_TYPE_CONTEXT_KEY: "market_review"},
             )
             if isinstance(result, tuple):
                 text, model_used, usage = result
-                if should_persist_usage_telemetry(usage):
-                    persist_llm_usage(usage, model_used, call_type="market_review")
+                _persist_usage_once(
+                    usage,
+                    model_used,
+                    call_type="market_review",
+                )
                 return text
             return result
         except GenerationError:
@@ -3501,6 +3592,8 @@ class GeminiAnalyzer:
                 analysis_context_pack_summary=analysis_context_pack_summary,
             )
             legacy_audit_context = {
+                _USAGE_CALL_TYPE_CONTEXT_KEY: "analysis",
+                _USAGE_STOCK_CODE_CONTEXT_KEY: code,
                 "language": report_language,
                 "market_group": _legacy_market_group(code),
                 "analysis_mode": "stock_analysis",
@@ -3579,11 +3672,22 @@ class GeminiAnalyzer:
                         llm_usage = exc.last_usage
                     else:
                         raise
+
+                # LiteLLM records each provider attempt before JSON
+                # validation. Other backends are recorded here once their
+                # response returns.
+                llm_usage = _persist_usage_once(
+                    llm_usage,
+                    model_used,
+                    call_type="analysis",
+                    stock_code=code,
+                )
                 elapsed = time.time() - start_time
 
                 # 记录响应信息
                 logger.info(
-                    f"[LLM返回] {model_name} 响应成功, 耗时 {elapsed:.2f}s, 响应长度 {len(response_text)} 字符"
+                    f"[LLM返回] {model_used or model_name} 响应成功, "
+                    f"耗时 {elapsed:.2f}s, 响应长度 {len(response_text)} 字符"
                 )
                 if backend_id in LOCAL_CLI_GENERATION_BACKEND_IDS:
                     response_preview = redact_diagnostic_text(response_text, limit=300)
@@ -3592,7 +3696,8 @@ class GeminiAnalyzer:
                 logger.info(f"[LLM返回 预览]\n{response_preview}")
                 if backend_id not in LOCAL_CLI_GENERATION_BACKEND_IDS:
                     logger.debug(
-                        f"=== {model_name} 完整响应 ({len(response_text)}字符) ===\n{response_text}\n=== End Response ==="
+                        f"=== {model_used or model_name} 完整响应 "
+                        f"({len(response_text)}字符) ===\n{response_text}\n=== End Response ==="
                     )
                 # Keep parser/retry progress monotonic so task progress/message never "goes backward".
                 parse_progress = min(99, 93 + retry_count * 2)
@@ -3642,9 +3747,6 @@ class GeminiAnalyzer:
                         missing_fields,
                     )
                     break
-
-            if should_persist_usage_telemetry(llm_usage):
-                persist_llm_usage(llm_usage, model_used, call_type="analysis", stock_code=code)
 
             logger.info(f"[LLM解析] {name}({code}) 分析完成: {result.trend_prediction}, 评分 {result.sentiment_score}")
 

@@ -252,7 +252,7 @@ class TestGenerationBackendFieldsRegistered(unittest.TestCase):
     def test_schema_response_groups_generation_backend_fields(self):
         schema = build_schema_response()
         self.assertEqual(schema["schema_version"], SCHEMA_VERSION)
-        self.assertEqual(SCHEMA_VERSION, "2026-06-29-claude-code-cli-backend")
+        self.assertEqual(SCHEMA_VERSION, "2026-08-08-production-runtime-config")
 
         categories = {
             category["category"]: {field["key"] for field in category["fields"]}
@@ -278,6 +278,50 @@ class TestScheduleTimesFieldRegistered(unittest.TestCase):
         self.assertIsNotNone(pattern.fullmatch("09:20,12:30,15:10"))
         self.assertIsNone(pattern.fullmatch("09:20,"))
         self.assertIsNone(pattern.fullmatch("25:70"))
+
+
+class TestProductionRuntimeFieldsRegistered(unittest.TestCase):
+    def test_tushare_priority_preserves_automatic_default(self):
+        field = get_field_definition("TUSHARE_PRIORITY")
+
+        self.assertEqual(field["category"], "data_source")
+        self.assertEqual(field["data_type"], "integer")
+        self.assertEqual(field["default_value"], "")
+        self.assertEqual(field["validation"], {"min": 0, "max": 99})
+        self.assertNotEqual(field["display_order"], 9000)
+
+    def test_auxiliary_timeout_has_safe_default_and_lower_bound(self):
+        field = get_field_definition("FUNDAMENTAL_AUXILIARY_TIMEOUT_SECONDS")
+
+        self.assertEqual(field["category"], "data_source")
+        self.assertEqual(field["data_type"], "number")
+        self.assertEqual(field["default_value"], "4.0")
+        self.assertEqual(field["validation"], {"min": 0.0})
+
+    def test_decision_signal_outcome_settings_match_runtime_bounds(self):
+        enabled = get_field_definition("DECISION_SIGNAL_OUTCOME_ENABLED")
+        interval = get_field_definition("DECISION_SIGNAL_OUTCOME_INTERVAL_MINUTES")
+        batch = get_field_definition("DECISION_SIGNAL_OUTCOME_BATCH_LIMIT")
+
+        self.assertEqual(enabled["default_value"], "true")
+        self.assertEqual(enabled["ui_control"], "switch")
+        self.assertEqual(interval["default_value"], "30")
+        self.assertEqual(interval["validation"], {"min": 5})
+        self.assertEqual(batch["default_value"], "100")
+        self.assertEqual(batch["validation"], {"min": 1, "max": 500})
+
+    def test_schema_groups_production_runtime_fields(self):
+        schema = build_schema_response()
+        categories = {
+            category["category"]: {field["key"] for field in category["fields"]}
+            for category in schema["categories"]
+        }
+
+        self.assertIn("TUSHARE_PRIORITY", categories["data_source"])
+        self.assertIn("FUNDAMENTAL_AUXILIARY_TIMEOUT_SECONDS", categories["data_source"])
+        self.assertIn("DECISION_SIGNAL_OUTCOME_ENABLED", categories["agent"])
+        self.assertIn("DECISION_SIGNAL_OUTCOME_INTERVAL_MINUTES", categories["agent"])
+        self.assertIn("DECISION_SIGNAL_OUTCOME_BATCH_LIMIT", categories["agent"])
 
 
 class TestLLMPromptCacheFieldsRegistered(unittest.TestCase):
@@ -389,6 +433,11 @@ class TestSettingsHelpMetadata(unittest.TestCase):
         "AGENT_EVENT_MONITOR_ENABLED",
         "AGENT_EVENT_MONITOR_INTERVAL_MINUTES",
         "AGENT_EVENT_ALERT_RULES_JSON",
+        "DECISION_SIGNAL_OUTCOME_ENABLED",
+        "DECISION_SIGNAL_OUTCOME_INTERVAL_MINUTES",
+        "DECISION_SIGNAL_OUTCOME_BATCH_LIMIT",
+        "TUSHARE_PRIORITY",
+        "FUNDAMENTAL_AUXILIARY_TIMEOUT_SECONDS",
         # PR3 Phase 2: Backtest
         "BACKTEST_ENABLED",
         "BACKTEST_EVAL_WINDOW_DAYS",

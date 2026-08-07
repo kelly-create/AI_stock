@@ -206,18 +206,15 @@ Zeabur 服务建议从 `1G` 内存起步；`512M` 仅适合轻量 Web/API、单�
 
 ## 7. 健康检查
 
-系统内置了健康检查机制，默认检查：
-
-- WebUI 模式：检查 `http://localhost:8000/health` 端点
-- FastAPI 模式：检查 `http://localhost:8000/api/health` 端点
-- 非服务模式：始终返回健康状态
+系统内置模式感知健康检查。Compose 先通过一次性 `migrator` 执行 `python -m src.migrations --apply`，迁移成功后才启动 API 和定时分析服务。FastAPI/WebUI 模式会使用容器内配置的 `API_PORT`（默认 `8000`）检查 `/api/v1/health/ready`；迁移未完成或 SQLite 不可读写时返回失败。Zeabur 直接使用镜像默认 `python main.py --schedule` 时不监听 HTTP，探针改为确认实际 DSA 调度进程仍存活且非僵尸；未知命令不会无条件成功。
 
 健康检查配置如下：
 
 ```dockerfile
+COPY docker/healthcheck.sh /usr/local/bin/dsa-healthcheck
+RUN chmod +x /usr/local/bin/dsa-healthcheck
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8000/api/health || curl -f http://localhost:8000/health \
-    || python -c "import sys; sys.exit(0)"
+    CMD ["/usr/local/bin/dsa-healthcheck"]
 ```
 
 ## 8. 常见问题

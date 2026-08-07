@@ -122,6 +122,38 @@
         }
       }
     },
+    "/api/v1/health/ready": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "服务就绪检查",
+        "description": "检查数据库迁移状态、SQLite 读写能力，以及启用 Durable Worker 后的可选心跳。未就绪时返回 HTTP 503；该接口不会执行数据库迁移。",
+        "operationId": "readinessCheck",
+        "responses": {
+          "200": {
+            "description": "服务可接收流量",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "服务尚未就绪",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/analysis/analyze": {
       "post": {
         "tags": [
@@ -2707,6 +2739,72 @@
         "required": [
           "status"
         ]
+      },
+      "ReadinessCheckResponse": {
+        "description": "单项就绪检查结果。",
+        "properties": {
+          "status": {
+            "description": "检查状态",
+            "enum": [
+              "ready",
+              "not_ready",
+              "skipped"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "detail": {
+            "description": "稳定、非敏感的结果代码",
+            "title": "Detail",
+            "type": "string"
+          },
+          "required": {
+            "default": true,
+            "description": "该检查是否影响整体就绪状态",
+            "title": "Required",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "status",
+          "detail"
+        ],
+        "title": "ReadinessCheckResponse",
+        "type": "object"
+      },
+      "ReadinessResponse": {
+        "description": "服务就绪检查响应。",
+        "properties": {
+          "status": {
+            "description": "服务是否可接收流量",
+            "enum": [
+              "ready",
+              "not_ready"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "timestamp": {
+            "description": "检查时间戳",
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "checks": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ReadinessCheckResponse"
+            },
+            "description": "各依赖检查结果",
+            "title": "Checks",
+            "type": "object"
+          }
+        },
+        "required": [
+          "status",
+          "timestamp",
+          "checks"
+        ],
+        "title": "ReadinessResponse",
+        "type": "object"
       },
       "AnalyzeRequest": {
         "type": "object",

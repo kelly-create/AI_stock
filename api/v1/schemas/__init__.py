@@ -11,6 +11,8 @@ API v1 Schemas 模块初始化
 from api.v1.schemas.common import (
     RootResponse,
     HealthResponse,
+    ReadinessCheckResponse,
+    ReadinessResponse,
     ErrorResponse,
     SuccessResponse,
 )
@@ -133,6 +135,8 @@ __all__ = [
     # common
     "RootResponse",
     "HealthResponse",
+    "ReadinessCheckResponse",
+    "ReadinessResponse",
     "ErrorResponse",
     "SuccessResponse",
     # market phase

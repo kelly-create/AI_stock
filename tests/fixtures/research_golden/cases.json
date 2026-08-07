@@ -1,0 +1,156 @@
+{
+  "fixture_set_version": "research-golden-input-v1",
+  "cases": [
+    {
+      "case_id": "consumer_value_quality_600519",
+      "fixture_kind": "synthetic",
+      "stock_code": "600519",
+      "market": "A",
+      "company_profile": "industrial",
+      "as_of": "2025-06-30T18:00:00+08:00",
+      "available_at": "2025-06-30T16:30:00+08:00",
+      "status": "available",
+      "datasets": [
+        {"dataset": "daily", "as_of": "2025-06-30T15:00:00+08:00", "available_at": "2025-06-30T15:10:00+08:00", "status": "available"},
+        {"dataset": "fundamental", "as_of": "2025-04-30T00:00:00+08:00", "available_at": "2025-04-30T08:00:00+08:00", "status": "available"},
+        {"dataset": "chip_structure", "as_of": "2025-06-30T15:00:00+08:00", "available_at": "2025-06-30T16:30:00+08:00", "status": "available"}
+      ],
+      "scenario": {"trading_status": "normal", "limit_state": "none", "buy_executable": true, "sell_executable": true, "risk_flags": [], "missing_values_are_zero": false}
+    },
+    {
+      "case_id": "bank_601398",
+      "fixture_kind": "synthetic",
+      "stock_code": "601398",
+      "market": "A",
+      "company_profile": "bank",
+      "as_of": "2025-06-30T18:00:00+08:00",
+      "available_at": "2025-06-30T16:30:00+08:00",
+      "status": "available",
+      "datasets": [
+        {"dataset": "daily", "as_of": "2025-06-30T15:00:00+08:00", "available_at": "2025-06-30T15:10:00+08:00", "status": "available"},
+        {"dataset": "bank_fundamental", "as_of": "2025-04-30T00:00:00+08:00", "available_at": "2025-04-30T08:00:00+08:00", "status": "available"},
+        {"dataset": "industrial_inventory", "as_of": "2025-06-30T15:00:00+08:00", "available_at": "2025-06-30T16:30:00+08:00", "status": "not_applicable"}
+      ],
+      "scenario": {"trading_status": "normal", "limit_state": "none", "buy_executable": true, "sell_executable": true, "risk_flags": [], "missing_values_are_zero": false}
+    },
+    {
+      "case_id": "growth_volatility_300750",
+      "fixture_kind": "synthetic",
+      "stock_code": "300750",
+      "market": "A",
+      "company_profile": "industrial",
+      "as_of": "2025-06-30T18:00:00+08:00",
+      "available_at": "2025-06-30T16:30:00+08:00",
+      "status": "available",
+      "datasets": [
+        {"dataset": "daily", "as_of": "2025-06-30T15:00:00+08:00", "available_at": "2025-06-30T15:10:00+08:00", "status": "available"},
+        {"dataset": "fundamental", "as_of": "2025-04-30T00:00:00+08:00", "available_at": "2025-04-30T08:00:00+08:00", "status": "available"},
+        {"dataset": "catalyst", "as_of": "2025-06-30T15:30:00+08:00", "available_at": "2025-06-30T16:30:00+08:00", "status": "partial"}
+      ],
+      "scenario": {"trading_status": "normal", "limit_state": "none", "buy_executable": true, "sell_executable": true, "risk_flags": ["high_volatility"], "missing_values_are_zero": false}
+    },
+    {
+      "case_id": "insurance_601318",
+      "fixture_kind": "synthetic",
+      "stock_code": "601318",
+      "market": "A",
+      "company_profile": "insurance",
+      "as_of": "2025-06-30T18:00:00+08:00",
+      "available_at": "2025-06-30T15:15:00+08:00",
+      "status": "available",
+      "datasets": [
+        {"dataset": "daily", "as_of": "2025-06-30T15:00:00+08:00", "available_at": "2025-06-30T15:10:00+08:00", "status": "available"},
+        {"dataset": "insurance_fundamental", "as_of": "2025-04-30T00:00:00+08:00", "available_at": "2025-04-30T08:00:00+08:00", "status": "available"},
+        {"dataset": "industrial_inventory", "as_of": "2025-06-30T15:00:00+08:00", "available_at": "2025-06-30T15:15:00+08:00", "status": "not_applicable"}
+      ],
+      "scenario": {"trading_status": "normal", "limit_state": "none", "buy_executable": true, "sell_executable": true, "risk_flags": [], "missing_values_are_zero": false}
+    },
+    {
+      "case_id": "securities_600030",
+      "fixture_kind": "synthetic",
+      "stock_code": "600030",
+      "market": "A",
+      "company_profile": "securities",
+      "as_of": "2025-06-30T18:00:00+08:00",
+      "available_at": "2025-06-30T15:15:00+08:00",
+      "status": "available",
+      "datasets": [
+        {"dataset": "daily", "as_of": "2025-06-30T15:00:00+08:00", "available_at": "2025-06-30T15:10:00+08:00", "status": "available"},
+        {"dataset": "securities_fundamental", "as_of": "2025-04-30T00:00:00+08:00", "available_at": "2025-04-30T08:00:00+08:00", "status": "available"},
+        {"dataset": "industrial_inventory", "as_of": "2025-06-30T15:00:00+08:00", "available_at": "2025-06-30T15:15:00+08:00", "status": "not_applicable"}
+      ],
+      "scenario": {"trading_status": "normal", "limit_state": "none", "buy_executable": true, "sell_executable": true, "risk_flags": [], "missing_values_are_zero": false}
+    },
+    {
+      "case_id": "st_stock",
+      "fixture_kind": "synthetic",
+      "stock_code": "SYNTH-ST-001",
+      "market": "A",
+      "company_profile": "industrial",
+      "as_of": "2025-06-30T18:00:00+08:00",
+      "available_at": "2025-06-30T15:10:00+08:00",
+      "status": "available",
+      "datasets": [
+        {"dataset": "daily", "as_of": "2025-06-30T15:00:00+08:00", "available_at": "2025-06-30T15:10:00+08:00", "status": "available"}
+      ],
+      "scenario": {"trading_status": "normal", "limit_state": "none", "buy_executable": true, "sell_executable": true, "risk_flags": ["st"], "missing_values_are_zero": false}
+    },
+    {
+      "case_id": "suspended_stock",
+      "fixture_kind": "synthetic",
+      "stock_code": "SYNTH-SUSPENDED-001",
+      "market": "A",
+      "company_profile": "industrial",
+      "as_of": "2025-06-30T18:00:00+08:00",
+      "available_at": "2025-06-30T15:10:00+08:00",
+      "status": "available",
+      "datasets": [
+        {"dataset": "daily", "as_of": "2025-06-30T15:00:00+08:00", "available_at": "2025-06-30T15:10:00+08:00", "status": "empty"}
+      ],
+      "scenario": {"trading_status": "suspended", "limit_state": "none", "buy_executable": false, "sell_executable": false, "risk_flags": ["suspended"], "missing_values_are_zero": false}
+    },
+    {
+      "case_id": "limit_up_not_buyable",
+      "fixture_kind": "synthetic",
+      "stock_code": "SYNTH-LIMIT-UP-001",
+      "market": "A",
+      "company_profile": "industrial",
+      "as_of": "2025-06-30T18:00:00+08:00",
+      "available_at": "2025-06-30T15:10:00+08:00",
+      "status": "available",
+      "datasets": [
+        {"dataset": "daily", "as_of": "2025-06-30T15:00:00+08:00", "available_at": "2025-06-30T15:10:00+08:00", "status": "available"}
+      ],
+      "scenario": {"trading_status": "normal", "limit_state": "one_price_limit_up", "buy_executable": false, "sell_executable": true, "risk_flags": ["limit_up"], "missing_values_are_zero": false}
+    },
+    {
+      "case_id": "limit_down_not_sellable",
+      "fixture_kind": "synthetic",
+      "stock_code": "SYNTH-LIMIT-DOWN-001",
+      "market": "A",
+      "company_profile": "industrial",
+      "as_of": "2025-06-30T18:00:00+08:00",
+      "available_at": "2025-06-30T15:10:00+08:00",
+      "status": "available",
+      "datasets": [
+        {"dataset": "daily", "as_of": "2025-06-30T15:00:00+08:00", "available_at": "2025-06-30T15:10:00+08:00", "status": "available"}
+      ],
+      "scenario": {"trading_status": "normal", "limit_state": "one_price_limit_down", "buy_executable": true, "sell_executable": false, "risk_flags": ["limit_down"], "missing_values_are_zero": false}
+    },
+    {
+      "case_id": "missing_data",
+      "fixture_kind": "synthetic",
+      "stock_code": "SYNTH-MISSING-001",
+      "market": "A",
+      "company_profile": "industrial",
+      "as_of": "2025-06-30T18:00:00+08:00",
+      "available_at": "2025-06-30T16:00:00+08:00",
+      "status": "partial",
+      "datasets": [
+        {"dataset": "daily", "as_of": "2025-06-30T15:00:00+08:00", "available_at": "2025-06-30T15:10:00+08:00", "status": "available"},
+        {"dataset": "fundamental", "as_of": "2025-06-30T16:00:00+08:00", "available_at": "2025-06-30T16:00:00+08:00", "status": "fetch_failed", "value": null}
+      ],
+      "scenario": {"trading_status": "normal", "limit_state": "none", "buy_executable": true, "sell_executable": true, "risk_flags": ["missing_fundamental"], "missing_values_are_zero": false}
+    }
+  ]
+}

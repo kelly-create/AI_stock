@@ -1,0 +1,75 @@
+{
+  "dictionary_version": "research-fields-v1",
+  "fixture_contract_version": "research-golden-input-v1",
+  "required_case_fields": [
+    "case_id",
+    "fixture_kind",
+    "stock_code",
+    "market",
+    "company_profile",
+    "as_of",
+    "available_at",
+    "status",
+    "datasets",
+    "scenario"
+  ],
+  "fields": {
+    "case_id": {
+      "type": "string",
+      "description": "Stable case identifier referenced by manifest.json"
+    },
+    "fixture_kind": {
+      "type": "enum",
+      "values": ["recorded", "synthetic"]
+    },
+    "stock_code": {
+      "type": "string",
+      "description": "Six-digit A-share code or an explicit SYNTH-* fixture symbol"
+    },
+    "market": {
+      "type": "enum",
+      "values": ["A"]
+    },
+    "company_profile": {
+      "type": "enum",
+      "values": ["industrial", "bank", "insurance", "securities"]
+    },
+    "as_of": {
+      "type": "rfc3339_datetime",
+      "description": "Exclusive research knowledge boundary"
+    },
+    "available_at": {
+      "type": "rfc3339_datetime",
+      "description": "Time the complete frozen case input became observable"
+    },
+    "status": {
+      "type": "enum",
+      "values": ["available", "empty", "partial", "stale", "permission_denied", "not_supported", "fetch_failed"]
+    },
+    "datasets": {
+      "type": "array",
+      "item_required_fields": ["dataset", "as_of", "available_at", "status"]
+    },
+    "scenario": {
+      "type": "object",
+      "required_fields": [
+        "trading_status",
+        "limit_state",
+        "buy_executable",
+        "sell_executable",
+        "risk_flags",
+        "missing_values_are_zero"
+      ]
+    }
+  },
+  "dataset_status_values": [
+    "available",
+    "empty",
+    "partial",
+    "stale",
+    "permission_denied",
+    "not_supported",
+    "fetch_failed",
+    "not_applicable"
+  ]
+}

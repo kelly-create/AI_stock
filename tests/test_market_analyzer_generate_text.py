@@ -190,7 +190,47 @@ class TestAnalyzerGenerateText:
             mock_call.assert_called_once_with(
                 "写一份复盘",
                 generation_config={"max_tokens": 1024, "temperature": 0.5},
+                audit_context={"_usage_call_type": "market_review"},
             )
+
+    def test_persist_usage_once_keeps_marker_out_of_storage(self):
+        from src.analyzer import _persist_usage_once
+        from src.llm.provider_cache import (
+            PROMPT_CACHE_TELEMETRY_DISABLED_ATTR,
+            PromptCacheTelemetryFilteredUsage,
+        )
+
+        with patch("src.analyzer.persist_llm_usage") as mock_persist:
+            first = _persist_usage_once(
+                {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+                "provider/model",
+                call_type="analysis",
+                stock_code="600519",
+            )
+            second = _persist_usage_once(
+                first,
+                "provider/model",
+                call_type="analysis",
+                stock_code="600519",
+            )
+
+        assert first["_usage_persisted"] is True
+        assert second == first
+        mock_persist.assert_called_once()
+        assert "_usage_persisted" not in mock_persist.call_args.args[0]
+
+        filtered = PromptCacheTelemetryFilteredUsage({"total_tokens": 4})
+        setattr(filtered, PROMPT_CACHE_TELEMETRY_DISABLED_ATTR, True)
+        with patch("src.analyzer.persist_llm_usage") as filtered_persist:
+            marked = _persist_usage_once(
+                filtered,
+                "provider/model",
+                call_type="analysis",
+            )
+
+        assert marked["_usage_persisted"] is True
+        persisted_filtered = filtered_persist.call_args.args[0]
+        assert getattr(persisted_filtered, PROMPT_CACHE_TELEMETRY_DISABLED_ATTR) is True
 
     def test_generate_text_does_not_persist_unavailable_usage(self):
         analyzer = self._make_analyzer()
@@ -592,10 +632,18 @@ class TestAnalyzerGenerateText:
                 choices=[SimpleNamespace(delta=SimpleNamespace(content="def"))],
                 usage=SimpleNamespace(prompt_tokens=1, completion_tokens=2, total_tokens=3),
             )
+            yield SimpleNamespace(
+                choices=[SimpleNamespace(delta=SimpleNamespace(content=""))],
+                usage=None,
+            )
 
         progress_updates = []
 
-        with patch.object(analyzer, "_dispatch_litellm_completion", return_value=stream_response()):
+        with patch.object(
+            analyzer,
+            "_dispatch_litellm_completion",
+            return_value=stream_response(),
+        ) as dispatch:
             text, model, usage = analyzer._call_litellm(
                 "prompt",
                 {"max_tokens": 128, "temperature": 0.2},
@@ -607,6 +655,42 @@ class TestAnalyzerGenerateText:
         assert model == "gemini/gemini-2.0-flash"
         _assert_usage_contains(usage, {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3})
         assert progress_updates == [3, 6]
+        assert dispatch.call_args.args[1]["stream_options"] == {"include_usage": True}
+
+    def test_call_litellm_stream_reads_usage_from_wrapper_after_iteration(self):
+        analyzer = self._make_analyzer()
+        analyzer._config_override = SimpleNamespace(
+            litellm_model="openai/gpt-4o-mini",
+            litellm_fallback_models=[],
+            llm_model_list=[],
+        )
+
+        class StreamWrapper:
+            usage = SimpleNamespace(prompt_tokens=7, completion_tokens=2, total_tokens=9)
+
+            def __iter__(self):
+                yield SimpleNamespace(
+                    choices=[SimpleNamespace(delta=SimpleNamespace(content="wrapper"))],
+                    usage=None,
+                )
+
+        with patch.object(
+            analyzer,
+            "_dispatch_litellm_completion",
+            return_value=StreamWrapper(),
+        ):
+            text, model, usage = analyzer._call_litellm(
+                "prompt",
+                {"max_tokens": 128, "temperature": 0.2},
+                stream=True,
+            )
+
+        assert text == "wrapper"
+        assert model == "openai/gpt-4o-mini"
+        _assert_usage_contains(
+            usage,
+            {"prompt_tokens": 7, "completion_tokens": 2, "total_tokens": 9},
+        )
 
     def test_call_litellm_stream_reads_private_hidden_usage_best_effort(self):
         analyzer = self._make_analyzer()
@@ -2472,6 +2556,50 @@ class TestAnalyzerGenerateText:
         assert "fallback" in model_used
         assert valid_json == text
 
+    def test_json_rejected_provider_attempts_each_persist_usage_once(self):
+        analyzer = self._make_analyzer()
+        analyzer._config_override = SimpleNamespace(
+            litellm_model="provider/primary-model",
+            litellm_fallback_models=["provider/fallback-model"],
+            llm_model_list=[],
+        )
+        valid_json = json.dumps({"sentiment_score": 70, "trend_prediction": "看多"})
+
+        def fake_dispatch(model, _call_kwargs, **_kwargs):
+            content = "not-json" if "primary" in model else valid_json
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
+                usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2, total_tokens=12),
+            )
+
+        with patch.object(analyzer, "_dispatch_litellm_completion", side_effect=fake_dispatch), \
+                patch("src.analyzer.persist_llm_usage") as persist_usage:
+            text, model_used, usage = analyzer._call_litellm(
+                "test prompt",
+                {"max_tokens": 128, "temperature": 0.7},
+                response_validator=analyzer._validate_json_response,
+                audit_context={
+                    "_usage_call_type": "analysis",
+                    "_usage_stock_code": "600519",
+                },
+            )
+
+        assert text == valid_json
+        assert model_used == "provider/fallback-model"
+        assert usage["_usage_persisted"] is True
+        assert persist_usage.call_count == 2
+        assert [call.args[1] for call in persist_usage.call_args_list] == [
+            "provider/primary-model",
+            "provider/fallback-model",
+        ]
+        for call in persist_usage.call_args_list:
+            persisted_usage = call.args[0]
+            assert persisted_usage["total_tokens"] == 12
+            assert "_usage_persisted" not in persisted_usage
+            assert "_usage_call_type" not in persisted_usage
+            assert "_usage_stock_code" not in persisted_usage
+            assert call.kwargs == {"call_type": "analysis", "stock_code": "600519"}
+
     def test_all_models_invalid_json_raises_all_models_failed_error(self):
         """When all models return non-JSON, _AllModelsFailedError is raised with last_response_text."""
         analyzer = self._make_analyzer()
@@ -2571,13 +2699,18 @@ class TestAnalyzerGenerateText:
         mock_fill.assert_called_once()
         assert "dashboard.core_conclusion.one_sentence" in mock_fill.call_args[0][1]
 
-        # persist_llm_usage was called with the last model and usage
-        mock_usage.assert_called_once()
-        usage_args = mock_usage.call_args
-        assert usage_args[0][0] == {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
-        assert usage_args[0][1] == "provider/fallback-model"
-        assert usage_args[1]["call_type"] == "analysis"
-        assert usage_args[1]["stock_code"] == "600519"
+        # Each integrity retry represents a distinct provider request and is
+        # recorded once; neither request is double-counted by the outer path.
+        assert mock_usage.call_count == 2
+        for usage_call in mock_usage.call_args_list:
+            assert usage_call.args[0] == {
+                "prompt_tokens": 10,
+                "completion_tokens": 20,
+                "total_tokens": 30,
+            }
+            assert usage_call.args[1] == "provider/fallback-model"
+            assert usage_call.kwargs["call_type"] == "analysis"
+            assert usage_call.kwargs["stock_code"] == "600519"
 
         # Result is success=False (text fallback), but all fields exist
         assert result.success is False

@@ -336,6 +336,206 @@ class TestFundamentalContext(unittest.TestCase):
         self.assertIsNone(dividend_payload.get("ttm_dividend_yield_pct"))
         self.assertIn("invalid_price_for_ttm_dividend_yield", ctx["earnings"]["errors"])
 
+    def test_cn_fundamentals_use_akshare_directly_without_tushare_token(self) -> None:
+        manager = DataFetcherManager(fetchers=[])
+        cfg = SimpleNamespace(tushare_token="", fundamental_fetch_timeout_seconds=9.0)
+        fallback = {"status": "partial", "growth": {"revenue_yoy": 8.0}}
+
+        with patch.object(manager, "_get_fundamental_config", return_value=cfg), \
+                patch.object(
+                    manager._fundamental_adapter,
+                    "get_fundamental_bundle",
+                    return_value=fallback,
+                ) as akshare_call, \
+                patch.object(
+                    manager._tushare_fundamental_adapter,
+                    "get_fundamental_bundle",
+                ) as tushare_call:
+            result = manager._get_cn_fundamental_bundle("600519")
+
+        self.assertEqual(result, fallback)
+        akshare_call.assert_called_once_with("600519")
+        tushare_call.assert_not_called()
+
+    def test_complete_tushare_fundamentals_skip_akshare_gap_fill(self) -> None:
+        manager = DataFetcherManager(fetchers=[])
+        cfg = SimpleNamespace(tushare_token="token", fundamental_fetch_timeout_seconds=9.0)
+        primary = {
+            "status": "partial",
+            "valuation": {"pe_ratio": 20.0},
+            "growth": {"revenue_yoy": 8.0},
+            "earnings": {
+                "financial_report": {
+                    "revenue": 100,
+                    "net_profit_parent": 20,
+                    "operating_cash_flow": 25,
+                }
+            },
+            "institution": {},
+            "source_chain": ["growth:tushare.fina_indicator"],
+            "errors": [],
+        }
+
+        with patch.object(manager, "_get_fundamental_config", return_value=cfg), \
+                patch.object(
+                    manager._tushare_fundamental_adapter,
+                    "get_fundamental_bundle",
+                    return_value=primary,
+                ), \
+                patch.object(
+                    manager._fundamental_adapter,
+                    "get_fundamental_bundle",
+                ) as akshare_call:
+            result = manager._get_cn_fundamental_bundle("600519")
+
+        self.assertEqual(result, primary)
+        akshare_call.assert_not_called()
+
+    def test_akshare_fills_only_missing_tushare_fundamental_fields(self) -> None:
+        manager = DataFetcherManager(fetchers=[])
+        cfg = SimpleNamespace(tushare_token="token", fundamental_fetch_timeout_seconds=9.0)
+        primary = {
+            "status": "partial",
+            "valuation": {"pe_ratio": 20.0, "pb_ratio": None},
+            "growth": {"revenue_yoy": None, "gross_margin": 50.0},
+            "earnings": {"financial_report": {"revenue": 100.0}},
+            "institution": {},
+            "source_chain": ["valuation:tushare.daily_basic"],
+            "errors": ["tushare:cashflow:timeout"],
+        }
+        fallback = {
+            "status": "partial",
+            "valuation": {"pe_ratio": 99.0, "pb_ratio": 3.0},
+            "growth": {"revenue_yoy": 8.0, "gross_margin": 10.0},
+            "earnings": {
+                "financial_report": {
+                    "revenue": 999.0,
+                    "net_profit_parent": 20.0,
+                    "operating_cash_flow": 25.0,
+                }
+            },
+            "institution": {"holder_count": 1000},
+            "source_chain": ["growth:akshare"],
+            "errors": [],
+        }
+
+        with patch.object(manager, "_get_fundamental_config", return_value=cfg), \
+                patch.object(
+                    manager._tushare_fundamental_adapter,
+                    "get_fundamental_bundle",
+                    return_value=primary,
+                ), \
+                patch.object(
+                    manager,
+                    "_run_with_timeout",
+                    return_value=(fallback, None, 1),
+                ) as timeout_call:
+            result = manager._get_cn_fundamental_bundle("600519")
+
+        self.assertEqual(result["valuation"], {"pe_ratio": 20.0, "pb_ratio": 3.0})
+        self.assertEqual(result["growth"], {"revenue_yoy": 8.0, "gross_margin": 50.0})
+        self.assertEqual(result["earnings"]["financial_report"]["revenue"], 100.0)
+        self.assertEqual(result["earnings"]["financial_report"]["net_profit_parent"], 20.0)
+        self.assertEqual(result["institution"]["holder_count"], 1000)
+        self.assertEqual(
+            result["source_chain"],
+            ["valuation:tushare.daily_basic", "growth:akshare"],
+        )
+        self.assertEqual(result["errors"], ["tushare:cashflow:timeout"])
+        self.assertEqual(timeout_call.call_args.args[2], "akshare_fundamental_fallback")
+
+    def test_tushare_daily_basic_enriches_realtime_valuation(self) -> None:
+        manager = DataFetcherManager(fetchers=[])
+        cfg = SimpleNamespace(
+            enable_fundamental_pipeline=True,
+            fundamental_cache_ttl_seconds=0,
+            fundamental_stage_timeout_seconds=3.0,
+            fundamental_fetch_timeout_seconds=1.0,
+            fundamental_auxiliary_timeout_seconds=0.2,
+            fundamental_retry_max=1,
+        )
+        quote = SimpleNamespace(
+            price=100.0,
+            pe_ratio=10.0,
+            pb_ratio=2.0,
+            total_mv=1.0e11,
+            circ_mv=8.0e10,
+            source=SimpleNamespace(value="tencent"),
+        )
+        bundle = {
+            "status": "partial",
+            "valuation": {"pe_ratio": 20.0, "dividend_yield_ttm_pct": 3.5},
+            "growth": {},
+            "earnings": {},
+            "institution": {},
+            "source_chain": ["valuation:tushare.daily_basic"],
+            "errors": [],
+        }
+
+        with patch("src.config.get_config", return_value=cfg), \
+                patch.object(manager, "get_realtime_quote", return_value=quote), \
+                patch.object(manager, "_get_cn_fundamental_bundle", return_value=bundle), \
+                patch.object(manager, "get_capital_flow_context", return_value={"status": "not_supported"}), \
+                patch.object(manager, "get_dragon_tiger_context", return_value={"status": "not_supported"}), \
+                patch.object(manager, "get_board_context", return_value={"status": "not_supported"}):
+            ctx = manager.get_fundamental_context("600519")
+
+        valuation = ctx["valuation"]
+        self.assertEqual(valuation["data"]["pe_ratio"], 20.0)
+        self.assertEqual(valuation["data"]["pb_ratio"], 2.0)
+        self.assertEqual(valuation["data"]["dividend_yield_ttm_pct"], 3.5)
+        self.assertTrue(
+            any("daily_basic" in item["provider"] for item in valuation["source_chain"])
+        )
+
+    def test_auxiliary_fundamental_stages_use_independent_short_timeout(self) -> None:
+        manager = DataFetcherManager(fetchers=[])
+        cfg = SimpleNamespace(
+            enable_fundamental_pipeline=True,
+            fundamental_cache_ttl_seconds=0,
+            fundamental_stage_timeout_seconds=30.0,
+            fundamental_fetch_timeout_seconds=10.0,
+            fundamental_auxiliary_timeout_seconds=1.25,
+            fundamental_retry_max=1,
+        )
+        quote = SimpleNamespace(
+            pe_ratio=10.0,
+            pb_ratio=2.0,
+            total_mv=1.0e11,
+            circ_mv=8.0e10,
+            source=SimpleNamespace(value="tencent"),
+        )
+        bundle = {
+            "status": "partial",
+            "valuation": {},
+            "growth": {"revenue_yoy": 8.0},
+            "earnings": {},
+            "institution": {},
+            "source_chain": [],
+            "errors": [],
+        }
+        budgets = {}
+
+        def _block(name):
+            def run(_code, budget_seconds=0.0):
+                budgets[name] = budget_seconds
+                return {"status": "not_supported", "source_chain": [], "errors": [], "data": {}}
+            return run
+
+        with patch("src.config.get_config", return_value=cfg), \
+                patch.object(manager, "get_realtime_quote", return_value=quote), \
+                patch.object(manager, "_get_cn_fundamental_bundle", return_value=bundle), \
+                patch.object(manager, "get_capital_flow_context", side_effect=_block("capital_flow")), \
+                patch.object(manager, "get_dragon_tiger_context", side_effect=_block("dragon_tiger")), \
+                patch.object(manager, "get_board_context", side_effect=_block("boards")):
+            manager.get_fundamental_context("600519")
+
+        self.assertEqual(budgets, {
+            "capital_flow": 1.25,
+            "dragon_tiger": 1.25,
+            "boards": 1.25,
+        })
+
     def test_non_etf_board_budget_not_forced_to_zero(self) -> None:
         manager = DataFetcherManager(fetchers=[])
         cfg = SimpleNamespace(

@@ -97,6 +97,64 @@ def build_agent_event_monitor_background_tasks(
     }]
 
 
+def _decision_signal_outcome_interval_seconds(config: Config) -> int:
+    interval_minutes = getattr(config, "decision_signal_outcome_interval_minutes", 30)
+    try:
+        interval_minutes = max(5, int(interval_minutes))
+    except (TypeError, ValueError):  # pragma: no cover - defensive branch
+        logger.warning(
+            "Invalid DECISION_SIGNAL_OUTCOME_INTERVAL_MINUTES=%r; use fallback 30",
+            interval_minutes,
+        )
+        interval_minutes = 30
+    return interval_minutes * 60
+
+
+def _decision_signal_outcome_batch_limit(config: Config) -> int:
+    batch_limit = getattr(config, "decision_signal_outcome_batch_limit", 100)
+    try:
+        return max(1, min(int(batch_limit), 500))
+    except (TypeError, ValueError):  # pragma: no cover - defensive branch
+        logger.warning(
+            "Invalid DECISION_SIGNAL_OUTCOME_BATCH_LIMIT=%r; use fallback 100",
+            batch_limit,
+        )
+        return 100
+
+
+def build_decision_signal_outcome_background_tasks(
+    config: Config,
+    *,
+    config_provider: Optional[Callable[[], Config]] = None,
+) -> List[Dict[str, Any]]:
+    """Build the local-only maintenance task that advances signal outcomes."""
+    if not getattr(config, "decision_signal_outcome_enabled", False):
+        return []
+
+    from src.services.decision_signal_outcome_service import DecisionSignalOutcomeService
+
+    service = DecisionSignalOutcomeService()
+
+    def outcome_task() -> None:
+        runtime_config = config_provider() if config_provider is not None else config
+        batch_limit = _decision_signal_outcome_batch_limit(runtime_config)
+        stats = service.run_outcomes(limit=batch_limit)
+        logger.info(
+            "[DecisionSignalOutcome] evaluated=%d created=%d updated=%d skipped=%d",
+            int(stats.get("evaluated", 0)),
+            int(stats.get("created", 0)),
+            int(stats.get("updated", 0)),
+            int(stats.get("skipped", 0)),
+        )
+
+    return [{
+        "task": outcome_task,
+        "interval_seconds": _decision_signal_outcome_interval_seconds(config),
+        "run_immediately": True,
+        "name": "decision_signal_outcomes",
+    }]
+
+
 class RuntimeSchedulerService:
     """Manage scheduled analysis inside the current API/Web/Desktop process."""
 
@@ -213,7 +271,10 @@ class RuntimeSchedulerService:
     def _current_background_tasks(self, config: Config) -> List[Dict[str, Any]]:
         if self._background_tasks_provider is not None:
             return self._background_tasks_provider(config)
-        return self._current_agent_event_monitor_background_tasks(config)
+        return [
+            *self._current_agent_event_monitor_background_tasks(config),
+            *self._current_decision_signal_outcome_background_tasks(config),
+        ]
 
     def _current_agent_event_monitor_background_tasks(self, config: Config) -> List[Dict[str, Any]]:
         name = "agent_event_monitor"
@@ -247,6 +308,39 @@ class RuntimeSchedulerService:
         return [{
             "task": cached["task"],
             "interval_seconds": interval_seconds,
+            "run_immediately": run_immediately,
+            "name": name,
+        }]
+
+    def _current_decision_signal_outcome_background_tasks(self, config: Config) -> List[Dict[str, Any]]:
+        name = "decision_signal_outcomes"
+        if not getattr(config, "decision_signal_outcome_enabled", False):
+            self._background_task_cache.pop(name, None)
+            self._background_task_registered_names.discard(name)
+            return []
+
+        cached = self._background_task_cache.get(name)
+        if cached is None:
+            entries = build_decision_signal_outcome_background_tasks(
+                config,
+                config_provider=self._reload_config,
+            )
+            if not entries:
+                self._background_task_cache.pop(name, None)
+                self._background_task_registered_names.discard(name)
+                return []
+            cached = dict(entries[0])
+            cached["name"] = name
+            self._background_task_cache[name] = cached
+
+        run_immediately = (
+            bool(cached.get("run_immediately", False))
+            and name not in self._background_task_registered_names
+        )
+        self._background_task_registered_names.add(name)
+        return [{
+            "task": cached["task"],
+            "interval_seconds": _decision_signal_outcome_interval_seconds(config),
             "run_immediately": run_immediately,
             "name": name,
         }]
