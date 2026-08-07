@@ -103,6 +103,18 @@ Docker 镜像启动入口会自动创建并修复 `./data`、`./logs`、`./repor
 
 如果你显式指定了 `--user` / Compose `user:`，或使用只读挂载、rootless Docker、NFS 等不允许容器修复属主的环境，请确保实际运行用户对这些目录具备写入权限。
 
+### 7. 健康检查与就绪检查
+
+- `/health`、`/api/health`、`/api/v1/health` 是兼容的 liveness 接口，只表示 API 进程仍能响应。
+- `/api/v1/health/ready` 是接流量前的 readiness 接口，会只读检查迁移版本，并验证 SQLite 可读及可写。写探针插入临时 migration marker 后立即回滚，不保留业务数据。
+- Durable Worker 尚未启用时，Worker 心跳项显示为 `skipped`；后续显式要求 Worker 心跳后，心跳失败会令 readiness 返回 HTTP `503`。
+
+Compose 会先运行一次性 `migrator`（`python -m src.migrations --apply`），只有迁移成功后才启动 `server` 和 `analyzer`。镜像内的模式感知探针会检查实际 DSA 进程：`--serve`、`--serve-only`、旧版 WebUI 参数或 `WEBUI_ENABLED=true` 必须使用容器内 `API_PORT`（默认 `8000`）通过 readiness；默认 `python main.py --schedule` 等非 HTTP 模式必须存在仍存活且非僵尸的 DSA 进程，未知命令不会被判为健康。Compose 的 `server` 与 `analyzer` 均继承这项探针，分别执行 API readiness 和调度进程存活检查；同时启动两个服务时，`server` 注入 `DSA_RUNTIME_SCHEDULER_SUPPRESS_START=true`，因此只有 `analyzer` 持有定时调度权。独立启动、未设置该变量的 `--serve-only` 仍会恢复已保存的调度配置。
+
+```bash
+curl --fail "http://127.0.0.1:${API_PORT:-8000}/api/v1/health/ready"
+```
+
 ---
 
 ## 🖥️ 方案二：直接部署

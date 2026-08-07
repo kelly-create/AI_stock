@@ -1,0 +1,76 @@
+{
+  "manifest_version": "research-golden-v1",
+  "canonicalization": "UTF-8 JSON with sorted object keys and separators (',', ':'); SHA-256 lowercase hex",
+  "field_dictionary": {
+    "path": "field_dictionary.json",
+    "expected_sha256": "032a3c2ccac9d6471a017e84aa294190ff4d29eaa681aeb42797367f71f9d224"
+  },
+  "input_bundle": {
+    "path": "cases.json",
+    "expected_sha256": "824b10a9115eb10ef0931980b462637545abfecd834897fdacc15541e4a4f76a"
+  },
+  "contract_versions": {
+    "field_dictionary": "research-fields-v1",
+    "policy": "personal-policy-v1",
+    "prompt": "personal-research-v1",
+    "snapshot": "research-snapshot-v1"
+  },
+  "global_invariants": [
+    "same_inputs_and_versions_produce_same_canonical_hash",
+    "every_available_at_is_at_or_before_case_as_of",
+    "missing_and_not_applicable_are_not_zero",
+    "feature_flags_off_preserve_legacy_behavior"
+  ],
+  "cases": [
+    {
+      "id": "consumer_value_quality_600519",
+      "stock_code": "600519",
+      "expected_sha256": "7e6826269c4ce7987b81793975070d42069018e110585dec33bde7d71b796229"
+    },
+    {
+      "id": "bank_601398",
+      "stock_code": "601398",
+      "expected_sha256": "c08a510be2a81497f59a9ca0b0f685e2a5e715a7df07b02575ff88dc8089da11"
+    },
+    {
+      "id": "growth_volatility_300750",
+      "stock_code": "300750",
+      "expected_sha256": "23271da42b18f7da452932ae3a8e175fb069512ec7e74f558f698972ace886c7"
+    },
+    {
+      "id": "insurance_601318",
+      "stock_code": "601318",
+      "expected_sha256": "857c4b058d45aad1557ff98bc17f0204b943d22cf72c359ba4c58610ddd93754"
+    },
+    {
+      "id": "securities_600030",
+      "stock_code": "600030",
+      "expected_sha256": "a1c4238ed7e92c910100dbc98ca2aae5faa787c6235d68bb8df4cafbf4472d3a"
+    },
+    {
+      "id": "st_stock",
+      "stock_code": "SYNTH-ST-001",
+      "expected_sha256": "7521ed37f296e5d3c53834332caae24315ac5b04efae39c10f6d17e1761b92f0"
+    },
+    {
+      "id": "suspended_stock",
+      "stock_code": "SYNTH-SUSPENDED-001",
+      "expected_sha256": "1e90d0452c2730d5659664bc18081832e8fb12546beddffc673ec09ed06825e5"
+    },
+    {
+      "id": "limit_up_not_buyable",
+      "stock_code": "SYNTH-LIMIT-UP-001",
+      "expected_sha256": "85d9e4cb2e9427ccb8c0c74681cca8100bdca6074406319ce1069ff5f3e244fc"
+    },
+    {
+      "id": "limit_down_not_sellable",
+      "stock_code": "SYNTH-LIMIT-DOWN-001",
+      "expected_sha256": "14ce51217bb4fefc68b9aba61c9417414313acd0a0cb9ab6b92ca7cf91d4abca"
+    },
+    {
+      "id": "missing_data",
+      "stock_code": "SYNTH-MISSING-001",
+      "expected_sha256": "495a32fa20f1d8b122cbd2cda264b9c1263bc7da4362cd07e5774090c137cf63"
+    }
+  ]
+}

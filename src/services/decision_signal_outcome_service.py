@@ -216,6 +216,14 @@ class DecisionSignalOutcomeService:
             }
 
             for signal in page:
+                # Batch evaluation is a maintenance path: only directional signals
+                # with a daily-bar-compatible natural horizon can produce useful
+                # performance statistics. Explicit per-signal runs remain able to
+                # return a precise unable_reason for watch/intraday signals.
+                if self._direction_for_action(signal.action) is None:
+                    continue
+                if requested_horizons is None and not self._has_supported_natural_horizon(signal):
+                    continue
                 actionability, retryable_at = self._candidate_actionability(
                     signal,
                     requested_horizons=requested_horizons,
@@ -613,6 +621,11 @@ class DecisionSignalOutcomeService:
         if horizon:
             return [horizon]
         return list(SUPPORTED_OUTCOME_HORIZONS.keys())
+
+    @staticmethod
+    def _has_supported_natural_horizon(signal: DecisionSignalRecord) -> bool:
+        horizon = str(signal.horizon or "").strip()
+        return not horizon or horizon in SUPPORTED_OUTCOME_HORIZONS
 
     def _require_existing_signal(self, signal_id: int) -> DecisionSignalRecord:
         signal_id_norm = self._optional_positive_int(signal_id, "signal_id")

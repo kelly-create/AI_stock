@@ -64,6 +64,7 @@
 | 文档 | 内容 |
 | --- | --- |
 | [API 规格](architecture/api_spec.json) | FastAPI OpenAPI 规格产物 |
+| [个人投研 PR0 生产基线](architecture/personal-research-pr0-baseline.md) | 现网源码对账、脱敏基线采集、Golden 用例与版本契约 |
 | [贡献指南](CONTRIBUTING.md) | Issue、PR、测试、文档同步和协作要求 |
 
 ## 多语言

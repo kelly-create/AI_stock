@@ -413,6 +413,7 @@ daily_stock_analysis/
 | 变量名 | 说明 | 默认值 | 必填 |
 |--------|------|--------|:----:|
 | `TUSHARE_TOKEN` | Tushare Pro Token | - | 可选 |
+| `TUSHARE_PRIORITY` | Tushare 日 K 数据源优先级，范围 `0-99`、数字越小越早尝试；留空时保留 Token 可用后的自动优先级，显式非法值安全回落为 `2`。 | 留空（自动） | 可选 |
 | `TUSHARE_HTTP_URL` | Tushare Pro HTTP 接入地址；留空时使用官方端点 `http://api.tushare.pro`，仅在需通过公司内网代理、跨境网络或自建镜像时填 `http://` 或 `https://` 开头的完整地址 | `http://api.tushare.pro` | 可选 |
 | `TICKFLOW_API_KEY` | TickFlow API Key；可选，用于 A 股日 K、实时行情、股票列表/名称与大盘复盘增强；失败或权限不足时自动回退。 | - | 可选 |
 | `TICKFLOW_PRIORITY` | TickFlow 日 K 数据源优先级；数字越小越早尝试，默认 `2`；未配置 API Key 时不启用；不影响实时行情，实时行情顺序由 `REALTIME_SOURCE_PRIORITY` 控制。 | `2` | 可选 |
@@ -434,6 +435,7 @@ daily_stock_analysis/
 | `ENABLE_FUNDAMENTAL_PIPELINE` | 基本面聚合总开关；关闭时仅返回 `not_supported` 块，不改变原分析链路 | `true` | 可选 |
 | `FUNDAMENTAL_STAGE_TIMEOUT_SECONDS` | 基本面阶段总时延预算（秒） | `8.0` | 可选 |
 | `FUNDAMENTAL_FETCH_TIMEOUT_SECONDS` | 单能力源调用超时（秒）；市场结构行业/概念排行也复用该预算 | `8.0` | 可选 |
+| `FUNDAMENTAL_AUXILIARY_TIMEOUT_SECONDS` | 可选辅助基本面源的独立超时（秒），避免慢 AkShare 辅助块耗尽整个基本面阶段预算 | `4.0` | 可选 |
 | `FUNDAMENTAL_RETRY_MAX` | 基本面能力重试次数（含首次） | `1` | 可选 |
 | `FUNDAMENTAL_CACHE_TTL_SECONDS` | 基本面聚合缓存 TTL（秒），短缓存减轻重复拉取 | `120` | 可选 |
 | `FUNDAMENTAL_CACHE_MAX_ENTRIES` | 基本面缓存最大条目数（TTL 内按时间淘汰） | `256` | 可选 |
@@ -1483,7 +1485,7 @@ P3 开始，生命周期由 `DecisionSignalService` 统一补齐：显式传入�
 
 P5 后验评估只支持日线可验证的 `1d/3d/5d/10d`，窗口语义是 anchor 后 1/3/5/10 根 `StockDaily` 交易 bar，不复用 `DecisionSignalService._horizon_days()` 的自然日过期语义。`anchor_date` 优先读取 `metadata.market_phase_summary.session_date`，否则使用 `created_at.date()`；anchor 当日必须存在 `StockDaily.close`，不会回退到前一交易日。动作映射为 `buy/add -> up`、`hold -> not_down`、`reduce/sell/avoid -> not_up`；`watch/alert`、`intraday/swing/long`、缺 anchor 价、forward bars 不足等会写入 `eval_status=unable` 和明确 `unable_reason`。缺 anchor 价、非法 anchor 价、forward bars 不足、缺/非法窗口收盘价属于可恢复 unable，后续默认重跑会在数据补齐后重新评估；非方向动作、不支持 horizon 和缺 anchor date 属于终态 unable，默认保持幂等跳过。自动提取运行时可额外接收 `portfolio_context.quantity`，只把低敏 `holding_state=holding|empty|unknown` 写入 metadata 供后验快照使用，不保存数量、账户或成本。
 
-P5 在 Web `/decision-signals` 页面筛选区下方展示当前 outcome engine 的整体统计卡片；详情抽屉按需读取该信号 outcomes，并可提交 useful/not useful 反馈。该页面不新增导航页，不进入 BacktestPage，也不新增后台定时任务；后验计算由 `POST /api/v1/decision-signals/outcomes/run` 显式触发。批量运行默认优先推进缺失 outcome 的信号，再重试可恢复 unable，不会让已完成或终态 unable 的最新信号长期占满 `limit`。
+P5 在 Web `/decision-signals` 页面筛选区下方展示当前 outcome engine 的整体统计卡片；详情抽屉按需读取该信号 outcomes，并可提交 useful/not useful 反馈。该页面不新增导航页、不进入 BacktestPage。生产运行时由唯一 Scheduler owner 在启动后执行一轮 v1 Outcome 维护，再按 `DECISION_SIGNAL_OUTCOME_INTERVAL_MINUTES` 周期推进，每轮上限由 `DECISION_SIGNAL_OUTCOME_BATCH_LIMIT` 控制；设置 `DECISION_SIGNAL_OUTCOME_ENABLED=false` 可关闭后台维护，显式 `POST /api/v1/decision-signals/outcomes/run` 仍可用。批量运行默认优先推进缺失 outcome 的信号，再重试可恢复 unable，并跳过非方向动作和不受支持的自然周期，不会让已完成或终态 unable 的最新信号长期占满 `limit`。该 v1 维护与默认关闭的 `DECISION_OUTCOME_V2_ENABLED` 独立。
 
 #1758 在同一个 `GET /api/v1/decision-signals/outcomes/stats` 响应中追加 `profile_calibration`，按 decision profile、profile + action、profile + horizon、profile + market phase、profile + frozen data quality 和 profile source 返回结构化分组。每个分组独立要求 `completed >= 30`，不足时只保留 counts，五项描述性指标统一返回 `null`；Web 只展示样本量和“样本不足，仅供观察。”，不排名或推荐风格。命中/未命中率的分母是 `hit + miss`，无法评估率的分母是 total；最大不利波动只从 outcome 已保存的 `start_price/min_low/max_high` 计算，不触发行情读取。`decision_profile` 和 metadata-backed `profile_source` 是查询时关联信号的当前归因；action、horizon、market phase、data quality 继续使用 outcome 冻结值。新 outcome 的 data quality 在 summary 没有显式 level 时才 fallback 到规范化的 metadata level，既有 outcome 不会静默重写。Web 复用原统计请求和 Card，只提供保守/均衡/进取及按动作/按周期两个用户视图；旧后端缺少新字段时原统计仍可用。完整口径见 [DecisionSignal 决策信号专题](decision-signals.md)。
 
@@ -1491,7 +1493,7 @@ P5 在 Web `/decision-signals` 页面筛选区下方展示当前 outcome engine 
 
 #1390 P6 将 `DecisionSignal` 复用到告警、通知和组合风险，不新增表、迁移或配置。真实股票级告警触发会优先关联同标的 latest active 信号，并把低敏 `decision_signal_summary` 写入 `alert_triggers.diagnostics`；没有 active 信号时，worker 只创建最小 `source_type=alert`、`action=alert` 信号，`trace_id=alert-rule-<hash>` 仅用于同源重试的 best-effort 幂等去重，不覆盖 active 信号本体，且不写 `market_phase` 避免跨阶段重复。告警通知和分析通知只引用摘要中的 `action/horizon/reason/watch_conditions/risk_summary/source_report_id` 等公开字段，通知失败不影响 trigger 或信号写入。`GET /api/v1/portfolio/risk` 追加 `decision_signal_risk` 聚合块，只统计当前持仓中的 active `sell/reduce/alert` 信号，明确排除 `avoid/buy/add/hold/watch`；信号查询失败时风险接口 fail-open，Web 风险区显示降级状态。
 
-#1390 P7 的收口文档见 [DecisionSignal 决策信号专题](decision-signals.md)。#1756 不新增 `DECISION_SIGNAL_*` 配置或运行时开关，但会为 `decision_signals` 增加 nullable `decision_profile` 字段、API 请求/响应字段和 profile-aware index；existing SQLite 只在缺列时 `ALTER TABLE ADD COLUMN`，不会 drop/rebuild 表，也不会删除旧 index。迁移会幂等创建 profile-aware index，并 row-by-row 防御解析 `metadata_json`，仅合法 `metadata.decision_profile` 回填，invalid JSON、非 object 或非法 profile 保持 `NULL`。当前回滚方式为 revert 对应代码。回滚后信号提取和写入停止，既有报告保存、告警触发、通知发送和组合风险主流程不依赖信号池继续运行；历史 signal、feedback 和 outcome 数据不会自动清理。
+#1390 P7 的收口文档见 [DecisionSignal 决策信号专题](decision-signals.md)。#1756 为 `decision_signals` 增加 nullable `decision_profile` 字段、API 请求/响应字段和 profile-aware index；existing SQLite 只在缺列时 `ALTER TABLE ADD COLUMN`，不会 drop/rebuild 表，也不会删除旧 index。迁移会幂等创建 profile-aware index，并 row-by-row 防御解析 `metadata_json`，仅合法 `metadata.decision_profile` 回填，invalid JSON、非 object 或非法 profile 保持 `NULL`。`DECISION_SIGNAL_OUTCOME_ENABLED` 只用于软关闭 v1 后台 Outcome 维护，不关闭信号提取/写入；完整回滚仍需 revert 对应代码。回滚后既有报告保存、告警触发、通知发送和组合风险主流程不依赖信号池继续运行；历史 signal、feedback 和 outcome 数据不会自动清理。
 
 普通个股历史报告详情不再内嵌展示该报告提取出的 `source_type=analysis` 信号，也不会因打开报告详情而发起 `source_report_id=<recordId>` 的信号查询；需要查看结构化 AI 建议时统一进入 `/decision-signals` 页面筛选来源报告 ID、打开 `/decision-signals?sourceReportId=<recordId>` deep link，或按股票查询。填写来源报告 ID 或使用该 URL 参数时，Web 会发起 `source_type=analysis + source_report_id=<recordId>` 的精确查询，不叠加默认 `status=active` 等其他列表筛选，以保留旧报告 best-effort 懒回填语义。
 

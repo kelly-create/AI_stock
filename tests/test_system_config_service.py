@@ -1849,6 +1849,33 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertFalse(validation["valid"])
         self.assertTrue(any(issue["code"] == "invalid_type" for issue in validation["issues"]))
 
+    def test_validate_production_runtime_config_bounds(self) -> None:
+        cases = (
+            ("TUSHARE_PRIORITY", "-1", "out_of_range"),
+            ("DECISION_SIGNAL_OUTCOME_ENABLED", "maybe", "invalid_type"),
+            ("DECISION_SIGNAL_OUTCOME_INTERVAL_MINUTES", "4", "out_of_range"),
+            ("DECISION_SIGNAL_OUTCOME_BATCH_LIMIT", "501", "out_of_range"),
+            ("FUNDAMENTAL_AUXILIARY_TIMEOUT_SECONDS", "-1", "out_of_range"),
+        )
+
+        for key, value, expected_code in cases:
+            with self.subTest(key=key, value=value):
+                validation = self.service.validate(items=[{"key": key, "value": value}])
+
+                self.assertFalse(validation["valid"])
+                self.assertTrue(
+                    any(
+                        issue["key"] == key and issue["code"] == expected_code
+                        for issue in validation["issues"]
+                    ),
+                    validation["issues"],
+                )
+
+        blank_priority = self.service.validate(
+            items=[{"key": "TUSHARE_PRIORITY", "value": ""}]
+        )
+        self.assertTrue(blank_priority["valid"], blank_priority["issues"])
+
     def test_validate_reports_invalid_feishu_webhook_url(self) -> None:
         validation = self.service.validate(
             items=[{"key": "FEISHU_WEBHOOK_URL", "value": "feishu-hook-without-scheme"}]
@@ -4312,6 +4339,32 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertIn("不会启动 scheduler", schedule_time_warning)
         self.assertNotIn("重启当前进程", schedule_time_warning)
         self.assertNotIn("不会因为本次保存启动、停止或重建 scheduler", schedule_time_warning)
+
+    def test_update_outcome_maintenance_config_reconciles_runtime_scheduler(self) -> None:
+        runtime_scheduler = Mock()
+        service = SystemConfigService(
+            manager=self.manager,
+            runtime_scheduler=runtime_scheduler,
+        )
+
+        response = service.update(
+            config_version=self.manager.get_config_version(),
+            items=[
+                {"key": "DECISION_SIGNAL_OUTCOME_ENABLED", "value": "true"},
+                {"key": "DECISION_SIGNAL_OUTCOME_INTERVAL_MINUTES", "value": "45"},
+                {"key": "DECISION_SIGNAL_OUTCOME_BATCH_LIMIT", "value": "50"},
+            ],
+            reload_now=False,
+        )
+
+        self.assertTrue(response["success"])
+        runtime_scheduler.reconcile_from_config.assert_called_once_with(
+            clear_enabled_override=False,
+        )
+        current_map = self.manager.read_config_map()
+        self.assertEqual(current_map["DECISION_SIGNAL_OUTCOME_ENABLED"], "true")
+        self.assertEqual(current_map["DECISION_SIGNAL_OUTCOME_INTERVAL_MINUTES"], "45")
+        self.assertEqual(current_map["DECISION_SIGNAL_OUTCOME_BATCH_LIMIT"], "50")
 
     def test_update_schedule_time_blank_warning_reports_effective_default(self) -> None:
         response = self.service.update(

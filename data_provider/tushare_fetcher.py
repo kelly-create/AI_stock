@@ -94,6 +94,28 @@ def _resolve_tushare_http_url() -> Optional[str]:
     return url
 
 
+def _resolve_tushare_priority() -> Optional[int]:
+    """Return an explicit Tushare priority, or ``None`` for auto-priority.
+
+    An invalid explicit value must not accidentally promote Tushare ahead of
+    the trusted providers.  Keep the historical normal priority in that case.
+    """
+    raw = os.getenv("TUSHARE_PRIORITY")
+    if raw is None or not raw.strip():
+        return None
+
+    try:
+        priority = int(raw.strip())
+    except ValueError:
+        logger.warning("Invalid TUSHARE_PRIORITY=%r; using fallback priority 2", raw)
+        return 2
+
+    if not 0 <= priority <= 99:
+        logger.warning("TUSHARE_PRIORITY=%r is outside 0-99; using fallback priority 2", raw)
+        return 2
+    return priority
+
+
 class _TushareHttpClient:
     """Lightweight Tushare Pro client that does not require the tushare SDK."""
 
@@ -150,7 +172,7 @@ class TushareFetcher(BaseFetcher):
     """
     
     name = "TushareFetcher"
-    priority = int(os.getenv("TUSHARE_PRIORITY", "2"))  # 默认优先级，会在 __init__ 中根据配置动态调整
+    priority = 2  # Instance priority is resolved in ``_determine_priority``.
 
     def __init__(self, rate_limit_per_minute: int = 80):
         """
@@ -225,6 +247,13 @@ class TushareFetcher(BaseFetcher):
             优先级数字（0=最高，数字越大优先级越低）
         """
         config = get_config()
+        explicit_priority = _resolve_tushare_priority()
+        if explicit_priority is not None:
+            logger.info(
+                "Tushare data source uses explicit priority from TUSHARE_PRIORITY: %s",
+                explicit_priority,
+            )
+            return explicit_priority
 
         if config.tushare_token and self._api is not None:
             # Token 配置且 API 初始化成功，提升为最高优先级

@@ -29,6 +29,7 @@ from src.data.stock_mapping import STOCK_NAME_MAP, is_meaningful_stock_name
 from src.services.market_symbol_utils import is_suffix_market_symbol
 from src.services.run_diagnostics import record_provider_run, record_provider_run_started
 from .fundamental_adapter import AkshareFundamentalAdapter
+from .tushare_fundamental_adapter import TushareFundamentalAdapter
 from .yfinance_fundamental_adapter import YfinanceFundamentalAdapter
 from .realtime_types import CircuitBreaker
 
@@ -657,6 +658,7 @@ class DataFetcherManager:
             # 默认数据源将在首次使用时延迟加载
             self._init_default_fetchers()
         self._fundamental_adapter = AkshareFundamentalAdapter()
+        self._tushare_fundamental_adapter = TushareFundamentalAdapter()
         self._yfinance_fundamental_adapter = YfinanceFundamentalAdapter()
         self._tickflow_fetcher = None
         self._tickflow_api_key: Optional[str] = None
@@ -2641,6 +2643,146 @@ class DataFetcherManager:
         from src.config import get_config
         return get_config()
 
+    @classmethod
+    def _merge_fundamental_payload(cls, primary: Any, fallback: Any) -> Any:
+        """Keep meaningful primary values and fill only gaps from fallback."""
+        if isinstance(primary, dict) and isinstance(fallback, dict):
+            merged = dict(primary)
+            for key, fallback_value in fallback.items():
+                if (
+                    key in merged
+                    and isinstance(merged[key], dict)
+                    and isinstance(fallback_value, dict)
+                ):
+                    merged[key] = cls._merge_fundamental_payload(
+                        merged[key],
+                        fallback_value,
+                    )
+                elif key not in merged or not cls._has_meaningful_payload(merged[key]):
+                    merged[key] = fallback_value
+            return merged
+        return primary if cls._has_meaningful_payload(primary) else fallback
+
+    @classmethod
+    def _merge_fundamental_bundles(
+        cls,
+        primary: Dict[str, Any],
+        fallback: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        merged: Dict[str, Any] = {
+            "status": "not_supported",
+            "valuation": {},
+            "growth": {},
+            "earnings": {},
+            "institution": {},
+            "source_chain": [],
+            "errors": [],
+        }
+        for block in ("valuation", "growth", "earnings", "institution"):
+            merged[block] = cls._merge_fundamental_payload(
+                primary.get(block, {}),
+                fallback.get(block, {}),
+            )
+        for key in ("source_chain", "errors"):
+            seen = set()
+            values = []
+            for item in list(primary.get(key, []) or []) + list(fallback.get(key, []) or []):
+                marker = repr(item)
+                if marker in seen:
+                    continue
+                seen.add(marker)
+                values.append(item)
+            merged[key] = values
+        merged["status"] = (
+            "partial"
+            if any(
+                cls._has_meaningful_payload(merged[block])
+                for block in ("valuation", "growth", "earnings", "institution")
+            )
+            else "not_supported"
+        )
+        return merged
+
+    def _get_cn_fundamental_bundle(self, stock_code: str) -> Dict[str, Any]:
+        """Use Tushare fundamentals first and fill critical gaps via AkShare."""
+        config = self._get_fundamental_config()
+        token = str(getattr(config, "tushare_token", "") or "").strip()
+        if not token:
+            return self._fundamental_adapter.get_fundamental_bundle(stock_code)
+
+        tushare_adapter = getattr(self, "_tushare_fundamental_adapter", None)
+        if tushare_adapter is None:
+            tushare_adapter = TushareFundamentalAdapter()
+            self._tushare_fundamental_adapter = tushare_adapter
+        try:
+            primary = tushare_adapter.get_fundamental_bundle(stock_code)
+        except Exception as exc:
+            primary = {
+                "status": "failed",
+                "valuation": {},
+                "growth": {},
+                "earnings": {},
+                "institution": {},
+                "source_chain": [],
+                "errors": [f"tushare_fundamental:{type(exc).__name__}:{exc}"],
+            }
+        if not isinstance(primary, dict):
+            primary = {
+                "status": "failed",
+                "valuation": {},
+                "growth": {},
+                "earnings": {},
+                "institution": {},
+                "source_chain": [],
+                "errors": ["tushare_fundamental:invalid_payload"],
+            }
+
+        earnings = primary.get("earnings", {})
+        earnings = earnings if isinstance(earnings, dict) else {}
+        financial_report = earnings.get("financial_report", {})
+        financial_report = financial_report if isinstance(financial_report, dict) else {}
+        has_primary_financials = all(
+            self._has_meaningful_payload(financial_report.get(key))
+            for key in ("revenue", "net_profit_parent", "operating_cash_flow")
+        )
+        has_primary_growth = self._has_meaningful_payload(primary.get("growth"))
+        if has_primary_financials and has_primary_growth:
+            return primary
+
+        fallback_timeout = min(
+            3.0,
+            max(
+                0.5,
+                float(getattr(config, "fundamental_fetch_timeout_seconds", 8.0)) / 3.0,
+            ),
+        )
+        fallback, fallback_error, _ = self._run_with_timeout(
+            lambda: self._fundamental_adapter.get_fundamental_bundle(stock_code),
+            fallback_timeout,
+            "akshare_fundamental_fallback",
+        )
+        if fallback_error:
+            fallback = {
+                "status": "failed",
+                "valuation": {},
+                "growth": {},
+                "earnings": {},
+                "institution": {},
+                "source_chain": [],
+                "errors": [f"akshare_fundamental:{fallback_error}"],
+            }
+        if not isinstance(fallback, dict):
+            fallback = {
+                "status": "failed",
+                "valuation": {},
+                "growth": {},
+                "earnings": {},
+                "institution": {},
+                "source_chain": [],
+                "errors": ["akshare_fundamental:invalid_payload"],
+            }
+        return self._merge_fundamental_bundles(primary, fallback)
+
     @staticmethod
     def _normalize_source_chain(
         entries: Any,
@@ -3145,6 +3287,10 @@ class DataFetcherManager:
         stage_timeout = max(0.0, stage_timeout)
         fetch_timeout = float(config.fundamental_fetch_timeout_seconds)
         fetch_timeout = max(0.0, fetch_timeout)
+        auxiliary_timeout = max(
+            0.0,
+            float(getattr(config, "fundamental_auxiliary_timeout_seconds", 4.0)),
+        )
 
         cache_ttl = int(config.fundamental_cache_ttl_seconds)
         cache_max_entries = max(0, int(getattr(config, "fundamental_cache_max_entries", 256)))
@@ -3214,7 +3360,7 @@ class DataFetcherManager:
             [valuation_err] if valuation_err else [],
         )
 
-        # growth / earnings / institution (one AkShare call)
+        # valuation / growth / earnings / institution (Tushare primary, AkShare gap fill)
         if remaining_seconds <= 0:
             bundle_status = "failed"
             bundle_payload: Dict[str, Any] = {}
@@ -3223,7 +3369,7 @@ class DataFetcherManager:
         else:
             bundle_timeout = min(fetch_timeout, remaining_seconds)
             bundle_payload, bundle_err_msg, bundle_ms = self._run_with_retry(
-                lambda: self._fundamental_adapter.get_fundamental_bundle(stock_code),
+                lambda: self._get_cn_fundamental_bundle(stock_code),
                 bundle_timeout,
                 "fundamental_bundle",
             )
@@ -3264,6 +3410,26 @@ class DataFetcherManager:
             institution_payload = {}
         else:
             institution_payload = dict(institution_payload)
+
+        bundle_valuation = bundle_payload.get("valuation", {}) if isinstance(bundle_payload, dict) else {}
+        if isinstance(bundle_valuation, dict) and self._has_meaningful_payload(bundle_valuation):
+            current_valuation = result_ctx["valuation"].get("data", {})
+            current_valuation = dict(current_valuation) if isinstance(current_valuation, dict) else {}
+            for key, value in bundle_valuation.items():
+                if self._has_meaningful_payload(value):
+                    current_valuation[key] = value
+            valuation_status = self._infer_block_status(current_valuation, bundle_status)
+            valuation_sources = [
+                entry
+                for entry in bundle_chain
+                if "daily_basic" in str(entry.get("provider", ""))
+            ]
+            result_ctx["valuation"] = self._build_fundamental_block(
+                valuation_status,
+                current_valuation,
+                valuation_sources + list(result_ctx["valuation"].get("source_chain", [])),
+                list(result_ctx["valuation"].get("errors", [])),
+            )
 
         # Derive TTM dividend yield from already-fetched quote price; avoid extra quote calls.
         earnings_extra_errors: List[str] = []
@@ -3351,7 +3517,7 @@ class DataFetcherManager:
             )
             result_ctx["status"] = "partial"
         else:
-            capital_flow_budget = min(fetch_timeout, remaining_seconds)
+            capital_flow_budget = min(auxiliary_timeout, remaining_seconds)
             capital_flow_start = time.time()
             result_ctx["capital_flow"] = self.get_capital_flow_context(
                 stock_code,
@@ -3359,7 +3525,7 @@ class DataFetcherManager:
             )
             _consume_budget(int((time.time() - capital_flow_start) * 1000))
 
-            dragon_tiger_budget = min(fetch_timeout, remaining_seconds)
+            dragon_tiger_budget = min(auxiliary_timeout, remaining_seconds)
             dragon_tiger_start = time.time()
             result_ctx["dragon_tiger"] = self.get_dragon_tiger_context(
                 stock_code,
@@ -3369,7 +3535,7 @@ class DataFetcherManager:
 
             result_ctx["boards"] = self.get_board_context(
                 stock_code,
-                budget_seconds=min(fetch_timeout, remaining_seconds),
+                budget_seconds=min(auxiliary_timeout, remaining_seconds),
             )
 
         block_statuses = {

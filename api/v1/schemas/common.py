@@ -9,7 +9,7 @@
 2. 提供统一的响应格式
 """
 
-from typing import Optional, Any
+from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -40,6 +40,22 @@ class HealthResponse(BaseModel):
             "timestamp": "2024-01-01T12:00:00"
         }
     })
+
+
+class ReadinessCheckResponse(BaseModel):
+    """单项就绪检查结果。"""
+
+    status: Literal["ready", "not_ready", "skipped"] = Field(..., description="检查状态")
+    detail: str = Field(..., description="稳定、非敏感的结果代码")
+    required: bool = Field(True, description="该检查是否影响整体就绪状态")
+
+
+class ReadinessResponse(BaseModel):
+    """服务就绪检查响应。"""
+
+    status: Literal["ready", "not_ready"] = Field(..., description="服务是否可接收流量")
+    timestamp: str = Field(..., description="检查时间戳")
+    checks: Dict[str, ReadinessCheckResponse] = Field(..., description="各依赖检查结果")
 
 
 class ErrorResponse(BaseModel):

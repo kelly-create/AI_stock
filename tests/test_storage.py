@@ -132,19 +132,39 @@ class TestStorage(unittest.TestCase):
 
             unique_indexes_after = self._list_sqlite_unique_indexes(db_path, "intelligence_items")
             self.assertNotIn("uix_intelligence_item_url_legacy", unique_indexes_after)
-            self.assertIn("uix_intel_item_scope", unique_indexes_after)
-            self.assertEqual(
-                unique_indexes_after["uix_intel_item_scope"],
+            self.assertIn(
                 ["source_id", "url", "scope_type", "scope_value", "market"],
+                unique_indexes_after.values(),
+            )
+            indexes_after = self._list_sqlite_indexes(db_path, "intelligence_items")
+            self.assertEqual(
+                indexes_after["ix_intel_item_scope_time"],
+                ["scope_type", "scope_value", "market", "published_at"],
+            )
+            self.assertEqual(
+                indexes_after["ix_intel_item_fetch_time"],
+                ["fetched_at"],
             )
             with sqlite3.connect(db_path) as conn:
                 table_count = conn.execute("SELECT COUNT(*) FROM intelligence_items").fetchone()[0]
                 temp_tables = conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'intelligence_items_recreate_tmp_%'"
                 ).fetchall()
+                foreign_keys = conn.execute(
+                    "PRAGMA foreign_key_list(intelligence_items)"
+                ).fetchall()
 
             self.assertEqual(table_count, 2)
             self.assertEqual(temp_tables, [])
+            self.assertTrue(
+                any(
+                    row[2] == "intelligence_sources"
+                    and row[3] == "source_id"
+                    and row[4] == "id"
+                    and row[6].upper() == "SET NULL"
+                    for row in foreign_keys
+                )
+            )
         finally:
             DatabaseManager.reset_instance()
             Config.reset_instance()
@@ -166,6 +186,10 @@ class TestStorage(unittest.TestCase):
     def test_schema_migration_record_is_idempotent(self):
         DatabaseManager.reset_instance()
         db = DatabaseManager(db_url="sqlite:///:memory:")
+
+        with db.get_session() as session:
+            session.query(DatabaseSchemaMigration).delete()
+            session.commit()
 
         db._ensure_schema_migration_record()
         db._ensure_schema_migration_record()
@@ -424,7 +448,10 @@ class TestStorage(unittest.TestCase):
 
         DatabaseManager.reset_instance()
         try:
-            with patch("src.storage.inspect", return_value=BrokenInspector()):
+            with patch.object(
+                DatabaseManager,
+                "_ensure_llm_usage_telemetry_columns",
+            ), patch("src.storage.inspect", return_value=BrokenInspector()):
                 with self.assertLogs("src.storage", level="ERROR") as logs:
                     with self.assertRaises(RuntimeError):
                         DatabaseManager(db_url="sqlite:///:memory:")

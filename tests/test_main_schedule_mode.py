@@ -617,6 +617,49 @@ class MainScheduleModeTestCase(unittest.TestCase):
         self.assertEqual(len(scheduled_call["background_tasks"]), 1)
         self.assertEqual(scheduled_call["background_tasks"][0]["name"], "agent_event_monitor")
 
+    def test_schedule_mode_registers_decision_signal_outcome_background_task(self) -> None:
+        args = self._make_args(schedule=True)
+        config = self._make_config(schedule_enabled=False)
+        scheduled_call = {}
+        outcome_task = {
+            "task": MagicMock(),
+            "interval_seconds": 30 * 60,
+            "run_immediately": True,
+            "name": "decision_signal_outcomes",
+        }
+
+        def fake_run_with_schedule(
+            task,
+            schedule_time,
+            run_immediately,
+            background_tasks=None,
+            schedule_time_provider=None,
+        ):
+            scheduled_call["background_tasks"] = background_tasks or []
+
+        with (
+            patch("main.parse_arguments", return_value=args),
+            patch("main.get_config", return_value=config),
+            patch("main._reload_runtime_config", return_value=config) as reload_config,
+            patch("main._build_schedule_time_provider", return_value=lambda: "18:00"),
+            patch("main.setup_logging"),
+            patch("main.run_full_analysis") as run_full_analysis,
+            patch(
+                "src.services.runtime_scheduler.build_decision_signal_outcome_background_tasks",
+                return_value=[outcome_task],
+            ) as build_outcome_tasks,
+            patch("src.scheduler.run_with_schedule", side_effect=fake_run_with_schedule),
+        ):
+            exit_code = main.main()
+
+        self.assertEqual(exit_code, 0)
+        build_outcome_tasks.assert_called_once_with(
+            config,
+            config_provider=reload_config,
+        )
+        run_full_analysis.assert_not_called()
+        self.assertEqual(scheduled_call["background_tasks"], [outcome_task])
+
     def test_check_notify_returns_before_other_modes(self) -> None:
         args = self._make_args(check_notify=True, serve=True, schedule=True, market_review=True)
         config = self._make_config(webui_enabled=False)
@@ -951,7 +994,7 @@ class MainScheduleModeTestCase(unittest.TestCase):
         self.assertEqual(run_immediately_seen_by_server, ["false"])
         run_with_schedule.assert_not_called()
 
-    def test_serve_only_suppresses_startup_scheduler_without_disabling_runtime_owner(self) -> None:
+    def test_serve_only_restores_persisted_schedule_without_running_immediately(self) -> None:
         from src.services.runtime_scheduler import (
             CLI_SCHEDULER_OWNER_ENV,
             RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV,
@@ -985,9 +1028,54 @@ class MainScheduleModeTestCase(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(marker_seen_by_server, [None])
-        self.assertEqual(suppress_seen_by_server, ["true"])
-        self.assertEqual(run_immediately_seen_by_server, [None])
+        self.assertEqual(suppress_seen_by_server, [None])
+        self.assertEqual(run_immediately_seen_by_server, ["false"])
         start_bots.assert_called_once_with(config)
+        run_with_schedule.assert_not_called()
+
+    def test_serve_only_honors_explicit_external_scheduler_owner(self) -> None:
+        from src.services.runtime_scheduler import (
+            CLI_SCHEDULER_OWNER_ENV,
+            RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV,
+            RUNTIME_SCHEDULER_SUPPRESS_START_ENV,
+        )
+
+        args = self._make_args(serve_only=True, host="127.0.0.1", port=8000)
+        config = self._make_config(webui_enabled=False, schedule_enabled=True)
+        markers_seen_by_server = []
+
+        def fake_start_api_server(host, port, config):
+            markers_seen_by_server.append({
+                "owner": os.getenv(CLI_SCHEDULER_OWNER_ENV),
+                "suppress": os.getenv(RUNTIME_SCHEDULER_SUPPRESS_START_ENV),
+                "run_immediately": os.getenv(RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV),
+            })
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "GITHUB_ACTIONS": "false",
+                    RUNTIME_SCHEDULER_SUPPRESS_START_ENV: "true",
+                },
+                clear=False,
+            ),
+            patch("main.parse_arguments", return_value=args),
+            patch("main.get_config", return_value=config),
+            patch("main.prepare_webui_frontend_assets", return_value=True),
+            patch("main.start_api_server", side_effect=fake_start_api_server),
+            patch("main.start_bot_stream_clients"),
+            patch("main.time.sleep", side_effect=KeyboardInterrupt),
+            patch("src.scheduler.run_with_schedule") as run_with_schedule,
+        ):
+            exit_code = main.main()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(markers_seen_by_server, [{
+            "owner": "true",
+            "suppress": "true",
+            "run_immediately": None,
+        }])
         run_with_schedule.assert_not_called()
 
     def test_reload_runtime_config_preserves_process_env_overrides(self) -> None:

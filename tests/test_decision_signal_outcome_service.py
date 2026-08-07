@@ -516,6 +516,31 @@ def test_unable_reasons_are_persisted_for_non_directional_and_unsupported_horizo
     assert intraday_skipped["skipped"] == 1
 
 
+def test_batch_skips_non_directional_and_unsupported_natural_horizons(isolated_db) -> None:
+    watch_id = _add_signal(isolated_db, code="000101", action="watch", horizon="3d")
+    intraday_id = _add_signal(isolated_db, code="000102", action="buy", horizon="intraday")
+    supported_id = _add_signal(isolated_db, code="000103", action="buy", horizon="1d")
+    _seed_bars(isolated_db, code="000101", closes=[101.0])
+    _seed_bars(isolated_db, code="000102", closes=[102.0])
+    _seed_bars(isolated_db, code="000103", closes=[103.0])
+    service = DecisionSignalOutcomeService(db_manager=isolated_db)
+
+    first_batch = service.run_outcomes(limit=10)
+    second_batch = service.run_outcomes(limit=10)
+
+    assert [item["signal_id"] for item in first_batch["items"]] == [supported_id]
+    assert first_batch["evaluated"] == 1
+    assert second_batch["items"] == []
+    assert second_batch["evaluated"] == 0
+    assert service.list_signal_outcomes(watch_id)["items"] == []
+    assert service.list_signal_outcomes(intraday_id)["items"] == []
+
+    watch = service.run_outcomes(signal_id=watch_id)["items"][0]
+    intraday = service.run_outcomes(signal_id=intraday_id)["items"][0]
+    assert watch["unable_reason"] == "non_directional_action"
+    assert intraday["unable_reason"] == "unsupported_horizon"
+
+
 def test_watch_and_alert_outcomes_remain_unable_without_market_reads(isolated_db) -> None:
     class FailOnMarketRead:
         def get_daily_on_date(self, **_kwargs):

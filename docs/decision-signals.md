@@ -6,8 +6,8 @@
 
 - `DecisionSignal` 只记录建议、证据摘要、风险、观察条件、生命周期和来源，不执行下单或调仓。
 - 写入失败、提取失败、告警信号关联失败和通知发送失败都不阻断主分析、告警触发或报告保存。
-- #1756 已将 `decision_profile` 字段化并修正 server-side filter、去重、续期和 active 失效语义；#1757 在该正式字段契约上增加用户确认后的 reassess persist。两者都不新增环境变量、config registry 项或 `.env.example` 内容。
-- 当前没有 `DECISION_SIGNAL_*` 开关；信号功能的关闭或回滚通过 revert 对应代码完成。
+- #1756 已将 `decision_profile` 字段化并修正 server-side filter、去重、续期和 active 失效语义；#1757 在该正式字段契约上增加用户确认后的 reassess persist。两者本身没有新增信号提取开关。
+- `DECISION_SIGNAL_OUTCOME_ENABLED` 只控制 v1 后验评估的后台维护，不关闭信号提取、查询或显式 Outcome API；完整关闭信号功能仍需回滚对应代码。
 
 ## 字段与枚举
 
@@ -227,6 +227,14 @@ P5 通过 sidecar 表保存用户反馈和后验结果，不扩展 `decision_sig
 - 后验评估只支持日线可验证的 `1d/3d/5d/10d`；`intraday/swing/long`、非方向动作、缺价和 forward bars 不足会写入 `eval_status=unable` 与明确 `unable_reason`。
 - 评估时冻结 action、market、market_phase、source_type、source_agent、plan_quality、data_quality_level、holding_state 等统计维度，历史统计不依赖后续 live join。
 
+唯一的 Scheduler owner 会在启动后执行一轮 v1 Outcome 维护，再按配置间隔推进到期信号。后台批处理会跳过非方向动作和不受支持的自然周期，避免反复生成确定不可评估的记录；显式按信号评估仍会保留 `unable_reason`。该维护与默认关闭的 `DECISION_OUTCOME_V2_ENABLED` 相互独立。
+
+| 配置 | 默认值 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| `DECISION_SIGNAL_OUTCOME_ENABLED` | `true` | boolean | 启用 v1 后台维护；仅由通过 `SCHEDULE_ENABLED=true` 或 `--schedule` 启动的唯一 Scheduler owner 执行。 |
+| `DECISION_SIGNAL_OUTCOME_INTERVAL_MINUTES` | `30` | 最小 `5` | 两轮维护之间的分钟数。 |
+| `DECISION_SIGNAL_OUTCOME_BATCH_LIMIT` | `100` | `1-500` | 单轮最多推进的候选信号数。 |
+
 ## 脱敏与低敏边界
 
 信号写入和状态更新使用 `src/utils/sanitize.py` 中的 `sanitize_decision_signal_text()` 与 `sanitize_decision_signal_payload()`：
@@ -245,7 +253,7 @@ P7 的全局验收是确认信号池、通知摘要和 Web 展示不泄露 token
 
 迁移说明：
 
-- 升级后无需新增 `.env`、`.env.example` 或 Web 设置项。
+- 新配置均有安全默认值，无需修改现有 `.env`；如需调整后台维护，可通过 `.env` 或 Web 设置覆盖三项 `DECISION_SIGNAL_OUTCOME_*` 配置。
 - Existing SQLite 只在缺列时 `ALTER TABLE ADD COLUMN decision_profile`，不会 drop/rebuild `decision_signals`，也不会删除旧 index。
 - Migration 会幂等创建 profile-aware indexes，并 row-by-row 防御解析 `metadata_json`：仅合法 `metadata.decision_profile` 回填到正式字段；invalid JSON、非 object 或非法 profile 保持 `NULL`。启动日志会记录 backfilled、invalid JSON、non-object、invalid profile 和 skipped existing profile 统计，这些统计只用于诊断，不阻断启动。
 - 旧历史报告不会批量回填。只有显式调用信号列表接口或在 Web AI 建议页按来源报告 ID 触发精确查询 `source_type=analysis + source_report_id` 且无命中时，才会 best-effort 懒回填。
@@ -253,6 +261,6 @@ P7 的全局验收是确认信号池、通知摘要和 Web 展示不泄露 token
 
 回滚说明：
 
-- 当前没有 `DECISION_SIGNAL_*` 开关；关闭信号提取/写入的回滚方式是 revert 相关代码。
+- 软回滚可先设置 `DECISION_SIGNAL_OUTCOME_ENABLED=false` 停止 v1 后台维护；该开关不停止信号提取/写入，完整回滚仍需 revert 相关代码。
 - 回滚后，普通报告保存、告警触发、通知发送和组合风险主流程仍按既有路径运行。
 - 回滚不会自动删除历史 `decision_signals`、`decision_signal_feedback` 或 `decision_signal_outcomes` 数据；如需清理，应由维护者单独制定数据清理策略。

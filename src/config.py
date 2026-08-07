@@ -77,6 +77,7 @@ from src.utils.market_review_region import normalize_market_review_region_lenien
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class ConfigIssue:
     """Structured configuration validation issue with a severity level.
@@ -120,9 +121,11 @@ _FALLBACK_LITELLM_MODEL_PROVIDERS = _MANAGED_LITELLM_KEY_PROVIDERS | set(SUPPORT
     "xai",
 }
 _FALSEY_ENV_VALUES = {"0", "false", "no", "off"}
+_TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 PROMPT_CACHE_DIAGNOSTICS_LEVELS = {"off", "basic", "debug"}
 SUPPORTED_AGENT_BACKENDS = {"auto", "litellm", "codex_app_server"}
 TICKFLOW_KLINE_ADJUST_VALUES = {"none", "forward", "backward", "forward_additive", "backward_additive"}
+PERSONAL_RESEARCH_POLICY_GATE_MODES = {"off", "shadow", "enforce"}
 # Fallback defaults used when ANSPIRE_API_KEYS is reused as legacy OpenAI-compatible source.
 # These are compatibility examples; actual availability should be validated by Anspire console/model entitlement.
 ANSPIRE_LLM_BASE_URL_DEFAULT = "https://open-gateway.anspire.cn/v6"
@@ -233,6 +236,28 @@ def parse_env_bool(value: Optional[str], default: bool = False) -> bool:
     return normalized not in _FALSEY_ENV_VALUES
 
 
+def parse_env_bool_strict(
+    value: Optional[str],
+    *,
+    default: bool,
+    field_name: str,
+) -> bool:
+    """Parse an opt-in flag without treating typos as enabled."""
+
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in _TRUTHY_ENV_VALUES:
+        return True
+    if normalized in _FALSEY_ENV_VALUES:
+        return False
+    raise ValueError(
+        f"{field_name} must be one of "
+        f"{', '.join(sorted(_TRUTHY_ENV_VALUES | _FALSEY_ENV_VALUES))}; "
+        f"got {value!r}"
+    )
+
+
 def parse_env_int(
     value: Optional[str],
     default: int,
@@ -275,6 +300,35 @@ def parse_env_int(
             maximum,
         )
         parsed = maximum
+    return parsed
+
+
+def parse_tushare_priority(value: Optional[str]) -> Optional[int]:
+    """Parse an optional daily-data priority without disabling auto-promotion.
+
+    An unset or blank value intentionally remains ``None`` so a configured
+    Tushare token can keep the historical automatic priority. An explicitly
+    invalid value falls back to the normal priority instead of promoting the
+    provider or preventing application startup.
+    """
+    if value is None or not str(value).strip():
+        return None
+
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        logger.warning(
+            "TUSHARE_PRIORITY=%r is not a valid integer; falling back to 2",
+            value,
+        )
+        return 2
+
+    if not 0 <= parsed <= 99:
+        logger.warning(
+            "TUSHARE_PRIORITY=%r is outside 0-99; falling back to 2",
+            value,
+        )
+        return 2
     return parsed
 
 
@@ -879,6 +933,8 @@ class Config:
 
     # === 数据源 API Token ===
     tushare_token: Optional[str] = None
+    # None keeps the legacy token-driven automatic priority; explicit values are 0-99.
+    tushare_priority: Optional[int] = None
     tickflow_api_key: Optional[str] = None
     tickflow_kline_adjust: str = "none"
     tickflow_priority: int = 2
@@ -1028,6 +1084,9 @@ class Config:
     agent_event_monitor_enabled: bool = False  # Enable periodic event-driven alert checks in schedule mode
     agent_event_monitor_interval_minutes: int = 5  # Polling interval for event monitor background checks
     agent_event_alert_rules_json: str = ""  # JSON array of serialized EventMonitor rules
+    decision_signal_outcome_enabled: bool = True  # Automatically evaluate matured v1 decision signals
+    decision_signal_outcome_interval_minutes: int = 30  # Background outcome evaluation interval
+    decision_signal_outcome_batch_limit: int = 100  # Maximum signals evaluated per maintenance pass
 
     # === 通知配置（可同时配置多个，全部推送）===
     
@@ -1160,10 +1219,22 @@ class Config:
 
     # === 数据库配置 ===
     database_path: str = "./data/stock_analysis.db"
+    database_migration_mode: str = "auto"
     sqlite_wal_enabled: bool = True
     sqlite_busy_timeout_ms: int = 5000
     sqlite_write_retry_max: int = 3
     sqlite_write_retry_base_delay: float = 0.1
+
+    # === Personal research staged rollout (all disabled by default) ===
+    personal_research_enabled: bool = False
+    durable_jobs_enabled: bool = False
+    tushare_research_enabled: bool = False
+    research_factors_enabled: bool = False
+    research_evidence_enabled: bool = False
+    research_debate_enabled: bool = False
+    research_thesis_enabled: bool = False
+    decision_outcome_v2_enabled: bool = False
+    portfolio_policy_gate_mode: str = "off"
 
     # 是否保存分析上下文快照（用于历史回溯）
     save_context_snapshot: bool = True
@@ -1227,6 +1298,8 @@ class Config:
     fundamental_stage_timeout_seconds: float = FUNDAMENTAL_STAGE_TIMEOUT_SECONDS_DEFAULT
     # 单能力源调用超时（秒）
     fundamental_fetch_timeout_seconds: float = 8.0
+    # Slow auxiliary AkShare blocks must not consume the whole fundamental stage.
+    fundamental_auxiliary_timeout_seconds: float = 4.0
     # 单能力失败重试次数（已包含首次）
     fundamental_retry_max: int = 1
     # 基本面上下文短 TTL（秒）
@@ -1298,6 +1371,7 @@ class Config:
     _VALID_AGENT_ARCH = {"single", "multi"}
     _VALID_ORCHESTRATOR_MODES = {"quick", "standard", "full", "specialist"}
     _VALID_SKILL_ROUTING = {"auto", "manual"}
+    _VALID_DATABASE_MIGRATION_MODES = {"auto", "explicit"}
     _WEBUI_RUNTIME_ENV_FILE_PRIORITY_KEYS = frozenset(
         {
             "STOCK_LIST",
@@ -1314,6 +1388,17 @@ class Config:
 
     def __post_init__(self) -> None:
         _log = logging.getLogger(__name__)
+        normalized_migration_mode = (self.database_migration_mode or "").strip().lower()
+        if normalized_migration_mode not in self._VALID_DATABASE_MIGRATION_MODES:
+            raise ValueError(
+                "DATABASE_MIGRATION_MODE must be one of auto or explicit; "
+                f"got {self.database_migration_mode!r}"
+            )
+        object.__setattr__(
+            self,
+            "database_migration_mode",
+            normalized_migration_mode,
+        )
         if self.agent_arch not in self._VALID_AGENT_ARCH:
             _log.warning(
                 "Invalid AGENT_ARCH=%r, falling back to 'single'. Valid: %s",
@@ -1776,12 +1861,13 @@ class Config:
         if report_show_llm_model_raw is not None and not report_show_llm_model_raw.strip():
             report_show_llm_model = False
 
-        return cls(
+        config = cls(
             stock_list=stock_list,
             feishu_app_id=os.getenv('FEISHU_APP_ID'),
             feishu_app_secret=os.getenv('FEISHU_APP_SECRET'),
             feishu_folder_token=os.getenv('FEISHU_FOLDER_TOKEN'),
             tushare_token=os.getenv('TUSHARE_TOKEN'),
+            tushare_priority=parse_tushare_priority(os.getenv('TUSHARE_PRIORITY')),
             tickflow_api_key=os.getenv('TICKFLOW_API_KEY'),
             tickflow_kline_adjust=normalize_tickflow_kline_adjust(os.getenv('TICKFLOW_KLINE_ADJUST')),
             tickflow_priority=parse_env_int(os.getenv('TICKFLOW_PRIORITY'), 2, field_name='TICKFLOW_PRIORITY', minimum=0),
@@ -1990,6 +2076,23 @@ class Config:
                 minimum=1,
             ),
             agent_event_alert_rules_json=os.getenv('AGENT_EVENT_ALERT_RULES_JSON', ''),
+            decision_signal_outcome_enabled=parse_env_bool(
+                os.getenv('DECISION_SIGNAL_OUTCOME_ENABLED'),
+                default=True,
+            ),
+            decision_signal_outcome_interval_minutes=parse_env_int(
+                os.getenv('DECISION_SIGNAL_OUTCOME_INTERVAL_MINUTES'),
+                30,
+                field_name='DECISION_SIGNAL_OUTCOME_INTERVAL_MINUTES',
+                minimum=5,
+            ),
+            decision_signal_outcome_batch_limit=parse_env_int(
+                os.getenv('DECISION_SIGNAL_OUTCOME_BATCH_LIMIT'),
+                100,
+                field_name='DECISION_SIGNAL_OUTCOME_BATCH_LIMIT',
+                minimum=1,
+                maximum=500,
+            ),
             wechat_webhook_url=os.getenv('WECHAT_WEBHOOK_URL'),
             feishu_webhook_url=os.getenv('FEISHU_WEBHOOK_URL'),
             feishu_webhook_secret=os.getenv('FEISHU_WEBHOOK_SECRET'),
@@ -2100,6 +2203,9 @@ class Config:
             share_image_xiaohongshu_qr_path=(os.getenv('SHARE_IMAGE_XIAOHONGSHU_QR_PATH') or '').strip() or None,
             prefetch_realtime_quotes=os.getenv('PREFETCH_REALTIME_QUOTES', 'true').lower() == 'true',
             database_path=os.getenv('DATABASE_PATH', './data/stock_analysis.db'),
+            database_migration_mode=(
+                os.getenv('DATABASE_MIGRATION_MODE', 'auto') or 'auto'
+            ).strip().lower(),
             sqlite_wal_enabled=os.getenv('SQLITE_WAL_ENABLED', 'true').lower() == 'true',
             sqlite_busy_timeout_ms=parse_env_int(
                 os.getenv('SQLITE_BUSY_TIMEOUT_MS'),
@@ -2119,6 +2225,49 @@ class Config:
                 field_name='SQLITE_WRITE_RETRY_BASE_DELAY',
                 minimum=0.0,
             ),
+            personal_research_enabled=parse_env_bool_strict(
+                os.getenv('PERSONAL_RESEARCH_ENABLED'),
+                default=False,
+                field_name='PERSONAL_RESEARCH_ENABLED',
+            ),
+            durable_jobs_enabled=parse_env_bool_strict(
+                os.getenv('DURABLE_JOBS_ENABLED'),
+                default=False,
+                field_name='DURABLE_JOBS_ENABLED',
+            ),
+            tushare_research_enabled=parse_env_bool_strict(
+                os.getenv('TUSHARE_RESEARCH_ENABLED'),
+                default=False,
+                field_name='TUSHARE_RESEARCH_ENABLED',
+            ),
+            research_factors_enabled=parse_env_bool_strict(
+                os.getenv('RESEARCH_FACTORS_ENABLED'),
+                default=False,
+                field_name='RESEARCH_FACTORS_ENABLED',
+            ),
+            research_evidence_enabled=parse_env_bool_strict(
+                os.getenv('RESEARCH_EVIDENCE_ENABLED'),
+                default=False,
+                field_name='RESEARCH_EVIDENCE_ENABLED',
+            ),
+            research_debate_enabled=parse_env_bool_strict(
+                os.getenv('RESEARCH_DEBATE_ENABLED'),
+                default=False,
+                field_name='RESEARCH_DEBATE_ENABLED',
+            ),
+            research_thesis_enabled=parse_env_bool_strict(
+                os.getenv('RESEARCH_THESIS_ENABLED'),
+                default=False,
+                field_name='RESEARCH_THESIS_ENABLED',
+            ),
+            decision_outcome_v2_enabled=parse_env_bool_strict(
+                os.getenv('DECISION_OUTCOME_V2_ENABLED'),
+                default=False,
+                field_name='DECISION_OUTCOME_V2_ENABLED',
+            ),
+            portfolio_policy_gate_mode=(
+                os.getenv('PORTFOLIO_POLICY_GATE_MODE', 'off') or 'off'
+            ).strip().lower(),
             save_context_snapshot=os.getenv('SAVE_CONTEXT_SNAPSHOT', 'true').lower() == 'true',
             backtest_enabled=os.getenv('BACKTEST_ENABLED', 'true').lower() == 'true',
             backtest_eval_window_days=parse_env_int(os.getenv('BACKTEST_EVAL_WINDOW_DAYS'), 10, field_name='BACKTEST_EVAL_WINDOW_DAYS', minimum=1),
@@ -2213,6 +2362,12 @@ class Config:
                 field_name='FUNDAMENTAL_FETCH_TIMEOUT_SECONDS',
                 minimum=0.0,
             ),
+            fundamental_auxiliary_timeout_seconds=parse_env_float(
+                os.getenv('FUNDAMENTAL_AUXILIARY_TIMEOUT_SECONDS'),
+                4.0,
+                field_name='FUNDAMENTAL_AUXILIARY_TIMEOUT_SECONDS',
+                minimum=0.0,
+            ),
             fundamental_retry_max=parse_env_int(os.getenv('FUNDAMENTAL_RETRY_MAX'), 1, field_name='FUNDAMENTAL_RETRY_MAX', minimum=0),
             fundamental_cache_ttl_seconds=parse_env_int(
                 os.getenv('FUNDAMENTAL_CACHE_TTL_SECONDS'),
@@ -2259,6 +2414,8 @@ class Config:
             portfolio_fx_update_enabled=os.getenv('PORTFOLIO_FX_UPDATE_ENABLED', 'true').lower() == 'true',
             screening_enabled=parse_env_bool(os.getenv('SCREENING_ENABLED'), default=False),
         )
+        config.assert_research_feature_dependencies()
+        return config
     
     @classmethod
     def _parse_litellm_yaml(cls, config_path: str) -> List[Dict[str, Any]]:
@@ -3034,6 +3191,102 @@ class Config:
         ]
 
         self.stock_list = stock_list
+
+    def research_feature_dependency_issues(self) -> List[ConfigIssue]:
+        """Return blocking issues for incomplete personal-research rollouts."""
+
+        issues: List[ConfigIssue] = []
+        enabled_by_env = {
+            "PERSONAL_RESEARCH_ENABLED": self.personal_research_enabled,
+            "DURABLE_JOBS_ENABLED": self.durable_jobs_enabled,
+            "TUSHARE_RESEARCH_ENABLED": self.tushare_research_enabled,
+            "RESEARCH_FACTORS_ENABLED": self.research_factors_enabled,
+            "RESEARCH_EVIDENCE_ENABLED": self.research_evidence_enabled,
+            "RESEARCH_DEBATE_ENABLED": self.research_debate_enabled,
+            "RESEARCH_THESIS_ENABLED": self.research_thesis_enabled,
+            "DECISION_OUTCOME_V2_ENABLED": self.decision_outcome_v2_enabled,
+        }
+        dependencies = {
+            "TUSHARE_RESEARCH_ENABLED": (
+                "PERSONAL_RESEARCH_ENABLED",
+                "DURABLE_JOBS_ENABLED",
+            ),
+            "RESEARCH_FACTORS_ENABLED": (
+                "PERSONAL_RESEARCH_ENABLED",
+                "TUSHARE_RESEARCH_ENABLED",
+            ),
+            "RESEARCH_EVIDENCE_ENABLED": (
+                "PERSONAL_RESEARCH_ENABLED",
+                "RESEARCH_FACTORS_ENABLED",
+            ),
+            "RESEARCH_DEBATE_ENABLED": (
+                "PERSONAL_RESEARCH_ENABLED",
+                "RESEARCH_EVIDENCE_ENABLED",
+            ),
+            "RESEARCH_THESIS_ENABLED": (
+                "PERSONAL_RESEARCH_ENABLED",
+                "RESEARCH_EVIDENCE_ENABLED",
+            ),
+            "DECISION_OUTCOME_V2_ENABLED": (
+                "PERSONAL_RESEARCH_ENABLED",
+                "RESEARCH_FACTORS_ENABLED",
+            ),
+        }
+        for feature_key, required_keys in dependencies.items():
+            if not enabled_by_env[feature_key]:
+                continue
+            missing = [key for key in required_keys if not enabled_by_env[key]]
+            if missing:
+                issues.append(ConfigIssue(
+                    severity="error",
+                    message=(
+                        f"{feature_key} 已启用，但缺少依赖：{', '.join(missing)}。"
+                        "请先启用依赖项，或关闭当前功能开关。"
+                    ),
+                    field=feature_key,
+                    code="research_feature_dependency_missing",
+                ))
+
+        gate_mode = (self.portfolio_policy_gate_mode or "off").strip().lower()
+        if gate_mode not in PERSONAL_RESEARCH_POLICY_GATE_MODES:
+            issues.append(ConfigIssue(
+                severity="error",
+                message=(
+                    "PORTFOLIO_POLICY_GATE_MODE 仅支持 off、shadow 或 enforce，"
+                    f"当前值为 {self.portfolio_policy_gate_mode!r}。"
+                ),
+                field="PORTFOLIO_POLICY_GATE_MODE",
+                code="portfolio_policy_gate_mode_invalid",
+            ))
+        elif gate_mode != "off":
+            gate_dependencies = {
+                "PERSONAL_RESEARCH_ENABLED": self.personal_research_enabled,
+                "RESEARCH_FACTORS_ENABLED": self.research_factors_enabled,
+                "RESEARCH_EVIDENCE_ENABLED": self.research_evidence_enabled,
+            }
+            missing = [key for key, enabled in gate_dependencies.items() if not enabled]
+            if missing:
+                issues.append(ConfigIssue(
+                    severity="error",
+                    message=(
+                        f"PORTFOLIO_POLICY_GATE_MODE={gate_mode} 缺少依赖："
+                        f"{', '.join(missing)}。"
+                        "Gate 只能在研究因子与证据链完整时启用。"
+                    ),
+                    field="PORTFOLIO_POLICY_GATE_MODE",
+                    code="portfolio_policy_gate_dependency_missing",
+                ))
+        return issues
+
+    def assert_research_feature_dependencies(self) -> None:
+        """Fail startup when staged research feature flags are inconsistent."""
+
+        issues = self.research_feature_dependency_issues()
+        if issues:
+            raise ValueError(
+                "Invalid personal research feature configuration: "
+                + " ".join(issue.message for issue in issues)
+            )
     
     def validate_structured(self) -> List[ConfigIssue]:
         """Return structured validation issues with severity levels.
@@ -3049,6 +3302,7 @@ class Config:
             primary environment variable / field name it relates to.
         """
         issues: List[ConfigIssue] = []
+        issues.extend(self.research_feature_dependency_issues())
 
         # --- Stock list ---
         if not self.stock_list:

@@ -276,6 +276,22 @@ const settingsHelpZhCN: SettingsHelpMap = {
     impact: ['影响部分 A 股基础数据、股票列表和相关增强数据获取。'],
     notes: ['不要把 token 提交到仓库或公开日志。'],
   },
+  'settings.data_source.TUSHARE_PRIORITY': {
+    title: 'Tushare 日 K 优先级',
+    summary: '控制 Tushare 在日 K 数据源回退链中的尝试顺序。',
+    usage: '留空时保留 Token 可用后的自动优先级；显式填写 0-99，数字越小越早尝试。',
+    valueNotes: ['非法显式值会安全回落为普通优先级 2，不会触发自动提升。'],
+    impact: ['影响 Tushare 日 K 的尝试顺序，不改变实时行情源顺序。'],
+    notes: ['只有配置有效 TUSHARE_TOKEN 时 Tushare 数据源才可用。'],
+  },
+  'settings.data_source.FUNDAMENTAL_AUXILIARY_TIMEOUT_SECONDS': {
+    title: '基本面辅助源超时',
+    summary: '限制可选辅助基本面数据源的单次等待时间。',
+    usage: '填写非负秒数，默认 4.0；设为 0 表示立即放弃辅助块。',
+    valueNotes: ['该预算独立于基本面阶段总预算和主能力源超时。'],
+    impact: ['避免慢 AkShare 辅助块耗尽整个基本面阶段，同时允许主链路继续降级。'],
+    notes: ['过短可能减少辅助字段覆盖，过长会增加单股分析尾延迟。'],
+  },
   'settings.data_source.TICKFLOW_API_KEY': {
     title: 'TickFlow API Key',
     summary: '用于启用 TickFlow A 股日 K、实时行情、股票列表/名称与大盘复盘增强数据。',
@@ -1010,6 +1026,14 @@ const settingsHelpZhCN: SettingsHelpMap = {
     impact: ['影响后台告警检测频率和通知推送时机。'],
     notes: ['需要配合告警规则使用。'],
   },
+  'settings.agent.decision_signal_outcomes': {
+    title: 'Decision Signal Outcome 维护',
+    summary: '控制唯一 Scheduler owner 对到期 decision-signal-v1 的后台评估。',
+    usage: '可开关维护任务、设置至少 5 分钟的间隔，以及 1-500 的单轮候选上限。',
+    valueNotes: ['后台维护默认开启，但仅由通过 SCHEDULE_ENABLED=true 或 --schedule 启动的唯一 Scheduler owner 执行。'],
+    impact: ['影响 v1 Outcome 的推进频率与单轮负载，不影响信号提取或显式 Outcome API。'],
+    notes: ['该配置与默认关闭的 DECISION_OUTCOME_V2_ENABLED 相互独立。'],
+  },
   'settings.agent.EVENT_ALERT_RULES_JSON': {
     title: '事件告警规则（Legacy JSON）',
     summary: '通过 JSON 数组配置基础价格和成交量告警规则。',
@@ -1020,6 +1044,27 @@ const settingsHelpZhCN: SettingsHelpMap = {
     ],
     impact: ['影响后台告警检测和通知推送。'],
     notes: ['该字段为 Legacy 配置方式，高级规则请使用告警中心。'],
+  },
+  'settings.research.rollout': {
+    title: '个人投研分阶段开关',
+    summary: '控制个人 A 股投研各子系统的逐步启用；所有开关默认关闭，不改变现有分析路径。',
+    usage: '按 Durable Jobs、Tushare Research、Factors、Evidence 的顺序启用，再按需开启 Debate、Thesis 和 Outcome v2。',
+    valueNotes: [
+      '下游开关缺少依赖时，保存配置会失败，应用启动也会拒绝不完整组合。',
+      'Durable Jobs 可先独立启用；其他研究子系统都要求个人投研总开关。',
+    ],
+    impact: ['只影响后续个人投研链路；关闭全部开关即可恢复现有运行行为。'],
+    notes: ['生产启用前先执行数据库迁移检查与显式迁移。'],
+  },
+  'settings.research.policy_gate': {
+    title: '组合策略 Gate',
+    summary: '控制确定性组合策略 Gate 关闭、只观察或正式执行。',
+    usage: '先使用 shadow 记录 would-block 差异，完成观察验收后才切换 enforce。',
+    valueNotes: [
+      'off 不执行 Gate；shadow 只记录；enforce 会阻止不符合策略的账户动作。',
+      'shadow 和 enforce 都依赖 Personal Research、Factors 与 Evidence。',
+    ],
+    impact: ['enforce 会改变账户动作输出，但不会自动下单。'],
   },
   // ------------------------------------------------------------------
   // Backtest configuration
@@ -1481,6 +1526,22 @@ const settingsHelpEnUS: SettingsHelpMap = {
     valueNotes: ['Available APIs depend on your Tushare permission level.'],
     impact: ['Affects some A-share base data, stock lists, and enrichment data.'],
     notes: ['Do not commit the token or print it in public logs.'],
+  },
+  'settings.data_source.TUSHARE_PRIORITY': {
+    title: 'Tushare Daily K-line Priority',
+    summary: 'Controls where Tushare is tried in the daily K-line provider fallback chain.',
+    usage: 'Leave blank for token-driven automatic priority, or set 0-99 explicitly; lower values run earlier.',
+    valueNotes: ['An invalid explicit value safely falls back to normal priority 2 instead of auto-promoting.'],
+    impact: ['Affects Tushare daily K-line ordering but does not change realtime quote provider order.'],
+    notes: ['Tushare is available only when a valid TUSHARE_TOKEN is configured.'],
+  },
+  'settings.data_source.FUNDAMENTAL_AUXILIARY_TIMEOUT_SECONDS': {
+    title: 'Fundamental Auxiliary Timeout',
+    summary: 'Limits how long optional auxiliary fundamental sources may wait per call.',
+    usage: 'Use a non-negative number of seconds. The default is 4.0; zero abandons the auxiliary block immediately.',
+    valueNotes: ['This budget is separate from the overall fundamental-stage and primary-source timeouts.'],
+    impact: ['Prevents slow AkShare auxiliary blocks from consuming the full fundamental stage while the main path can still degrade.'],
+    notes: ['Too short can reduce auxiliary coverage; too long increases tail latency per stock.'],
   },
   'settings.data_source.TICKFLOW_API_KEY': {
     title: 'TickFlow API Key',
@@ -2197,6 +2258,14 @@ const settingsHelpEnUS: SettingsHelpMap = {
     impact: ['Affects background alert detection frequency and notification timing.'],
     notes: ['Must be used with alert rules.'],
   },
+  'settings.agent.decision_signal_outcomes': {
+    title: 'Decision Signal Outcome Maintenance',
+    summary: 'Controls background evaluation of matured decision-signal-v1 rows under the single Scheduler owner.',
+    usage: 'Toggle maintenance, set an interval of at least 5 minutes, and choose a per-pass candidate limit from 1 to 500.',
+    valueNotes: ['Maintenance defaults on but runs only under the single Scheduler owner started by SCHEDULE_ENABLED=true or --schedule.'],
+    impact: ['Affects v1 Outcome cadence and per-pass load, not signal extraction or the explicit Outcome API.'],
+    notes: ['This is independent from the default-off DECISION_OUTCOME_V2_ENABLED rollout flag.'],
+  },
   'settings.agent.EVENT_ALERT_RULES_JSON': {
     title: 'Event Alert Rules (Legacy JSON)',
     summary: 'Configures basic price and volume alert rules via a JSON array.',
@@ -2207,6 +2276,27 @@ const settingsHelpEnUS: SettingsHelpMap = {
     ],
     impact: ['Affects background alert detection and notification delivery.'],
     notes: ['This is a legacy configuration method. For advanced rules, use the alert center.'],
+  },
+  'settings.research.rollout': {
+    title: 'Personal Research Rollout',
+    summary: 'Controls staged activation of personal A-share research subsystems. Every flag is off by default.',
+    usage: 'Enable Durable Jobs, Tushare Research, Factors, and Evidence in order, then optionally enable Debate, Thesis, and Outcome v2.',
+    valueNotes: [
+      'Saving and startup reject downstream flags whose required dependencies are disabled.',
+      'Durable Jobs can be enabled independently; all other research subsystems require the Personal Research master switch.',
+    ],
+    impact: ['Only affects the new personal-research path; turning every flag off restores existing behavior.'],
+    notes: ['Run the read-only migration check and explicit migration apply before production activation.'],
+  },
+  'settings.research.policy_gate': {
+    title: 'Portfolio Policy Gate',
+    summary: 'Controls whether the deterministic portfolio policy gate is off, observational, or enforced.',
+    usage: 'Use shadow first to record would-block differences; switch to enforce only after the observation period is accepted.',
+    valueNotes: [
+      'off disables the gate, shadow records only, and enforce blocks non-compliant account actions.',
+      'shadow and enforce require Personal Research, Factors, and Evidence.',
+    ],
+    impact: ['enforce changes account-action output but never places trades automatically.'],
   },
   // ------------------------------------------------------------------
   // Backtest configuration

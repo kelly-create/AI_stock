@@ -305,6 +305,54 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
 
         self.assertEqual(config.fundamental_stage_timeout_seconds, 8.0)
         self.assertEqual(config.fundamental_fetch_timeout_seconds, 8.0)
+        self.assertEqual(config.fundamental_auxiliary_timeout_seconds, 4.0)
+        self.assertIsNone(config.tushare_priority)
+        self.assertTrue(config.decision_signal_outcome_enabled)
+        self.assertEqual(config.decision_signal_outcome_interval_minutes, 30)
+        self.assertEqual(config.decision_signal_outcome_batch_limit, 100)
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_production_runtime_config_overrides_and_clamps(
+        self, _mock_parse_litellm_yaml, _mock_setup_env
+    ):
+        with patch.dict(
+            os.environ,
+            {
+                "STOCK_LIST": "600519",
+                "TUSHARE_PRIORITY": "0",
+                "DECISION_SIGNAL_OUTCOME_ENABLED": "false",
+                "DECISION_SIGNAL_OUTCOME_INTERVAL_MINUTES": "4",
+                "DECISION_SIGNAL_OUTCOME_BATCH_LIMIT": "999",
+                "FUNDAMENTAL_AUXILIARY_TIMEOUT_SECONDS": "-1",
+            },
+            clear=True,
+        ):
+            config = Config._load_from_env()
+
+        self.assertEqual(config.tushare_priority, 0)
+        self.assertFalse(config.decision_signal_outcome_enabled)
+        self.assertEqual(config.decision_signal_outcome_interval_minutes, 5)
+        self.assertEqual(config.decision_signal_outcome_batch_limit, 500)
+        self.assertEqual(config.fundamental_auxiliary_timeout_seconds, 0.0)
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_invalid_tushare_priority_falls_back_without_auto_promotion(
+        self, _mock_parse_litellm_yaml, _mock_setup_env
+    ):
+        for raw_value in ("invalid", "-1", "100"):
+            with self.subTest(raw_value=raw_value), patch.dict(
+                os.environ,
+                {
+                    "STOCK_LIST": "600519",
+                    "TUSHARE_PRIORITY": raw_value,
+                },
+                clear=True,
+            ):
+                config = Config._load_from_env()
+
+            self.assertEqual(config.tushare_priority, 2)
 
     @patch("src.config.setup_env")
     @patch.object(Config, "_parse_litellm_yaml", return_value=[])

@@ -1404,24 +1404,31 @@ def main() -> int:
             RUNTIME_SCHEDULER_SUPPRESS_START_ENV,
         )
 
-        # The API runtime scheduler owns schedules once the Web/API service starts.
-        # This keeps Web settings, status, and run-now actions attached to the real
-        # scheduler instead of a separate CLI loop.
-        os.environ.pop(CLI_SCHEDULER_OWNER_ENV, None)
-        if args.serve_only:
-            os.environ[RUNTIME_SCHEDULER_SUPPRESS_START_ENV] = "true"
-        else:
-            os.environ.pop(RUNTIME_SCHEDULER_SUPPRESS_START_ENV, None)
-        runtime_schedule_requested = not args.serve_only and (
-            args.schedule or config.schedule_enabled
+        # The API runtime scheduler normally owns schedules once the Web/API
+        # service starts. A deployment with a dedicated scheduler can opt out by
+        # explicitly setting DSA_RUNTIME_SCHEDULER_SUPPRESS_START=true. Preserve
+        # that marker for the API lifespan and mark the schedule as externally
+        # owned so later Web config saves cannot create a second owner.
+        runtime_scheduler_suppressed = _is_truthy_env(
+            RUNTIME_SCHEDULER_SUPPRESS_START_ENV,
+            default="false",
         )
-        if not args.serve_only and args.schedule:
+        if runtime_scheduler_suppressed:
+            os.environ[CLI_SCHEDULER_OWNER_ENV] = "true"
+        else:
+            os.environ.pop(CLI_SCHEDULER_OWNER_ENV, None)
+            os.environ.pop(RUNTIME_SCHEDULER_SUPPRESS_START_ENV, None)
+        runtime_schedule_requested = (
+            not runtime_scheduler_suppressed
+            and (args.schedule or config.schedule_enabled)
+        )
+        if not runtime_scheduler_suppressed and not args.serve_only and args.schedule:
             os.environ[RUNTIME_SCHEDULER_FORCE_ENABLED_ENV] = "true"
         else:
             os.environ.pop(RUNTIME_SCHEDULER_FORCE_ENABLED_ENV, None)
         if runtime_schedule_requested:
             runtime_run_immediately = config.schedule_run_immediately
-            if getattr(args, 'no_run_immediately', False):
+            if args.serve_only or getattr(args, 'no_run_immediately', False):
                 runtime_run_immediately = False
             os.environ[RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV] = (
                 "true" if runtime_run_immediately else "false"
@@ -1575,6 +1582,15 @@ def main() -> int:
                     "run_immediately": True,
                     "name": "agent_event_monitor",
                 })
+
+            from src.services.runtime_scheduler import build_decision_signal_outcome_background_tasks
+
+            background_tasks.extend(
+                build_decision_signal_outcome_background_tasks(
+                    config,
+                    config_provider=_reload_runtime_config,
+                )
+            )
 
             schedule_kwargs = {
                 "task": scheduled_task,

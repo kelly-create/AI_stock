@@ -46,9 +46,9 @@ from sqlalchemy import (
     func,
     inspect,
     MetaData,
-    Table,
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.schema import CreateTable
 from sqlalchemy.orm import (
     declarative_base,
     sessionmaker,
@@ -58,13 +58,25 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 
 from src.agent.provider_trace import PROVIDER_TRACE_RETENTION_LIMIT
 from src.config import get_config
+from src.migrations import (
+    BASELINE_SCHEMA_VERSION,
+    PR0_CONVERGENCE_SCHEMA_VERSION,
+    apply_migrations_locked,
+    check_migration_state,
+    migration_writer_lock,
+)
 from src.schemas.decision_profile import extract_legacy_decision_profile
 from src.utils.sniper_points import extract_sniper_points, parse_sniper_value
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
-CURRENT_SCHEMA_VERSION = "2026-06-05-create-all-baseline"
+CURRENT_SCHEMA_VERSION = BASELINE_SCHEMA_VERSION
 INTELLIGENCE_ITEM_NULL_SCOPE_VALUE = "__dsa_null_scope__"
+
+
+class DatabaseMigrationRequired(RuntimeError):
+    """Raised when an explicit-migration service sees a non-current database."""
+
 
 # SQLAlchemy ORM 基类
 Base = declarative_base()
@@ -1368,13 +1380,37 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                 autoflush=False,
             )
 
-            # 创建所有表
-            Base.metadata.create_all(self._engine)
-            self._ensure_llm_usage_telemetry_columns()
-            self._ensure_decision_signal_profile_schema()
-            self._ensure_intelligence_item_scope_values()
-            self._ensure_schema_migration_record()
-            self._ensure_intelligence_items_unique_index()
+            migration_mode = getattr(config, "database_migration_mode", "auto")
+            if migration_mode == "explicit":
+                state = check_migration_state(str(self._engine.url))
+                if not state.is_current or not state.is_compatible or state.error:
+                    detail = state.error or (
+                        "pending=" + ",".join(state.pending_versions)
+                    )
+                    raise DatabaseMigrationRequired(
+                        "Database schema is not current in explicit migration mode; "
+                        "run `python -m src.migrations --apply` before starting "
+                        f"this service ({detail})"
+                    )
+            else:
+                # Non-Compose installations retain automatic convergence.  The
+                # versioned migrator and this compatibility path share one lock.
+                migration_lock_timeout = max(
+                    30.0,
+                    self._sqlite_busy_timeout_ms / 1000.0,
+                )
+                with migration_writer_lock(
+                    str(self._engine.url),
+                    timeout_seconds=migration_lock_timeout,
+                ):
+                    applied_now = apply_migrations_locked(self._engine)
+                    if PR0_CONVERGENCE_SCHEMA_VERSION not in applied_now:
+                        # Preserve historical repair-on-start behavior for old
+                        # non-Compose deployments and out-of-band schema drift.
+                        self._ensure_llm_usage_telemetry_columns()
+                        self._ensure_decision_signal_profile_schema()
+                        self._ensure_intelligence_item_scope_values()
+                        self._ensure_intelligence_items_unique_index()
 
             self._initialized = True
             logger.info(f"数据库初始化完成: {db_url}")
@@ -1610,6 +1646,11 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         try:
             unique_indexes = self._list_sqlite_unique_indexes("intelligence_items")
         except Exception as exc:
+            if getattr(self, "_strict_schema_convergence", False):
+                raise RuntimeError(
+                    "Failed to inspect intelligence_items unique indexes during "
+                    "schema convergence"
+                ) from exc
             logger.warning(
                 "[Intelligence items] failed to inspect unique indexes; "
                 "skip migration/repair: %s",
@@ -1620,34 +1661,62 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         target_columns = ("source_id", "url", "scope_type", "scope_value", "market")
         has_target_index = any(tuple(cols) == target_columns for cols in unique_indexes)
         has_legacy_url_unique = any(tuple(cols) == ("url",) for cols in unique_indexes)
+        has_source_foreign_key = self._has_intelligence_item_source_foreign_key()
+        unknown_unique_shapes = [
+            tuple(columns)
+            for columns in unique_indexes
+            if tuple(columns) not in {target_columns, ("url",)}
+        ]
 
-        if has_target_index:
-            return
-        if unique_indexes and not has_legacy_url_unique:
+        if has_source_foreign_key is False and unknown_unique_shapes and getattr(
+            self,
+            "_strict_schema_convergence",
+            False,
+        ):
+            raise RuntimeError(
+                "Cannot safely rebuild intelligence_items with an unknown unique "
+                f"index contract: {unknown_unique_shapes}"
+            )
+
+        if has_source_foreign_key is False and not unknown_unique_shapes:
+            # Older repair code created the scoped unique index through a
+            # columns-only temporary table, which silently lost this FK.  A
+            # second model-complete rebuild repairs that deployed shape.
+            self._rebuild_intelligence_items_table()
+        elif not has_target_index and unique_indexes and not has_legacy_url_unique:
             # Table has other unique index shapes; avoid aggressive changes and add
             # the expected scoped uniqueness directly.
             self._ensure_intelligence_items_scoped_unique_index_once()
-            return
+        elif not has_target_index:
+            self._rebuild_intelligence_items_table()
 
-        self._rebuild_intelligence_items_table()
+        # ``create_all`` cannot repair indexes on a table that already exists.
+        # Keep every query index declared by the ORM present after either the
+        # legacy rebuild path or an out-of-band partial schema change.
+        self._ensure_intelligence_item_model_indexes()
 
     def _rebuild_intelligence_items_table(self) -> None:
         temporary_table = f"intelligence_items_recreate_tmp_{int(time.time() * 1_000_000_000)}"
         columns = [column.name for column in IntelligenceItem.__table__.columns]
         select_clause = ", ".join(f'"{column}"' for column in columns)
-        scoped_index_columns = ", ".join(["source_id", "url", "scope_type", "scope_value", "market"])
-        scoped_index_name = "uix_intel_item_scope"
 
         tmp_metadata = MetaData()
-        tmp_table = Table(
-            temporary_table,
+        # Clone the referenced table into the temporary metadata so SQLAlchemy
+        # can compile the outgoing source_id foreign key on the replacement.
+        IntelligenceSource.__table__.to_metadata(tmp_metadata)
+        tmp_table = IntelligenceItem.__table__.to_metadata(
             tmp_metadata,
-            *(column.copy() for column in IntelligenceItem.__table__.columns),
+            name=temporary_table,
         )
         logger.info("Rebuilding intelligence_items table to align composite uniqueness constraints.")
         with self._engine.begin() as connection:
             connection.execute(text(f'DROP TABLE IF EXISTS "{temporary_table}"'))
-            tmp_table.create(connection)
+            # CreateTable preserves table-level constraints (including the
+            # source_id foreign key and scoped unique constraint) without
+            # prematurely creating globally named SQLite indexes that still
+            # belong to the old table.  The model indexes are recreated after
+            # the old table has been dropped and the replacement renamed.
+            connection.execute(CreateTable(tmp_table))
             connection.execute(
                 text(
                     f"INSERT INTO \"{temporary_table}\" ({select_clause}) "
@@ -1658,12 +1727,45 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             connection.execute(
                 text(f'ALTER TABLE "{temporary_table}" RENAME TO intelligence_items')
             )
-            connection.execute(
-                text(
-                    f"CREATE UNIQUE INDEX IF NOT EXISTS {scoped_index_name} ON "
-                    f"intelligence_items ({scoped_index_columns})"
-                )
+            self._create_intelligence_item_model_indexes(connection)
+
+    @staticmethod
+    def _create_intelligence_item_model_indexes(connection) -> None:
+        for index in sorted(
+            IntelligenceItem.__table__.indexes,
+            key=lambda item: item.name or "",
+        ):
+            index.create(bind=connection, checkfirst=True)
+
+    def _ensure_intelligence_item_model_indexes(self) -> None:
+        with self._engine.begin() as connection:
+            self._create_intelligence_item_model_indexes(connection)
+
+    def _has_intelligence_item_source_foreign_key(self) -> Optional[bool]:
+        try:
+            foreign_keys = inspect(self._engine).get_foreign_keys(
+                IntelligenceItem.__tablename__
             )
+        except Exception as exc:
+            if getattr(self, "_strict_schema_convergence", False):
+                raise RuntimeError(
+                    "Failed to inspect intelligence_items foreign keys during "
+                    "schema convergence"
+                ) from exc
+            logger.warning(
+                "[Intelligence items] failed to inspect foreign keys; "
+                "skip foreign-key repair: %s",
+                exc,
+            )
+            return None
+        return any(
+            tuple(foreign_key.get("constrained_columns") or ()) == ("source_id",)
+            and foreign_key.get("referred_table") == "intelligence_sources"
+            and tuple(foreign_key.get("referred_columns") or ()) == ("id",)
+            and str((foreign_key.get("options") or {}).get("ondelete", "")).upper()
+            == "SET NULL"
+            for foreign_key in foreign_keys
+        )
 
     def _ensure_intelligence_items_scoped_unique_index_once(self) -> None:
         target_index_name = "uix_intel_item_scope"
@@ -1715,6 +1817,10 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                 for column in inspect(self._engine).get_columns(LLMUsage.__tablename__)
             }
         except Exception as exc:
+            if getattr(self, "_strict_schema_convergence", False):
+                raise RuntimeError(
+                    "Failed to inspect llm_usage telemetry columns during schema convergence"
+                ) from exc
             logger.warning(
                 "[LLM usage] failed to inspect telemetry columns; "
                 "skipping best-effort SQLite telemetry column backfill: %s",
@@ -1764,6 +1870,10 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                 for column in inspect(self._engine).get_columns(IntelligenceItem.__tablename__)
             }
         except Exception as exc:
+            if getattr(self, "_strict_schema_convergence", False):
+                raise RuntimeError(
+                    "Failed to inspect intelligence_items scope_value during schema convergence"
+                ) from exc
             logger.warning("资讯池 scope_value 回填检查失败，已跳过: %s", exc)
             return
         if "scope_value" not in existing:
@@ -1777,6 +1887,10 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                     (INTELLIGENCE_ITEM_NULL_SCOPE_VALUE,),
                 )
         except Exception as exc:
+            if getattr(self, "_strict_schema_convergence", False):
+                raise RuntimeError(
+                    "Failed to backfill intelligence_items scope_value during schema convergence"
+                ) from exc
             logger.warning("资讯池 scope_value 回填失败，已跳过: %s", exc)
 
     @classmethod
@@ -3836,6 +3950,145 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             }
             for r in rows
         ]
+
+
+class _StorageSchemaConvergence(DatabaseManager):
+    """Non-singleton adapter for the explicit versioned migrator.
+
+    The adapter deliberately reuses the historical schema repair methods so
+    the explicit migrator and legacy automatic startup cannot drift into two
+    independent implementations.  Strict mode converts their historical
+    best-effort inspection fallbacks into migration failures: a version marker
+    is only recorded after every contract is verified.
+    """
+
+    def __new__(cls, *args, **kwargs):
+        return object.__new__(cls)
+
+    def __init__(self, engine, config) -> None:
+        self._engine = engine
+        self._db_url = str(engine.url)
+        self._is_sqlite_engine = engine.url.get_backend_name() == "sqlite"
+        self._sqlite_file_db = self._is_sqlite_engine and self._is_file_sqlite_database()
+        self._sqlite_wal_enabled = config.sqlite_wal_enabled
+        self._sqlite_busy_timeout_ms = config.sqlite_busy_timeout_ms
+        self._sqlite_write_retry_max = config.sqlite_write_retry_max
+        self._sqlite_write_retry_base_delay = config.sqlite_write_retry_base_delay
+        self._strict_schema_convergence = True
+        self._install_sqlite_pragma_handler()
+
+    def run(self) -> None:
+        if not self._is_sqlite_engine:
+            raise RuntimeError("Storage schema convergence only supports SQLite")
+
+        Base.metadata.create_all(bind=self._engine)
+        self._ensure_llm_usage_telemetry_columns()
+        self._ensure_decision_signal_profile_schema()
+        self._ensure_intelligence_item_scope_values()
+        self._ensure_intelligence_items_unique_index()
+        self._verify_contracts()
+
+    def _verify_contracts(self) -> None:
+        inspector = inspect(self._engine)
+
+        llm_columns = {
+            column["name"]
+            for column in inspector.get_columns(LLMUsage.__tablename__)
+        }
+        missing_llm_columns = sorted(
+            set(_LLM_USAGE_TELEMETRY_COLUMN_SQL).difference(llm_columns)
+        )
+        if missing_llm_columns:
+            raise RuntimeError(
+                "llm_usage telemetry convergence is incomplete: missing="
+                + ",".join(missing_llm_columns)
+            )
+
+        decision_columns = {
+            column["name"]
+            for column in inspector.get_columns(DecisionSignalRecord.__tablename__)
+        }
+        if "decision_profile" not in decision_columns:
+            raise RuntimeError(
+                "decision_signals convergence is incomplete: decision_profile is missing"
+            )
+
+        intelligence_columns = {
+            column["name"]
+            for column in inspector.get_columns(IntelligenceItem.__tablename__)
+        }
+        if "scope_value" not in intelligence_columns:
+            raise RuntimeError(
+                "intelligence_items convergence is incomplete: scope_value is missing"
+            )
+        with self._engine.connect() as connection:
+            empty_scope_count = connection.execute(
+                text(
+                    "SELECT COUNT(*) FROM intelligence_items "
+                    "WHERE scope_value IS NULL OR scope_value = ''"
+                )
+            ).scalar_one()
+        if empty_scope_count:
+            raise RuntimeError(
+                "intelligence_items convergence is incomplete: "
+                f"{empty_scope_count} rows still have an empty scope_value"
+            )
+
+        expected_unique_columns = (
+            "source_id",
+            "url",
+            "scope_type",
+            "scope_value",
+            "market",
+        )
+        unique_indexes = self._list_sqlite_unique_indexes(
+            IntelligenceItem.__tablename__
+        )
+        if not any(
+            tuple(columns) == expected_unique_columns
+            for columns in unique_indexes
+        ):
+            raise RuntimeError(
+                "intelligence_items convergence is incomplete: scoped unique index is missing"
+            )
+
+        actual_indexes = {
+            index["name"]: tuple(index.get("column_names") or ())
+            for index in inspector.get_indexes(IntelligenceItem.__tablename__)
+            if index.get("name")
+        }
+        expected_indexes = {
+            index.name: tuple(column.name for column in index.columns)
+            for index in IntelligenceItem.__table__.indexes
+            if index.name
+        }
+        invalid_indexes = {
+            name: {
+                "expected": columns,
+                "actual": actual_indexes.get(name),
+            }
+            for name, columns in expected_indexes.items()
+            if actual_indexes.get(name) != columns
+        }
+        if invalid_indexes:
+            raise RuntimeError(
+                "intelligence_items convergence is incomplete: model indexes "
+                f"are missing or invalid: {invalid_indexes}"
+            )
+
+        has_source_foreign_key = self._has_intelligence_item_source_foreign_key()
+        if not has_source_foreign_key:
+            raise RuntimeError(
+                "intelligence_items convergence is incomplete: source_id foreign "
+                "key with ON DELETE SET NULL is missing"
+            )
+
+
+def run_storage_schema_convergence(engine, config=None) -> None:
+    """Converge and verify every schema repair that predates migrations."""
+
+    runtime_config = config or get_config()
+    _StorageSchemaConvergence(engine, runtime_config).run()
 
 
 # 便捷函数

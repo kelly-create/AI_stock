@@ -32,16 +32,18 @@ x-common: &common
     # 如需覆盖前端静态资源，可挂载本地 static 目录
     # - ../static:/app/static:ro
 
-  environment:
-    - TZ=Asia/Shanghai
+  environment: &common-environment
+    TZ: Asia/Shanghai
+    # Compose uses a one-shot migrator; long-running services must never write DDL.
+    DATABASE_MIGRATION_MODE: explicit
 
     # Web/API service bind address (must be 0.0.0.0 inside container)
-    - WEBUI_HOST=0.0.0.0
+    WEBUI_HOST: 0.0.0.0
     # API_PORT 从 .env 文件读取，无需在此硬编码
 
     # 代理设置（如果需要）
-    # - http_proxy=http://host.docker.internal:10809
-    # - https_proxy=http://host.docker.internal:10809
+    # http_proxy: http://host.docker.internal:10809
+    # https_proxy: http://host.docker.internal:10809
   logging:
     driver: "json-file"
     options:
@@ -57,15 +59,36 @@ x-common: &common
         memory: 512M
 
 services:
+  # 单次迁移：API 与调度进程仅在迁移成功后启动，避免首次 DDL 竞争。
+  migrator:
+    <<: *common
+    container_name: stock-migrator
+    command: ["python", "-m", "src.migrations", "--apply"]
+    restart: "no"
+    healthcheck:
+      disable: true
+
   # 定时任务模式
   analyzer:
     <<: *common
     container_name: stock-analyzer
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+    # Inherit the image's mode-aware healthcheck; scheduler mode verifies the
+    # live, non-zombie DSA process without requiring an HTTP endpoint.
 
   # FastAPI 模式
   server:
     <<: *common
     container_name: stock-server
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+    environment:
+      <<: *common-environment
+      # analyzer is the sole schedule owner in the two-service Compose topology.
+      DSA_RUNTIME_SCHEDULER_SUPPRESS_START: "true"
     command: ["python", "main.py", "--serve-only", "--host", "0.0.0.0", "--port", "${API_PORT:-8000}"]
     # 若使用 network_mode: host，则以下 ports 映射无效，端口由 command 中的 --port 指定
     ports:
