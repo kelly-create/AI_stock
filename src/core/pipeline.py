@@ -784,7 +784,6 @@ class StockAnalysisPipeline:
                 self._load_daily_market_context(
                     market,
                     target_date=daily_market_target_date,
-                    allow_generate=True,
                 )
                 if prepared_research is None
                 else None

@@ -116,7 +116,7 @@
       "profile": "industrial",
       "omit_bars": true,
       "scenario": {"trading_status": "suspended", "limit_state": "none", "buy_executable": false, "sell_executable": false, "risk_flags": ["suspended"]},
-      "expected": {"value": 60.95, "quality": 80.64, "trend": null, "catalyst": 50.0, "risk": 100.0, "output_sha256": "8ddc678b833a95b151bf6281142dcc5ebc5ff4de2f4472212215863a0205fa6b"}
+      "expected": {"value": 60.95, "quality": 80.64, "trend": null, "catalyst": 50.0, "risk": 100.0, "output_sha256": "fc4dbbd26c2f06d4722663f2dba79c584392e7c63ca5ec743ea0f8085292e281"}
     },
     {
       "id": "limit_up_not_buyable",
@@ -138,7 +138,7 @@
       "profile": "industrial",
       "omit_fundamentals": true,
       "scenario": {"trading_status": "normal", "limit_state": "none", "buy_executable": true, "sell_executable": true, "risk_flags": ["missing_fundamental"]},
-      "expected": {"value": null, "quality": null, "trend": 78.98, "catalyst": 50.0, "risk": 5.625, "output_sha256": "38acfad6690aaeec1ce774e2e33e3d7dbf58c3ce3bc7612bf8c6352a8123c8e5"}
+      "expected": {"value": null, "quality": null, "trend": 78.98, "catalyst": 50.0, "risk": 5.625, "output_sha256": "89be74072e2cc0ec35825b121ca8e95fd93a97cf694ddfe25afdaa16ce313177"}
     }
   ]
 }

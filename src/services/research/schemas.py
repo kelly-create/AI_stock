@@ -109,8 +109,14 @@ class MetricResult:
         effective_weight = finite_float(self.effective_weight, field=f"{self.name}.effective_weight")
         if weight < 0 or effective_weight < 0:
             raise ValueError("metric weights must be non-negative")
+        # Normalized weights are part of the immutable factor payload.  Python
+        # versions use different floating-point summation algorithms (notably
+        # 3.11 versus 3.12), so the final division can differ by one ULP even
+        # when the policy and inputs are identical.  Fix only that derived
+        # value's public precision before hashing or persistence; the policy's
+        # raw weight remains untouched.
         object.__setattr__(self, "weight", weight)
-        object.__setattr__(self, "effective_weight", effective_weight)
+        object.__setattr__(self, "effective_weight", round(effective_weight, 12))
         if self.status is MetricStatus.AVAILABLE and (self.value is None or self.score is None):
             raise ValueError("available metrics require both a value and a score")
         if self.status is not MetricStatus.AVAILABLE and self.score is not None:

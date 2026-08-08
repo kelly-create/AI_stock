@@ -19,7 +19,7 @@ from src.services.research.factor_policy_v1 import (
 from src.services.research.factor_service import evaluate_research_factors
 from src.services.research.profiles import resolve_company_profile
 from src.services.research.risk import evaluate_risk
-from src.services.research.schemas import ComponentStatus, MetricStatus
+from src.services.research.schemas import ComponentStatus, MetricResult, MetricStatus
 from src.services.research.trend_timing import completed_adjusted_bars, evaluate_trend_timing
 from src.services.research.value_quality import evaluate_value_quality
 
@@ -226,7 +226,7 @@ def test_numeric_factor_golden_v2_locks_inputs_scores_and_full_output_hashes():
     assert fixture["fixture_version"] == "research-factor-golden-v2"
     assert fixture["policy_version"] == POLICY_VERSION
     assert canonical_hash(fixture, exclude_volatile=False) == (
-        "51873b4fe0aeab47064667059590cf428313dce4a71e64ce75779275ea120120"
+        "e5f41a3f8359717897091fe2f847dbc8351d60c1786b19ea4c7eb2c09c9f71e1"
     )
 
     as_of = datetime.fromisoformat(fixture["as_of"])
@@ -279,6 +279,20 @@ def test_numeric_factor_golden_v2_locks_inputs_scores_and_full_output_hashes():
         assert canonical_hash(result, exclude_volatile=False) == expected[
             "output_sha256"
         ], case["id"]
+
+
+def test_metric_schema_quantizes_normalized_weights_for_cross_version_hashes():
+    metric = MetricResult(
+        name="return_5d",
+        status=MetricStatus.AVAILABLE,
+        value=3.5,
+        score=82.0,
+        weight=0.08,
+        effective_weight=0.08 / (1.0 + 2e-16),
+        reason="available",
+    )
+
+    assert metric.effective_weight == 0.08
 
 
 def test_missing_lowers_coverage_without_becoming_zero_and_not_applicable_is_separate():
