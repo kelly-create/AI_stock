@@ -34,6 +34,10 @@ from src.market_context import get_market_role, get_market_guidelines
 from src.market_phase_prompt import format_market_phase_prompt_section
 from src.market_structure_prompt import format_market_structure_prompt_section
 from src.services.daily_market_context import format_daily_market_context_prompt_section
+from src.services.untrusted_external_content import (
+    UNTRUSTED_EXTERNAL_CONTENT_SYSTEM_INSTRUCTION,
+    format_untrusted_external_content,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -675,6 +679,25 @@ class AgentExecutor:
         Returns:
             AgentResult with parsed dashboard or error.
         """
+        messages = self.build_initial_messages(task, context=context)
+
+        # Build tool declarations in OpenAI format (litellm handles all providers)
+        tool_decls = self.tool_registry.to_openai_tools()
+
+        return self._run_loop(messages, tool_decls, parse_dashboard=True)
+
+    def build_initial_messages(
+        self,
+        task: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return the exact system/user messages consumed by :meth:`run`.
+
+        Research snapshotting calls this method immediately before the Agent
+        loop so the frozen prompt and the provider input cannot drift apart.
+        The returned list is newly allocated and may be safely serialized.
+        """
+
         # Build system prompt with skills
         skills_section = ""
         if self.skill_instructions:
@@ -698,17 +721,30 @@ class AgentExecutor:
             skills_section=skills_section,
             language_section=_build_language_section(report_language),
         )
+        system_prompt = (
+            f"{system_prompt}\n\n## External Content Boundary (highest priority)\n\n"
+            f"{UNTRUSTED_EXTERNAL_CONTENT_SYSTEM_INSTRUCTION}\n"
+        )
 
-        # Build tool declarations in OpenAI format (litellm handles all providers)
-        tool_decls = self.tool_registry.to_openai_tools()
-
-        # Initialize conversation
-        messages: List[Dict[str, Any]] = [
+        return [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": self._build_user_message(task, context)},
         ]
 
-        return self._run_loop(messages, tool_decls, parse_dashboard=True)
+    def build_research_snapshot_prompt(
+        self,
+        task: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Return the exact single-agent contract frozen before the LLM call."""
+
+        return {
+            "architecture": "single-agent",
+            "messages": self.build_initial_messages(task, context=context),
+            "tool_declarations": self.tool_registry.to_openai_tools(),
+            "max_steps": self.max_steps,
+            "timeout_seconds": self.timeout_seconds,
+        }
 
     def chat(self, message: str, session_id: str, progress_callback: Optional[Callable] = None, context: Optional[Dict[str, Any]] = None) -> AgentResult:
         """Execute the agent loop for a free-form chat message.
@@ -900,7 +936,11 @@ class AgentExecutor:
             if context.get("chip_distribution"):
                 parts.append(f"\n[系统已获取的筹码分布]\n{json.dumps(context['chip_distribution'], ensure_ascii=False)}")
             if context.get("news_context"):
-                parts.append(f"\n[系统已获取的新闻与舆情情报]\n{context['news_context']}")
+                isolated_news_context = format_untrusted_external_content(
+                    context["news_context"],
+                    label="news_context",
+                )
+                parts.append(f"\n[系统已获取的新闻与舆情情报]\n{isolated_news_context}")
 
         parts.append("\n请使用可用工具获取缺失的数据（如历史K线、新闻等），然后以决策仪表盘 JSON 格式输出分析结果。")
         return "\n".join(parts)

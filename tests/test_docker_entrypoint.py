@@ -101,6 +101,22 @@ def test_compose_durable_worker_is_opt_in_without_gating_analyzer_or_api() -> No
     assert "--max-heartbeat-age" in worker["healthcheck"]["test"]
 
 
+def test_compose_has_one_tushare_capable_worker_on_the_database_volume() -> None:
+    compose_path = REPO_ROOT / "docker" / "docker-compose.yml"
+    compose_text = compose_path.read_text(encoding="utf-8")
+    compose = yaml.safe_load(compose_text)
+
+    worker_services = [
+        name
+        for name, service in compose["services"].items()
+        if "src.services.durable_worker" in service.get("command", [])
+        and "--healthcheck" not in service.get("command", [])
+    ]
+    assert worker_services == ["worker"]
+    assert "../data:/app/data" in compose["x-common"]["volumes"]
+    assert "*.tushare-owner.lock" in compose_text
+
+
 def test_compose_default_topology_keeps_flag_off_worker_opt_in() -> None:
     compose_path = REPO_ROOT / "docker" / "docker-compose.yml"
     compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))

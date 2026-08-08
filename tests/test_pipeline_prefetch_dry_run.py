@@ -54,6 +54,43 @@ class TestPipelinePrefetchBehavior(unittest.TestCase):
             ["000001"], use_bulk=False
         )
 
+    def test_research_a_share_batch_skips_all_legacy_prefetch(self):
+        pipeline = self._build_pipeline(process_result=SimpleNamespace(code="600519"))
+        pipeline.config.tushare_research_enabled = True
+        codes = ["600519", "601398", "300750", "000001", "600000"]
+
+        pipeline.run(stock_codes=codes, dry_run=False, send_notification=False)
+
+        pipeline.fetcher_manager.prefetch_daily_klines.assert_not_called()
+        pipeline.fetcher_manager.prefetch_realtime_quotes.assert_not_called()
+        pipeline.fetcher_manager.prefetch_stock_names.assert_not_called()
+
+    def test_mixed_research_batch_prefetches_only_legacy_symbols(self):
+        pipeline = self._build_pipeline(process_result=SimpleNamespace(code="600519"))
+        pipeline.config.tushare_research_enabled = True
+        pipeline.fetcher_manager.prefetch_daily_klines.return_value = 0
+        pipeline.fetcher_manager.prefetch_realtime_quotes.return_value = 0
+        research_codes = ["600519", "601398", "300750", "000001", "600000"]
+        legacy_codes = ["AAPL", "MSFT", "TSLA", "NVDA", "AMZN"]
+
+        pipeline.run(
+            stock_codes=research_codes + legacy_codes,
+            dry_run=False,
+            send_notification=False,
+        )
+
+        pipeline.fetcher_manager.prefetch_daily_klines.assert_called_once_with(
+            legacy_codes,
+            days=30,
+        )
+        pipeline.fetcher_manager.prefetch_realtime_quotes.assert_called_once_with(
+            legacy_codes
+        )
+        pipeline.fetcher_manager.prefetch_stock_names.assert_called_once_with(
+            legacy_codes,
+            use_bulk=False,
+        )
+
     def test_run_dry_run_counts_existing_data_by_effective_trading_date(self):
         pipeline = self._build_pipeline(process_result=None)
         pipeline._resolve_resume_target_date = MagicMock(

@@ -172,6 +172,48 @@ class TestStorage(unittest.TestCase):
 
     def test_database_initialization_records_schema_version(self):
         DatabaseManager.reset_instance()
+
+    def test_get_analysis_context_respects_historical_target_date(self):
+        DatabaseManager.reset_instance()
+        db = DatabaseManager(db_url="sqlite:///:memory:")
+        try:
+            with db.get_session() as session:
+                session.add_all(
+                    [
+                        StockDaily(
+                            code="600519",
+                            date=date(2026, 8, 6),
+                            close=100.0,
+                            volume=10.0,
+                        ),
+                        StockDaily(
+                            code="600519",
+                            date=date(2026, 8, 7),
+                            close=101.0,
+                            volume=11.0,
+                        ),
+                        StockDaily(
+                            code="600519",
+                            date=date(2026, 8, 8),
+                            close=999.0,
+                            volume=99.0,
+                        ),
+                    ]
+                )
+                session.commit()
+
+            context = db.get_analysis_context(
+                "600519",
+                target_date=date(2026, 8, 7),
+            )
+
+            self.assertIsNotNone(context)
+            self.assertEqual(context["date"], "2026-08-07")
+            self.assertEqual(context["today"]["close"], 101.0)
+            self.assertEqual(context["yesterday"]["date"], date(2026, 8, 6))
+            self.assertNotEqual(context["today"]["close"], 999.0)
+        finally:
+            DatabaseManager.reset_instance()
         db = DatabaseManager(db_url="sqlite:///:memory:")
 
         with db.get_session() as session:

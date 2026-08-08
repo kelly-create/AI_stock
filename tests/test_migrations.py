@@ -13,6 +13,7 @@ from src.migrations import (
     MIGRATIONS,
     PR0_CONVERGENCE_SCHEMA_VERSION,
     PR1_DURABLE_JOBS_SCHEMA_VERSION,
+    PR2_RESEARCH_DATA_SCHEMA_VERSION,
     Migration,
     MigrationError,
     _sqlite_database_path,
@@ -331,6 +332,7 @@ def test_existing_baseline_is_converged_by_ordered_pr0_migration(
         BASELINE_SCHEMA_VERSION,
         PR0_CONVERGENCE_SCHEMA_VERSION,
         PR1_DURABLE_JOBS_SCHEMA_VERSION,
+        PR2_RESEARCH_DATA_SCHEMA_VERSION,
     )
     with sqlite3.connect(database_path) as connection:
         llm_columns = {
@@ -498,7 +500,10 @@ def test_pr1_migrates_pr0_shaped_schema_preserves_rows_and_is_idempotent(
             ).fetchone()[0],
         )
 
-    assert before.pending_versions == (PR1_DURABLE_JOBS_SCHEMA_VERSION,)
+    assert before.pending_versions == (
+        PR1_DURABLE_JOBS_SCHEMA_VERSION,
+        PR2_RESEARCH_DATA_SCHEMA_VERSION,
+    )
     assert first.is_current is True
     assert second.is_current is True
     assert first_schema == second_schema
@@ -526,7 +531,10 @@ def test_pr1_rejects_ambiguous_generic_llm_audit_columns(tmp_path: Path) -> None
         apply_migrations(database_url)
 
     state = check_migration_state(database_url)
-    assert state.pending_versions == (PR1_DURABLE_JOBS_SCHEMA_VERSION,)
+    assert state.pending_versions == (
+        PR1_DURABLE_JOBS_SCHEMA_VERSION,
+        PR2_RESEARCH_DATA_SCHEMA_VERSION,
+    )
     with sqlite3.connect(database_path) as connection:
         columns = {
             row[1] for row in connection.execute("PRAGMA table_info('llm_usage')")
@@ -592,6 +600,186 @@ def test_pr1_schema_failure_rolls_back_ddl_and_does_not_record_version(
 
     assert after_schema == before_schema
     assert migration_rows == []
+
+
+def _create_pr1_shaped_schema(database_path: Path) -> str:
+    database_url = _sqlite_url(database_path)
+    _create_pr0_shaped_schema(database_path)
+    state = apply_migrations(database_url, migrations=MIGRATIONS[:-1])
+    assert state.current_version == PR1_DURABLE_JOBS_SCHEMA_VERSION
+    return database_url
+
+
+def test_pr2_research_schema_contract_and_second_apply_are_stable(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "pr1-to-pr2.db"
+    database_url = _create_pr1_shaped_schema(database_path)
+
+    first = apply_migrations(database_url)
+    with sqlite3.connect(database_path) as connection:
+        first_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        dataset_columns = {
+            row[1]: (row[2], bool(row[3]), row[4])
+            for row in connection.execute(
+                "PRAGMA table_info('research_dataset_snapshots')"
+            )
+        }
+        factor_columns = {
+            row[1]: (row[2], bool(row[3]), row[4])
+            for row in connection.execute(
+                "PRAGMA table_info('research_factor_snapshots')"
+            )
+        }
+        research_columns = {
+            row[1]: (row[2], bool(row[3]), row[4])
+            for row in connection.execute(
+                "PRAGMA table_info('research_snapshots')"
+            )
+        }
+        index_contract = {
+            table_name: {
+                row[1]: (
+                    bool(row[2]),
+                    tuple(
+                        item[2]
+                        for item in connection.execute(
+                            f"PRAGMA index_info('{row[1]}')"
+                        )
+                    ),
+                )
+                for row in connection.execute(f"PRAGMA index_list('{table_name}')")
+                if not row[1].startswith("sqlite_autoindex_")
+            }
+            for table_name in (
+                "research_dataset_snapshots",
+                "research_factor_snapshots",
+                "research_snapshots",
+            )
+        }
+        foreign_keys = {
+            table_name: {
+                (row[2], row[3], row[4], row[6].upper())
+                for row in connection.execute(
+                    f"PRAGMA foreign_key_list('{table_name}')"
+                )
+            }
+            for table_name in (
+                "research_dataset_snapshots",
+                "research_factor_snapshots",
+                "research_snapshots",
+            )
+        }
+
+    second = apply_migrations(database_url)
+    with sqlite3.connect(database_path) as connection:
+        second_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+
+    assert first.is_current is True
+    assert second.is_current is True
+    assert first.applied_versions[-1] == PR2_RESEARCH_DATA_SCHEMA_VERSION
+    assert first_schema == second_schema
+    assert {
+        "research_dataset_snapshots",
+        "research_factor_snapshots",
+        "research_snapshots",
+    }.issubset(tables)
+    assert dataset_columns["normalized_json"] == ("TEXT", False, None)
+    assert dataset_columns["content_hash"] == ("CHAR(64)", True, None)
+    assert factor_columns["primary_horizon"] == ("INTEGER", True, "10")
+    assert factor_columns["coverage"] == ("FLOAT", True, None)
+    assert factor_columns["content_hash"] == ("CHAR(64)", True, None)
+    assert research_columns["canonical_json"] == ("TEXT", True, None)
+    assert research_columns["snapshot_hash"] == ("CHAR(64)", True, None)
+    assert index_contract["research_dataset_snapshots"] == {
+        "ix_research_dataset_snapshots_dataset_scope_asof": (
+            False,
+            ("dataset", "scope_type", "scope_value", "data_as_of", "id"),
+        ),
+        "ix_research_dataset_snapshots_scope_available": (
+            False,
+            ("scope_type", "scope_value", "available_at", "id"),
+        ),
+        "uix_research_dataset_snapshots_content_hash": (
+            True,
+            ("content_hash",),
+        ),
+    }
+    assert index_contract["research_factor_snapshots"] == {
+        "ix_research_factor_snapshots_stock_asof": (
+            False,
+            ("stock_code", "as_of"),
+        ),
+        "ix_research_factor_snapshots_stock_profile_asof": (
+            False,
+            ("stock_code", "company_profile", "as_of"),
+        ),
+        "uix_research_factor_snapshots_content_hash": (
+            True,
+            ("content_hash",),
+        ),
+    }
+    assert index_contract["research_snapshots"] == {
+        "ix_research_snapshots_stock_asof": (
+            False,
+            ("stock_code", "as_of"),
+        ),
+        "uix_research_snapshots_snapshot_hash": (
+            True,
+            ("snapshot_hash",),
+        ),
+    }
+    expected_foreign_key = {("analysis_jobs", "origin_job_id", "task_id", "SET NULL")}
+    assert all(value == expected_foreign_key for value in foreign_keys.values())
+
+
+def test_pr2_schema_failure_rolls_back_all_ddl_and_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src import storage
+
+    database_path = tmp_path / "pr2-rollback.db"
+    database_url = _create_pr1_shaped_schema(database_path)
+    with sqlite3.connect(database_path) as connection:
+        before_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+
+    def fail_contract(_connection) -> None:
+        raise RuntimeError("injected PR2 schema verification failure")
+
+    monkeypatch.setattr(storage, "_verify_pr2_research_schema_contract", fail_contract)
+    with pytest.raises(RuntimeError, match="injected PR2"):
+        apply_migrations(database_url)
+
+    with sqlite3.connect(database_path) as connection:
+        after_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+        migration_versions = [
+            row[0]
+            for row in connection.execute(
+                "SELECT version FROM schema_migrations ORDER BY version"
+            )
+        ]
+
+    assert after_schema == before_schema
+    assert PR2_RESEARCH_DATA_SCHEMA_VERSION not in migration_versions
 
 
 def test_apply_serializes_concurrent_writers(tmp_path: Path) -> None:

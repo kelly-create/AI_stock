@@ -154,6 +154,33 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
         self.assertAlmostEqual(chip.concentration_70, 0.1)
         self.assertEqual(rate_limit_mock.call_count, 3)
 
+    def test_build_chip_distribution_reuses_latest_frozen_frames(self) -> None:
+        fetcher = self._make_fetcher()
+        chips = pd.DataFrame(
+            {
+                "trade_date": ["20260316", "20260317", "20260317", "20260317"],
+                "price": [7.0, 9.0, 10.0, 11.0],
+                "percent": [100.0, 20.0, 50.0, 30.0],
+            }
+        )
+        daily = pd.DataFrame(
+            {
+                "trade_date": ["20260316", "20260317"],
+                "close": [7.0, 10.5],
+            }
+        )
+
+        chip = fetcher.build_chip_distribution_from_frames("600519", chips, daily)
+
+        self.assertIsNotNone(chip)
+        if chip is None:
+            self.fail("expected chip distribution data")
+        self.assertEqual(chip.date, "2026-03-17")
+        self.assertAlmostEqual(chip.profit_ratio, 0.7)
+        self.assertAlmostEqual(chip.avg_cost, 10.1)
+        fetcher._api.cyq_chips.assert_not_called()
+        fetcher._api.daily.assert_not_called()
+
     def test_convert_stock_code_accepts_exchange_prefixed_a_share(self) -> None:
         fetcher = self._make_fetcher()
 

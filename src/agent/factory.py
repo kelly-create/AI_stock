@@ -27,7 +27,7 @@ Usage::
 import copy
 import logging
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from src.config import AGENT_MAX_STEPS_DEFAULT
 
@@ -311,7 +311,13 @@ def resolve_skill_prompt_state(config=None, skills: Optional[List[str]] = None) 
     )
 
 
-def build_agent_executor(config=None, skills: Optional[List[str]] = None):
+def build_agent_executor(
+    config=None,
+    skills: Optional[List[str]] = None,
+    *,
+    tool_registry: Optional[Any] = None,
+    research_snapshot_locked: bool = False,
+):
     """Build and return a configured AgentExecutor (or future orchestrator).
 
     When ``AGENT_ARCH=multi``, this returns an orchestrator that manages
@@ -336,7 +342,7 @@ def build_agent_executor(config=None, skills: Optional[List[str]] = None):
 
     from src.agent.llm_adapter import LLMToolAdapter
 
-    registry = get_tool_registry()
+    registry = tool_registry if tool_registry is not None else get_tool_registry()
     prompt_state = resolve_skill_prompt_state(config, skills=skills)
     skill_manager = prompt_state.skill_manager
     logger.info(
@@ -356,6 +362,7 @@ def build_agent_executor(config=None, skills: Optional[List[str]] = None):
             llm_adapter,
             skill_manager,
             technical_skill_policy=prompt_state.technical_skill_policy,
+            research_snapshot_locked=research_snapshot_locked,
         )
 
     from src.agent.executor import AgentExecutor
@@ -440,7 +447,15 @@ def build_agent_chat_executor(config=None, skills: Optional[List[str]] = None):
     )
 
 
-def _build_orchestrator(config, registry, llm_adapter, skill_manager, *, technical_skill_policy: str = ""):
+def _build_orchestrator(
+    config,
+    registry,
+    llm_adapter,
+    skill_manager,
+    *,
+    technical_skill_policy: str = "",
+    research_snapshot_locked: bool = False,
+):
     """Build and return an :class:`AgentOrchestrator` (multi-agent mode).
 
     The orchestrator presents the same ``run()`` / ``chat()`` interface as
@@ -464,6 +479,7 @@ def _build_orchestrator(config, registry, llm_adapter, skill_manager, *, technic
         mode=mode,
         skill_manager=skill_manager,
         config=config,
+        research_snapshot_locked=research_snapshot_locked,
     )
 
 

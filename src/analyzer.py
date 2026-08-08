@@ -102,6 +102,10 @@ from src.schemas.decision_scale import (
 from src.schemas.report_schema import AnalysisReportSchema
 from src.market_context import detect_market, get_market_role, get_market_guidelines
 from src.services.daily_market_context import format_daily_market_context_prompt_section
+from src.services.untrusted_external_content import (
+    UNTRUSTED_EXTERNAL_CONTENT_SYSTEM_INSTRUCTION,
+    format_untrusted_external_content,
+)
 from src.market_phase_prompt import format_market_phase_prompt_section
 from src.market_structure_prompt import format_market_structure_prompt_section
 
@@ -2429,6 +2433,10 @@ class GeminiAnalyzer:
                 .replace("{default_skill_policy_section}", default_skill_policy_section)
                 .replace("{skills_section}", skills_section)
             )
+        base_prompt = (
+            f"{base_prompt}\n\n## External Content Boundary (highest priority)\n\n"
+            f"{UNTRUSTED_EXTERNAL_CONTENT_SYSTEM_INSTRUCTION}\n"
+        )
         if lang == "en":
             return base_prompt + """
 
@@ -4312,6 +4320,10 @@ class GeminiAnalyzer:
 ## 📰 舆情情报
 """
         if news_context:
+            isolated_news_context = format_untrusted_external_content(
+                news_context,
+                label="news_context",
+            )
             prompt += f"""
 以下是 **{stock_name}({code})** 近{news_window_days}日的新闻搜索结果，请重点提取：
 1. 🚨 **风险警报**：减持、处罚、利空
@@ -4323,7 +4335,7 @@ class GeminiAnalyzer:
    - 时间未知、无法确定发布日期的新闻一律忽略
 
 ```
-{news_context}
+{isolated_news_context}
 ```
 """
         else:

@@ -303,6 +303,68 @@ def parse_env_int(
     return parsed
 
 
+def parse_tushare_quota_int(
+    value: Any,
+    default: int,
+    *,
+    field_name: str,
+    maximum: int,
+) -> int:
+    """Parse a Tushare safety limit without silently widening a bad value."""
+
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return default
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be an integer between 1 and {maximum}")
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str) and re.fullmatch(r"[0-9]+", value.strip()):
+        parsed = int(value.strip())
+    else:
+        raise ValueError(f"{field_name} must be an integer between 1 and {maximum}")
+    if not 1 <= parsed <= maximum:
+        raise ValueError(f"{field_name} must be between 1 and {maximum}")
+    return parsed
+
+
+def normalize_tushare_endpoint_limits(value: Any) -> Dict[str, int]:
+    """Return a strict, stable endpoint-per-minute limit mapping.
+
+    Endpoint buckets may only tighten the account-wide 450 calls/minute cap.
+    Invalid JSON or ambiguous numeric values fail closed instead of silently
+    disabling quota protection.
+    """
+
+    parsed = value
+    if parsed is None or (isinstance(parsed, str) and not parsed.strip()):
+        return {}
+    if isinstance(parsed, str):
+        try:
+            parsed = json.loads(parsed)
+        except json.JSONDecodeError as exc:
+            raise ValueError("TUSHARE_ENDPOINT_LIMITS_JSON must be valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("TUSHARE_ENDPOINT_LIMITS_JSON must be a JSON object")
+
+    normalized: Dict[str, int] = {}
+    for raw_endpoint, raw_limit in parsed.items():
+        endpoint = str(raw_endpoint or "").strip().lower()
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", endpoint):
+            raise ValueError(
+                "TUSHARE_ENDPOINT_LIMITS_JSON keys must be Tushare endpoint names"
+            )
+        if isinstance(raw_limit, bool) or not isinstance(raw_limit, int):
+            raise ValueError(
+                f"TUSHARE_ENDPOINT_LIMITS_JSON[{endpoint!r}] must be an integer"
+            )
+        if not 1 <= raw_limit <= 450:
+            raise ValueError(
+                f"TUSHARE_ENDPOINT_LIMITS_JSON[{endpoint!r}] must be between 1 and 450"
+            )
+        normalized[endpoint] = raw_limit
+    return dict(sorted(normalized.items()))
+
+
 def parse_tushare_priority(value: Optional[str]) -> Optional[int]:
     """Parse an optional daily-data priority without disabling auto-promotion.
 
@@ -1232,6 +1294,9 @@ class Config:
     durable_worker_health_max_age_seconds: int = 45
     durable_worker_startup_timeout_seconds: int = 120
     tushare_research_enabled: bool = False
+    tushare_global_calls_per_minute: int = 450
+    tushare_max_inflight: int = 2
+    tushare_endpoint_limits: Dict[str, int] = field(default_factory=dict)
     research_factors_enabled: bool = False
     research_evidence_enabled: bool = False
     research_debate_enabled: bool = False
@@ -1401,6 +1466,31 @@ class Config:
             self,
             "database_migration_mode",
             normalized_migration_mode,
+        )
+        object.__setattr__(
+            self,
+            "tushare_global_calls_per_minute",
+            parse_tushare_quota_int(
+                self.tushare_global_calls_per_minute,
+                450,
+                field_name="TUSHARE_GLOBAL_CALLS_PER_MINUTE",
+                maximum=450,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "tushare_max_inflight",
+            parse_tushare_quota_int(
+                self.tushare_max_inflight,
+                2,
+                field_name="TUSHARE_MAX_INFLIGHT",
+                maximum=2,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "tushare_endpoint_limits",
+            normalize_tushare_endpoint_limits(self.tushare_endpoint_limits),
         )
         if self.agent_arch not in self._VALID_AGENT_ARCH:
             _log.warning(
@@ -2255,6 +2345,21 @@ class Config:
                 os.getenv('TUSHARE_RESEARCH_ENABLED'),
                 default=False,
                 field_name='TUSHARE_RESEARCH_ENABLED',
+            ),
+            tushare_global_calls_per_minute=parse_tushare_quota_int(
+                os.getenv('TUSHARE_GLOBAL_CALLS_PER_MINUTE'),
+                450,
+                field_name='TUSHARE_GLOBAL_CALLS_PER_MINUTE',
+                maximum=450,
+            ),
+            tushare_max_inflight=parse_tushare_quota_int(
+                os.getenv('TUSHARE_MAX_INFLIGHT'),
+                2,
+                field_name='TUSHARE_MAX_INFLIGHT',
+                maximum=2,
+            ),
+            tushare_endpoint_limits=normalize_tushare_endpoint_limits(
+                os.getenv('TUSHARE_ENDPOINT_LIMITS_JSON')
             ),
             research_factors_enabled=parse_env_bool_strict(
                 os.getenv('RESEARCH_FACTORS_ENABLED'),
@@ -3262,6 +3367,17 @@ class Config:
                     field=feature_key,
                     code="research_feature_dependency_missing",
                 ))
+
+        if self.tushare_research_enabled and not (self.tushare_token or "").strip():
+            issues.append(ConfigIssue(
+                severity="error",
+                message=(
+                    "TUSHARE_RESEARCH_ENABLED requires TUSHARE_TOKEN; "
+                    "research collection cannot fall back to an unauthenticated provider."
+                ),
+                field="TUSHARE_TOKEN",
+                code="tushare_research_token_missing",
+            ))
 
         gate_mode = (self.portfolio_policy_gate_mode or "off").strip().lower()
         if gate_mode not in PERSONAL_RESEARCH_POLICY_GATE_MODES:

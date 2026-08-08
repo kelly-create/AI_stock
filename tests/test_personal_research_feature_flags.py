@@ -9,6 +9,7 @@ from src.services.system_config_service import SystemConfigService
 
 RESEARCH_ERROR_CODES = {
     "research_feature_dependency_missing",
+    "tushare_research_token_missing",
     "portfolio_policy_gate_mode_invalid",
     "portfolio_policy_gate_dependency_missing",
 }
@@ -24,6 +25,9 @@ def test_personal_research_flags_default_to_compatible_off_state() -> None:
     assert config.durable_worker_health_max_age_seconds == 45
     assert config.durable_worker_startup_timeout_seconds == 120
     assert config.tushare_research_enabled is False
+    assert config.tushare_global_calls_per_minute == 450
+    assert config.tushare_max_inflight == 2
+    assert config.tushare_endpoint_limits == {}
     assert config.research_factors_enabled is False
     assert config.research_evidence_enabled is False
     assert config.research_debate_enabled is False
@@ -50,6 +54,7 @@ def test_complete_research_chain_and_shadow_gate_are_valid() -> None:
         stock_list=["600519"],
         personal_research_enabled=True,
         durable_jobs_enabled=True,
+        tushare_token="test-token",
         tushare_research_enabled=True,
         research_factors_enabled=True,
         research_evidence_enabled=True,
@@ -137,6 +142,98 @@ def test_runtime_env_loader_reads_durable_worker_startup_contract() -> None:
     assert config.durable_worker_startup_timeout_seconds == 75
 
 
+def test_runtime_env_loader_reads_strict_tushare_quota_contract() -> None:
+    with patch.dict(
+        "os.environ",
+        {
+            "STOCK_LIST": "600519",
+            "TUSHARE_GLOBAL_CALLS_PER_MINUTE": "400",
+            "TUSHARE_MAX_INFLIGHT": "1",
+            "TUSHARE_ENDPOINT_LIMITS_JSON": '{"cyq_chips":200,"daily":300}',
+        },
+        clear=True,
+    ), patch("src.config.setup_env"), patch.object(
+        Config,
+        "_parse_litellm_yaml",
+        return_value=[],
+    ):
+        config = Config._load_from_env()
+
+    assert config.tushare_global_calls_per_minute == 400
+    assert config.tushare_max_inflight == 1
+    assert config.tushare_endpoint_limits == {"cyq_chips": 200, "daily": 300}
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "[]",
+        '{"cyq_chips":0}',
+        '{"cyq_chips":451}',
+        '{"cyq_chips":true}',
+        '{"bad endpoint":10}',
+    ],
+)
+def test_runtime_env_loader_rejects_invalid_tushare_endpoint_limits(raw: str) -> None:
+    with patch.dict(
+        "os.environ",
+        {
+            "STOCK_LIST": "600519",
+            "TUSHARE_ENDPOINT_LIMITS_JSON": raw,
+        },
+        clear=True,
+    ), patch("src.config.setup_env"), patch.object(
+        Config,
+        "_parse_litellm_yaml",
+        return_value=[],
+    ):
+        with pytest.raises(ValueError, match="TUSHARE_ENDPOINT_LIMITS_JSON"):
+            Config._load_from_env()
+
+
+@pytest.mark.parametrize(
+    ("field", "raw"),
+    [
+        ("TUSHARE_GLOBAL_CALLS_PER_MINUTE", "3OO"),
+        ("TUSHARE_GLOBAL_CALLS_PER_MINUTE", "451"),
+        ("TUSHARE_GLOBAL_CALLS_PER_MINUTE", "0"),
+        ("TUSHARE_MAX_INFLIGHT", "2.0"),
+        ("TUSHARE_MAX_INFLIGHT", "3"),
+        ("TUSHARE_MAX_INFLIGHT", "0"),
+    ],
+)
+def test_runtime_env_loader_fails_closed_for_invalid_tushare_safety_limits(
+    field: str,
+    raw: str,
+) -> None:
+    with patch.dict(
+        "os.environ",
+        {"STOCK_LIST": "600519", field: raw},
+        clear=True,
+    ), patch("src.config.setup_env"), patch.object(
+        Config,
+        "_parse_litellm_yaml",
+        return_value=[],
+    ):
+        with pytest.raises(ValueError, match=field):
+            Config._load_from_env()
+
+
+def test_tushare_research_requires_an_explicit_token() -> None:
+    config = Config(
+        stock_list=["600519"],
+        personal_research_enabled=True,
+        durable_jobs_enabled=True,
+        tushare_research_enabled=True,
+    )
+
+    issues = config.research_feature_dependency_issues()
+
+    assert [(issue.code, issue.field) for issue in issues] == [
+        ("tushare_research_token_missing", "TUSHARE_TOKEN")
+    ]
+
+
 def test_system_config_cross_field_validation_rejects_incomplete_save() -> None:
     issues = SystemConfigService._validate_cross_field(
         effective_map={
@@ -155,7 +252,7 @@ def test_system_config_cross_field_validation_rejects_incomplete_save() -> None:
     assert research_issues[0]["severity"] == "error"
 
 
-def test_config_registry_exposes_all_nine_rollout_controls() -> None:
+def test_config_registry_exposes_rollout_and_tushare_quota_controls() -> None:
     schema = build_schema_response()
     research_category = next(
         category for category in schema["categories"]
@@ -167,6 +264,9 @@ def test_config_registry_exposes_all_nine_rollout_controls() -> None:
         "PERSONAL_RESEARCH_ENABLED",
         "DURABLE_JOBS_ENABLED",
         "TUSHARE_RESEARCH_ENABLED",
+        "TUSHARE_GLOBAL_CALLS_PER_MINUTE",
+        "TUSHARE_MAX_INFLIGHT",
+        "TUSHARE_ENDPOINT_LIMITS_JSON",
         "RESEARCH_FACTORS_ENABLED",
         "RESEARCH_EVIDENCE_ENABLED",
         "RESEARCH_DEBATE_ENABLED",
@@ -177,8 +277,16 @@ def test_config_registry_exposes_all_nine_rollout_controls() -> None:
     assert all(
         fields[key]["default_value"] == "false"
         for key in fields
-        if key != "PORTFOLIO_POLICY_GATE_MODE"
+        if key not in {
+            "PORTFOLIO_POLICY_GATE_MODE",
+            "TUSHARE_GLOBAL_CALLS_PER_MINUTE",
+            "TUSHARE_MAX_INFLIGHT",
+            "TUSHARE_ENDPOINT_LIMITS_JSON",
+        }
     )
+    assert fields["TUSHARE_GLOBAL_CALLS_PER_MINUTE"]["default_value"] == "450"
+    assert fields["TUSHARE_MAX_INFLIGHT"]["default_value"] == "2"
+    assert fields["TUSHARE_ENDPOINT_LIMITS_JSON"]["default_value"] == "{}"
     gate = get_field_definition("PORTFOLIO_POLICY_GATE_MODE")
     assert gate["default_value"] == "off"
     assert gate["validation"]["enum"] == ["off", "shadow", "enforce"]

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from datetime import datetime, timedelta
 import hashlib
 import json
@@ -18,6 +19,11 @@ from typing import Callable
 import pandas as pd
 import requests
 
+from data_provider.tushare_provider import (
+    DEFAULT_TUSHARE_HTTP_URL as _RESEARCH_TUSHARE_HTTP_URL,
+    build_runtime_tushare_provider,
+    resolve_tushare_api_url_from_env,
+)
 from src.services.screening.source_guard import call_with_timeout, parse_source_timeout_seconds
 
 _DAILY_FEATURE_DEFAULTS = {
@@ -129,7 +135,11 @@ def enrich_daily_features(
     else:
         worker_limit = min(_normalize_max_workers(max_workers), len(fetch_requests))
         with ThreadPoolExecutor(max_workers=worker_limit) as executor:
-            fetched_rows = list(executor.map(fetch_one, fetch_requests))
+            futures = [
+                executor.submit(copy_context().run, fetch_one, request)
+                for request in fetch_requests
+            ]
+            fetched_rows = [future.result() for future in futures]
 
     for idx, features, error, metadata in fetched_rows:
         for flag in str(metadata.get("daily_quality_flags") or "").split(";"):
@@ -648,10 +658,18 @@ def _fetch_daily_tushare(code: str, *, lookback_days: int) -> pd.DataFrame:
     if not token:
         raise RuntimeError("tushare requires TUSHARE_TOKEN")
 
-    import tushare as ts
+    if _tushare_research_enabled():
+        api_url = resolve_tushare_api_url_from_env(
+            default=_RESEARCH_TUSHARE_HTTP_URL
+        )
+        pro = build_runtime_tushare_provider(token=token, api_url=api_url)
+    else:
+        # Feature-flag-off compatibility: retain the historical SDK transport,
+        # default URL, private token assignment, and exception behavior.
+        import tushare as ts
 
-    pro = ts.pro_api(token)
-    _configure_tushare_client(pro, token=token)
+        pro = ts.pro_api(token)
+        _configure_tushare_client(pro, token=token)
 
     start_date = (datetime.now() - timedelta(days=max(lookback_days * 2, 90))).strftime("%Y%m%d")
     end_date = datetime.now().strftime("%Y%m%d")
@@ -688,6 +706,12 @@ def _tushare_token() -> str:
 
 def _has_tushare_token() -> bool:
     return bool(_tushare_token())
+
+
+def _tushare_research_enabled() -> bool:
+    from src.config import get_config
+
+    return bool(getattr(get_config(), "tushare_research_enabled", False))
 
 
 def _configure_tushare_client(pro: object, *, token: str) -> None:

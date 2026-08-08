@@ -2,12 +2,14 @@
 """Regression tests for the production Tushare fundamental adapter."""
 
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor as RealThreadPoolExecutor
 from datetime import date, timedelta
 from threading import Lock
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
+import pytest
 
 from data_provider.tushare_fundamental_adapter import (
     TushareFundamentalAdapter,
@@ -54,6 +56,59 @@ def test_missing_token_is_not_supported_without_building_client() -> None:
     assert result["status"] == "not_supported"
     assert result["valuation"] == {}
     build_client.assert_not_called()
+
+
+def test_preloaded_frames_build_bundle_without_token_or_second_provider_call() -> None:
+    adapter = TushareFundamentalAdapter()
+    trade_date = _compact(date.today() - timedelta(days=1))
+    frames = {
+        "daily_basic": pd.DataFrame(
+            [{"trade_date": trade_date, "pe_ttm": 18.5, "pb": 4.2, "total_mv": 10.0}]
+        )
+    }
+
+    with patch("src.config.get_config") as get_config, patch.object(
+        adapter, "_build_client"
+    ) as build_client, patch.object(adapter, "_fetch_frames") as fetch_frames:
+        result = adapter.get_fundamental_bundle(
+            "600519",
+            preloaded_frames=frames,
+            preloaded_errors=("forecast:permission_denied",),
+        )
+
+    assert result["valuation"]["pe_ratio"] == 18.5
+    assert result["valuation"]["total_mv"] == 100_000.0
+    assert result["errors"] == ["forecast:permission_denied"]
+    get_config.assert_not_called()
+    build_client.assert_not_called()
+    fetch_frames.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("research_enabled", "expected_url"),
+    [
+        (False, "https://legacy.example/tushare"),
+        (True, "https://research.example/tushare"),
+    ],
+)
+def test_fundamental_client_preserves_flag_off_url_compatibility(
+    research_enabled: bool,
+    expected_url: str,
+) -> None:
+    config = SimpleNamespace(tushare_research_enabled=research_enabled)
+    adapter = TushareFundamentalAdapter()
+
+    with patch.dict(
+        "os.environ",
+        {
+            "TUSHARE_API_URL": "https://research.example/tushare",
+            "TUSHARE_HTTP_URL": "https://legacy.example/tushare",
+        },
+        clear=True,
+    ):
+        client = adapter._build_client("demo-token", config=config)
+
+    assert client._api_url == expected_url
 
 
 def test_adapter_normalizes_paid_fundamentals_and_preserves_source_lineage() -> None:
@@ -186,7 +241,18 @@ def test_adapter_normalizes_paid_fundamentals_and_preserves_source_lineage() -> 
     assert not result["errors"]
 
 
-def test_endpoint_failures_are_isolated_and_only_critical_tables_retry() -> None:
+@pytest.mark.parametrize(
+    ("research_enabled", "expected_income_calls", "income_error"),
+    [
+        (False, 2, False),
+        (True, 1, True),
+    ],
+)
+def test_endpoint_retry_contract_follows_research_flag(
+    research_enabled: bool,
+    expected_income_calls: int,
+    income_error: bool,
+) -> None:
     adapter = TushareFundamentalAdapter()
     calls = Counter()
     lock = Lock()
@@ -202,10 +268,52 @@ def test_endpoint_failures_are_isolated_and_only_critical_tables_retry() -> None
                 raise PermissionError("permission denied")
             return pd.DataFrame()
 
-    frames, errors = adapter._fetch_frames(Client(), "600519.SH")
+    frames, errors = adapter._fetch_frames(
+        Client(),
+        "600519.SH",
+        research_enabled=research_enabled,
+    )
 
     assert set(frames) == set(adapter._query_specs("600519.SH"))
-    assert calls["income"] == 2
+    assert calls["income"] == expected_income_calls
     assert calls["forecast"] == 1
-    assert not any(error.startswith("income:") for error in errors)
+    assert (
+        any(error.startswith("income:TimeoutError:") for error in errors)
+        is income_error
+    )
     assert any(error.startswith("forecast:PermissionError:") for error in errors)
+
+
+@pytest.mark.parametrize(
+    ("research_enabled", "expected_workers"),
+    [(False, 8), (True, 2)],
+)
+def test_fundamental_concurrency_contract_follows_research_flag(
+    research_enabled: bool,
+    expected_workers: int,
+) -> None:
+    adapter = TushareFundamentalAdapter()
+    captured_workers: list[int] = []
+
+    class Client:
+        def query(self, _api_name, **_kwargs):
+            return pd.DataFrame()
+
+    def build_pool(*, max_workers: int, thread_name_prefix: str):
+        captured_workers.append(max_workers)
+        return RealThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix=thread_name_prefix,
+        )
+
+    with patch(
+        "data_provider.tushare_fundamental_adapter.ThreadPoolExecutor",
+        side_effect=build_pool,
+    ):
+        adapter._fetch_frames(
+            Client(),
+            "600519.SH",
+            research_enabled=research_enabled,
+        )
+
+    assert captured_workers == [expected_workers]

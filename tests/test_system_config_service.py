@@ -4170,6 +4170,27 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertFalse(validation["valid"])
         self.assertTrue(any(issue["code"] == "invalid_event_rule" for issue in validation["issues"]))
 
+    def test_validate_accepts_strict_tushare_endpoint_limits(self) -> None:
+        validation = self.service.validate(items=[{
+            "key": "TUSHARE_ENDPOINT_LIMITS_JSON",
+            "value": '{"cyq_chips":200,"daily":300}',
+        }])
+
+        self.assertTrue(validation["valid"])
+        self.assertEqual(validation["issues"], [])
+
+    def test_validate_rejects_unsafe_tushare_endpoint_limits(self) -> None:
+        validation = self.service.validate(items=[{
+            "key": "TUSHARE_ENDPOINT_LIMITS_JSON",
+            "value": '{"cyq_chips":451}',
+        }])
+
+        self.assertFalse(validation["valid"])
+        self.assertTrue(any(
+            issue["code"] == "invalid_tushare_endpoint_limits"
+            for issue in validation["issues"]
+        ))
+
     @patch.object(SystemConfigService, "_reload_runtime_singletons")
     def test_update_with_reload_resets_runtime_singletons(
         self,

@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+import pandas as pd
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -391,6 +392,47 @@ class TestFundamentalContext(unittest.TestCase):
         self.assertEqual(result, primary)
         akshare_call.assert_not_called()
 
+    def test_preloaded_research_frames_are_forwarded_without_refetch(self) -> None:
+        manager = DataFetcherManager(fetchers=[])
+        cfg = SimpleNamespace(tushare_token="token", fundamental_fetch_timeout_seconds=9.0)
+        frames = {"daily_basic": pd.DataFrame([{"trade_date": "20260807"}])}
+        primary = {
+            "status": "partial",
+            "valuation": {"pe_ratio": 20.0},
+            "growth": {"revenue_yoy": 8.0},
+            "earnings": {
+                "financial_report": {
+                    "revenue": 100,
+                    "net_profit_parent": 20,
+                }
+            },
+            "institution": {},
+            "source_chain": ["valuation:tushare.daily_basic"],
+            "errors": [],
+        }
+
+        with patch.object(manager, "_get_fundamental_config", return_value=cfg), patch.object(
+            manager._tushare_fundamental_adapter,
+            "get_fundamental_bundle",
+            return_value=primary,
+        ) as tushare_call, patch.object(
+            manager._fundamental_adapter,
+            "get_fundamental_bundle",
+        ) as akshare_call:
+            result = manager._get_cn_fundamental_bundle(
+                "600519",
+                preloaded_tushare_frames=frames,
+                preloaded_tushare_errors=("forecast:permission_denied",),
+            )
+
+        self.assertEqual(result, primary)
+        tushare_call.assert_called_once_with(
+            "600519",
+            preloaded_frames=frames,
+            preloaded_errors=("forecast:permission_denied",),
+        )
+        akshare_call.assert_not_called()
+
     def test_akshare_fills_only_missing_tushare_fundamental_fields(self) -> None:
         manager = DataFetcherManager(fetchers=[])
         cfg = SimpleNamespace(tushare_token="token", fundamental_fetch_timeout_seconds=9.0)
@@ -486,6 +528,79 @@ class TestFundamentalContext(unittest.TestCase):
         self.assertEqual(valuation["data"]["dividend_yield_ttm_pct"], 3.5)
         self.assertTrue(
             any("daily_basic" in item["provider"] for item in valuation["source_chain"])
+        )
+
+    def test_public_preloaded_context_never_refetches_tushare_valuation(self) -> None:
+        manager = DataFetcherManager(fetchers=[])
+        cfg = SimpleNamespace(
+            enable_fundamental_pipeline=True,
+            fundamental_cache_ttl_seconds=0,
+            fundamental_cache_max_entries=8,
+            fundamental_stage_timeout_seconds=3.0,
+            fundamental_fetch_timeout_seconds=1.0,
+            fundamental_auxiliary_timeout_seconds=0.2,
+            fundamental_retry_max=1,
+        )
+        frames = {
+            "daily": pd.DataFrame(
+                [{"trade_date": "20260807", "close": 100.0}]
+            ),
+            "daily_basic": pd.DataFrame(
+                [
+                    {
+                        "trade_date": "20260807",
+                        "pe_ttm": 20.0,
+                        "pb": 3.0,
+                        "total_mv": 123456.0,
+                        "circ_mv": 100000.0,
+                    }
+                ]
+            ),
+        }
+        bundle = {
+            "status": "partial",
+            "valuation": {"pe_ratio": 20.0, "pb_ratio": 3.0},
+            "growth": {},
+            "earnings": {},
+            "institution": {},
+            "source_chain": ["valuation:tushare.daily_basic"],
+            "errors": [],
+        }
+
+        with patch("src.config.get_config", return_value=cfg), patch.object(
+            manager, "get_realtime_quote"
+        ) as live_quote, patch.object(
+            manager, "_get_cn_fundamental_bundle", return_value=bundle
+        ) as bundle_call, patch.object(
+            manager, "get_capital_flow_context", return_value={"status": "not_supported"}
+        ) as capital_flow, patch.object(
+            manager, "get_dragon_tiger_context", return_value={"status": "not_supported"}
+        ) as dragon_tiger, patch.object(
+            manager, "get_board_context", return_value={"status": "not_supported"}
+        ) as boards:
+            context = manager.get_fundamental_context(
+                "600519",
+                preloaded_tushare_frames=frames,
+                preloaded_tushare_errors=("forecast:permission_denied",),
+            )
+
+        live_quote.assert_not_called()
+        capital_flow.assert_not_called()
+        dragon_tiger.assert_not_called()
+        boards.assert_not_called()
+        bundle_call.assert_called_once_with(
+            "600519",
+            preloaded_tushare_frames=frames,
+            preloaded_tushare_errors=("forecast:permission_denied",),
+        )
+        self.assertEqual(context["valuation"]["data"]["pe_ratio"], 20.0)
+        self.assertEqual(context["valuation"]["data"]["total_mv"], 123456.0)
+        self.assertEqual(context["valuation"]["data"]["circ_mv"], 100000.0)
+        self.assertTrue(
+            any(
+                item["provider"] == "research_dataset:daily_basic"
+                for item in context["valuation"]["source_chain"]
+            )
         )
 
     def test_auxiliary_fundamental_stages_use_independent_short_timeout(self) -> None:

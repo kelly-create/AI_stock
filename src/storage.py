@@ -26,6 +26,7 @@ import pandas as pd
 from sqlalchemy import (
     create_engine,
     Column,
+    CHAR,
     String,
     Float,
     Boolean,
@@ -1057,6 +1058,230 @@ class ProviderHealthRecord(Base):
         ),
         Index('ix_provider_health_status_updated', 'status', 'updated_at'),
         Index('ix_provider_health_retry_after_at', 'retry_after_at'),
+    )
+
+
+_RESEARCH_DATA_STATUS_VALUES = (
+    'available',
+    'empty',
+    'partial',
+    'stale',
+    'permission_denied',
+    'not_supported',
+    'fetch_failed',
+)
+_RESEARCH_DATA_STATUS_SQL = ', '.join(
+    f"'{status}'" for status in _RESEARCH_DATA_STATUS_VALUES
+)
+
+
+class ResearchDatasetSnapshotRecord(Base):
+    """Immutable normalized provider dataset available to research jobs."""
+
+    __tablename__ = 'research_dataset_snapshots'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    dataset = Column(String(64), nullable=False)
+    scope_type = Column(String(32), nullable=False)
+    scope_value = Column(String(128), nullable=False)
+    market = Column(String(16), nullable=False)
+    provider = Column(String(64), nullable=False)
+    schema_version = Column(String(64), nullable=False)
+    trade_date = Column(Date, nullable=True)
+    report_date = Column(Date, nullable=True)
+    announcement_date = Column(Date, nullable=True)
+    data_as_of = Column(DateTime, nullable=False)
+    available_at = Column(DateTime, nullable=False)
+    observed_at = Column(DateTime, nullable=False)
+    status = Column(String(32), nullable=False)
+    normalized_json = Column(Text, nullable=True)
+    content_hash = Column(CHAR(64), nullable=False)
+    raw_ref_json = Column(Text, nullable=True)
+    error_code = Column(String(64), nullable=True)
+    error_message_sanitized = Column(Text, nullable=True)
+    supersedes_hash = Column(String(64), nullable=True)
+    origin_job_id = Column(
+        String(64),
+        ForeignKey('analysis_jobs.task_id', ondelete='SET NULL'),
+        nullable=True,
+    )
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=text('CURRENT_TIMESTAMP'),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            f'status IN ({_RESEARCH_DATA_STATUS_SQL})',
+            name='ck_research_dataset_snapshots_status',
+        ),
+        CheckConstraint(
+            "status IN ('permission_denied', 'not_supported', 'fetch_failed') "
+            'OR normalized_json IS NOT NULL',
+            name='ck_research_dataset_snapshots_payload_required',
+        ),
+        CheckConstraint(
+            'length(content_hash) = 64',
+            name='ck_research_dataset_snapshots_hash_length',
+        ),
+        Index(
+            'uix_research_dataset_snapshots_content_hash',
+            'content_hash',
+            unique=True,
+        ),
+        Index(
+            'ix_research_dataset_snapshots_dataset_scope_asof',
+            'dataset',
+            'scope_type',
+            'scope_value',
+            'data_as_of',
+            'id',
+        ),
+        Index(
+            'ix_research_dataset_snapshots_scope_available',
+            'scope_type',
+            'scope_value',
+            'available_at',
+            'id',
+        ),
+    )
+
+
+class ResearchFactorSnapshotRecord(Base):
+    """Immutable output of the deterministic research factor engines."""
+
+    __tablename__ = 'research_factor_snapshots'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    stock_code = Column(String(16), nullable=False)
+    market = Column(String(16), nullable=False)
+    company_profile = Column(String(32), nullable=False)
+    primary_horizon = Column(
+        Integer,
+        nullable=False,
+        server_default=text('10'),
+    )
+    engine_bundle_version = Column(String(64), nullable=False)
+    value_score = Column(Float, nullable=True)
+    quality_score = Column(Float, nullable=True)
+    trend_score = Column(Float, nullable=True)
+    catalyst_score = Column(Float, nullable=True)
+    risk_penalty = Column(Float, nullable=True)
+    factor_json = Column(Text, nullable=False)
+    input_dataset_hashes_json = Column(Text, nullable=False)
+    status = Column(String(32), nullable=False)
+    coverage = Column(Float, nullable=False)
+    unknowns_json = Column(Text, nullable=False)
+    as_of = Column(DateTime, nullable=False)
+    available_at = Column(DateTime, nullable=False)
+    content_hash = Column(CHAR(64), nullable=False)
+    origin_job_id = Column(
+        String(64),
+        ForeignKey('analysis_jobs.task_id', ondelete='SET NULL'),
+        nullable=True,
+    )
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=text('CURRENT_TIMESTAMP'),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            f'status IN ({_RESEARCH_DATA_STATUS_SQL})',
+            name='ck_research_factor_snapshots_status',
+        ),
+        CheckConstraint(
+            'primary_horizon > 0',
+            name='ck_research_factor_snapshots_horizon',
+        ),
+        CheckConstraint(
+            'coverage >= 0 AND coverage <= 1',
+            name='ck_research_factor_snapshots_coverage',
+        ),
+        CheckConstraint(
+            '(value_score IS NULL OR (value_score >= 0 AND value_score <= 100)) '
+            'AND (quality_score IS NULL OR (quality_score >= 0 AND quality_score <= 100)) '
+            'AND (trend_score IS NULL OR (trend_score >= 0 AND trend_score <= 100)) '
+            'AND (catalyst_score IS NULL OR (catalyst_score >= 0 AND catalyst_score <= 100)) '
+            'AND (risk_penalty IS NULL OR (risk_penalty >= 0 AND risk_penalty <= 100))',
+            name='ck_research_factor_snapshots_scores',
+        ),
+        CheckConstraint(
+            'length(content_hash) = 64',
+            name='ck_research_factor_snapshots_hash_length',
+        ),
+        Index(
+            'uix_research_factor_snapshots_content_hash',
+            'content_hash',
+            unique=True,
+        ),
+        Index(
+            'ix_research_factor_snapshots_stock_asof',
+            'stock_code',
+            'as_of',
+        ),
+        Index(
+            'ix_research_factor_snapshots_stock_profile_asof',
+            'stock_code',
+            'company_profile',
+            'as_of',
+        ),
+    )
+
+
+class ResearchSnapshotRecord(Base):
+    """Immutable, versioned AnalysisContextPack research snapshot."""
+
+    __tablename__ = 'research_snapshots'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    stock_code = Column(String(16), nullable=False)
+    market = Column(String(16), nullable=False)
+    snapshot_version = Column(String(64), nullable=False)
+    field_dictionary_version = Column(String(64), nullable=False)
+    factor_engine_version = Column(String(64), nullable=False)
+    pack_version = Column(String(64), nullable=False)
+    prompt_version = Column(String(64), nullable=False)
+    policy_version = Column(String(64), nullable=False)
+    model_route_fingerprint = Column(String(128), nullable=False)
+    as_of = Column(DateTime, nullable=False)
+    available_at = Column(DateTime, nullable=False)
+    status = Column(String(32), nullable=False)
+    canonical_json = Column(Text, nullable=False)
+    snapshot_hash = Column(CHAR(64), nullable=False)
+    factor_snapshot_hash = Column(String(64), nullable=True)
+    origin_job_id = Column(
+        String(64),
+        ForeignKey('analysis_jobs.task_id', ondelete='SET NULL'),
+        nullable=True,
+    )
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=text('CURRENT_TIMESTAMP'),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            f'status IN ({_RESEARCH_DATA_STATUS_SQL})',
+            name='ck_research_snapshots_status',
+        ),
+        CheckConstraint(
+            'length(snapshot_hash) = 64',
+            name='ck_research_snapshots_hash_length',
+        ),
+        Index(
+            'uix_research_snapshots_snapshot_hash',
+            'snapshot_hash',
+            unique=True,
+        ),
+        Index(
+            'ix_research_snapshots_stock_asof',
+            'stock_code',
+            'as_of',
+        ),
     )
 
 
@@ -3426,7 +3651,9 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         self, 
         df: pd.DataFrame, 
         code: str,
-        data_source: str = "Unknown"
+        data_source: str = "Unknown",
+        *,
+        lease_fence: Optional[Any] = None,
     ) -> int:
         """
         保存日线数据到数据库
@@ -3478,6 +3705,33 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         batch_dates = list(records_by_date.keys())
 
         def _write(session: Session) -> int:
+            if lease_fence is not None:
+                job_id = str(getattr(lease_fence, 'job_id', '') or '').strip()
+                worker_id = str(getattr(lease_fence, 'worker_id', '') or '').strip()
+                lease_token = str(
+                    getattr(lease_fence, 'lease_token', '') or ''
+                ).strip()
+                if not job_id or not worker_id or not lease_token:
+                    raise ValueError(
+                        'lease_fence must expose job_id, worker_id, and lease_token'
+                    )
+                live_job_id = session.execute(
+                    select(AnalysisJobRecord.task_id).where(
+                        AnalysisJobRecord.task_id == job_id,
+                        AnalysisJobRecord.status == 'processing',
+                        AnalysisJobRecord.cancel_requested_at.is_(None),
+                        AnalysisJobRecord.lease_owner == worker_id,
+                        AnalysisJobRecord.lease_token == lease_token,
+                        AnalysisJobRecord.lease_expires_at.is_not(None),
+                        AnalysisJobRecord.lease_expires_at > utc_naive_now(),
+                    )
+                ).scalar_one_or_none()
+                if live_job_id is None:
+                    from src.services.durable_jobs import StaleLeaseError
+
+                    raise StaleLeaseError(
+                        'daily data write rejected after durable lease loss'
+                    )
             if self._is_sqlite_engine:
                 # SQLite has a per-statement bind-parameter limit (commonly 999).
                 # Each record has ~15 columns, so chunk upserts to stay within bounds.
@@ -3593,13 +3847,20 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         """
         if target_date is None:
             target_date = date.today()
-        # 注意：尽管入参提供了 target_date，但当前实现实际使用的是“最新两天数据”（get_latest_data），
-        # 并不会按 target_date 精确取当日/前一交易日的上下文。
-        # 因此若未来需要支持“按历史某天复盘/重算”的可解释性，这里需要调整。
-        # 该行为目前保留（按需求不改逻辑）。
-        
-        # 获取最近2天数据
-        recent_data = self.get_latest_data(code, days=2)
+        # Treat target_date as a strict knowledge boundary. Historical replay
+        # must not consume bars written after that date.
+        with self.get_session() as session:
+            recent_data = list(
+                session.execute(
+                    select(StockDaily)
+                    .where(
+                        StockDaily.code == code,
+                        StockDaily.date <= target_date,
+                    )
+                    .order_by(StockDaily.date.desc())
+                    .limit(2)
+                ).scalars().all()
+            )
         
         if not recent_data:
             logger.warning(f"未找到 {code} 的数据")
@@ -4407,6 +4668,11 @@ _PR1_DURABLE_TABLES = (
     NotificationOutboxRecord.__table__,
     ProviderHealthRecord.__table__,
 )
+_PR2_RESEARCH_TABLES = (
+    ResearchDatasetSnapshotRecord.__table__,
+    ResearchFactorSnapshotRecord.__table__,
+    ResearchSnapshotRecord.__table__,
+)
 _PR1_EXTENSION_INDEX_NAMES = {
     'ix_llm_usage_job_stage_called_at',
     'ix_llm_usage_trace_called_at',
@@ -4672,6 +4938,186 @@ def _apply_pr1_durable_jobs_schema(connection) -> None:
                 index.create(bind=connection, checkfirst=True)
 
     _verify_pr1_durable_schema_contract(connection)
+
+
+def _normalize_sql_default(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = _normalize_sql_contract(str(value))
+    while normalized.startswith('(') and normalized.endswith(')'):
+        normalized = normalized[1:-1].strip()
+    if len(normalized) >= 2 and normalized[0] == normalized[-1] == "'":
+        normalized = normalized[1:-1]
+    return normalized
+
+
+def _verify_pr2_research_schema_contract(connection) -> None:
+    """Fail closed when an immutable research table drifts from its contract."""
+
+    existing_tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).all()
+    }
+    missing_tables = sorted(
+        {table.name for table in _PR2_RESEARCH_TABLES}.difference(existing_tables)
+    )
+    if missing_tables:
+        raise RuntimeError(
+            'PR2 research schema is incomplete: missing tables='
+            + ','.join(missing_tables)
+        )
+
+    for table in _PR2_RESEARCH_TABLES:
+        pragma_rows = connection.exec_driver_sql(
+            f"PRAGMA table_info('{table.name}')"
+        ).all()
+        actual_columns = {row[1]: row for row in pragma_rows}
+        expected_columns = {column.name: column for column in table.columns}
+        missing_columns = sorted(set(expected_columns).difference(actual_columns))
+        unexpected_columns = sorted(set(actual_columns).difference(expected_columns))
+        if missing_columns or unexpected_columns:
+            raise RuntimeError(
+                f'PR2 research schema table {table.name} has incompatible columns: '
+                f'missing={missing_columns}, unexpected={unexpected_columns}'
+            )
+
+        for column_name, column in expected_columns.items():
+            actual = actual_columns[column_name]
+            actual_type = _normalize_sql_contract(actual[2])
+            expected_type = _normalize_sql_contract(
+                column.type.compile(dialect=connection.dialect)
+            )
+            if actual_type != expected_type:
+                raise RuntimeError(
+                    f'PR2 research schema column {table.name}.{column_name} '
+                    f'has type {actual[2]!r}; expected {expected_type!r}'
+                )
+            if not column.primary_key and bool(actual[3]) != (not column.nullable):
+                raise RuntimeError(
+                    f'PR2 research schema column {table.name}.{column_name} '
+                    'has incompatible nullability'
+                )
+            actual_default = _normalize_sql_default(actual[4])
+            expected_default = _normalize_sql_default(
+                column.server_default.arg if column.server_default is not None else None
+            )
+            if actual_default != expected_default:
+                raise RuntimeError(
+                    f'PR2 research schema column {table.name}.{column_name} '
+                    f'has default {actual_default!r}; expected {expected_default!r}'
+                )
+
+        expected_indexes = {index.name: index for index in table.indexes}
+        index_rows = {
+            row[1]: row
+            for row in connection.exec_driver_sql(
+                f"PRAGMA index_list('{table.name}')"
+            ).all()
+            if not str(row[1]).startswith('sqlite_autoindex_')
+        }
+        if set(index_rows) != set(expected_indexes):
+            raise RuntimeError(
+                f'PR2 research schema table {table.name} has incompatible indexes: '
+                f'actual={sorted(index_rows)}, expected={sorted(expected_indexes)}'
+            )
+        for index_name, index in expected_indexes.items():
+            actual = index_rows[index_name]
+            actual_columns_for_index = tuple(
+                row[2]
+                for row in connection.exec_driver_sql(
+                    f"PRAGMA index_info('{index_name}')"
+                ).all()
+            )
+            expected_columns_for_index = tuple(
+                column.name for column in index.columns
+            )
+            if (
+                actual_columns_for_index != expected_columns_for_index
+                or bool(actual[2]) != bool(index.unique)
+                or bool(actual[4])
+            ):
+                raise RuntimeError(
+                    f'PR2 research schema index {index_name} is incompatible: '
+                    f'columns={actual_columns_for_index}, unique={bool(actual[2])}, '
+                    f'partial={bool(actual[4])}'
+                )
+
+        table_sql_row = connection.exec_driver_sql(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table.name,),
+        ).first()
+        table_sql = _normalize_sql_contract(table_sql_row[0] if table_sql_row else '')
+        for constraint in table.constraints:
+            if not isinstance(constraint, CheckConstraint):
+                continue
+            predicate = _normalize_sql_contract(str(constraint.sqltext))
+            if (
+                not constraint.name
+                or constraint.name.lower() not in table_sql
+                or predicate not in table_sql
+            ):
+                raise RuntimeError(
+                    f'PR2 research schema table {table.name} is missing check '
+                    f'{constraint.name}'
+                )
+
+        expected_foreign_keys = {
+            (
+                foreign_key.column.table.name,
+                foreign_key.parent.name,
+                foreign_key.column.name,
+                str(foreign_key.ondelete or '').upper(),
+            )
+            for foreign_key in table.foreign_keys
+        }
+        actual_foreign_keys = {
+            (row[2], row[3], row[4], str(row[6]).upper())
+            for row in connection.exec_driver_sql(
+                f"PRAGMA foreign_key_list('{table.name}')"
+            ).all()
+        }
+        if actual_foreign_keys != expected_foreign_keys:
+            raise RuntimeError(
+                f'PR2 research schema table {table.name} has incompatible foreign keys: '
+                f'actual={sorted(actual_foreign_keys)}, '
+                f'expected={sorted(expected_foreign_keys)}'
+            )
+
+
+def run_pr2_research_schema_upgrade(engine) -> None:
+    """Create and verify PR2 immutable research tables in one transaction."""
+
+    if engine.url.get_backend_name() != 'sqlite':
+        raise RuntimeError('PR2 research migration only supports SQLite')
+
+    with engine.connect() as connection:
+        connection.exec_driver_sql('BEGIN IMMEDIATE')
+        try:
+            _apply_pr2_research_schema(connection)
+        except BaseException:
+            connection.rollback()
+            raise
+        else:
+            connection.commit()
+
+
+def _apply_pr2_research_schema(connection) -> None:
+    """Apply PR2 DDL on a caller-owned explicit SQLite transaction."""
+
+    analysis_jobs_exists = connection.exec_driver_sql(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'analysis_jobs'"
+    ).first()
+    if analysis_jobs_exists is None:
+        raise RuntimeError(
+            'PR2 research migration requires the PR1 analysis_jobs table'
+        )
+
+    for table in _PR2_RESEARCH_TABLES:
+        table.create(bind=connection, checkfirst=True)
+
+    _verify_pr2_research_schema_contract(connection)
 
 
 class _StorageSchemaConvergence(DatabaseManager):

@@ -48,7 +48,7 @@ from src.agent.protocols import (
     normalize_stage_failure_reason,
 )
 from src.agent.skills.defaults import is_skill_agent_name
-from src.agent.skills.engine import EvidencePartition, StrategyEngine, StrategyResult, StrategyResultStatus
+from src.agent.skills.engine import StrategyEngine, StrategyResultStatus
 from src.agent.skills.scheduler import AgentSkillScheduler, SkillBatchResult
 from src.agent.risk_override import (
     RiskOverrideApplication,
@@ -122,6 +122,7 @@ class AgentOrchestrator:
         mode: str = "standard",
         skill_manager=None,
         config=None,
+        research_snapshot_locked: bool = False,
     ):
         self.tool_registry = tool_registry
         self.llm_adapter = llm_adapter
@@ -132,6 +133,7 @@ class AgentOrchestrator:
         self.mode = normalized_mode if normalized_mode in VALID_MODES else "standard"
         self.skill_manager = skill_manager
         self.config = config
+        self.research_snapshot_locked = bool(research_snapshot_locked)
         self.strategy_engine = StrategyEngine()
 
     def _get_timeout_seconds(self) -> int:
@@ -261,7 +263,6 @@ class AgentOrchestrator:
             runtime_facts=build_agent_runtime_facts(ctx) if ctx is not None else None,
         )
 
-
     def _prepare_agent(self, agent: Any) -> Any:
         """Apply orchestrator-level runtime settings to a child agent.
 
@@ -284,6 +285,10 @@ class AgentOrchestrator:
             else:
                 # Default or lowered — keep per-agent limit as ceiling.
                 agent.max_steps = min(agent.max_steps, self.max_steps)
+        if self.research_snapshot_locked and hasattr(agent, "memory"):
+            # Mutable analysis/outcome memory is outside the frozen Research
+            # Snapshot. Disable it for this task-scoped execution contract.
+            agent.memory.enabled = False
         return agent
 
     def _callable_accepts_timeout_kwarg(self, func: Any) -> Optional[bool]:
@@ -348,6 +353,163 @@ class AgentOrchestrator:
     # -----------------------------------------------------------------
     # Public interface (mirrors AgentExecutor)
     # -----------------------------------------------------------------
+
+    @property
+    def timeout_seconds(self) -> Optional[float]:
+        value = self._get_timeout_seconds()
+        return float(value) if value > 0 else None
+
+    def build_research_snapshot_prompt(
+        self,
+        task: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Return the frozen multi-agent prompt and execution contract.
+
+        Later stages incorporate earlier model opinions. Those opinions are
+        outputs, not new evidence. In research-snapshot mode the task-scoped
+        registry is empty and mutable AgentMemory is disabled, so every stage
+        consumes only this frozen context plus prior stage outputs.
+        """
+
+        ctx = self._build_context(task, context)
+        ctx.meta["response_mode"] = "dashboard"
+        stage_contracts = []
+        for agent in self._build_agent_chain(ctx):
+            stage_contracts.append(
+                {
+                    "stage": agent.agent_name,
+                    "messages": agent._build_messages(ctx),
+                    "max_steps": agent.max_steps,
+                }
+            )
+        prompt_contract = {
+            "architecture": "multi-agent",
+            "mode": self.mode,
+            "task": task,
+            "stage_contracts": stage_contracts,
+            "skill_instructions": self.skill_instructions,
+            "technical_skill_policy": self.technical_skill_policy,
+            "tool_declarations": self.tool_registry.to_openai_tools(),
+            "max_steps": self.max_steps,
+            "timeout_seconds": self.timeout_seconds,
+        }
+        if self.mode == "specialist":
+            prompt_contract["specialist_contract"] = (
+                self._build_specialist_research_contract(ctx)
+            )
+        return prompt_contract
+
+    @staticmethod
+    def _source_fingerprint(*values: Any) -> str:
+        from src.services.research.code_fingerprint import fingerprint_code
+
+        return fingerprint_code(*values, version="specialist-prompt-code-v1")
+
+    def _build_specialist_research_contract(
+        self,
+        ctx: AgentContext,
+    ) -> Dict[str, Any]:
+        """Freeze every static input that can shape a dynamic specialist prompt."""
+
+        from src.agent.skills.router import SkillRouter
+        from src.agent.skills.skill_agent import SkillAgent
+
+        manager = self.skill_manager
+        skills = list(manager.list_skills()) if manager is not None else []
+        skills_by_id = {
+            str(getattr(skill, "name", "") or "").strip(): skill
+            for skill in skills
+            if str(getattr(skill, "name", "") or "").strip()
+        }
+        requested = ctx.meta.get("skills_requested") or ctx.meta.get(
+            "strategies_requested",
+            [],
+        )
+        requested_ids = sorted(
+            {
+                str(skill_id).strip()
+                for skill_id in requested
+                if str(skill_id).strip()
+            }
+        )
+        manual_ids = sorted(
+            {
+                str(skill_id).strip()
+                for skill_id in (
+                    getattr(self.config, "agent_skills", []) or []
+                )
+                if str(skill_id).strip()
+            }
+        )
+        potential_ids = sorted(set(skills_by_id) | set(requested_ids) | set(manual_ids))
+        catalog = []
+        for skill_id in potential_ids:
+            skill = skills_by_id.get(skill_id)
+            catalog.append(
+                {
+                    "skill_id": skill_id,
+                    "display_name": str(getattr(skill, "display_name", skill_id)),
+                    "description": str(getattr(skill, "description", "")),
+                    "instructions": str(getattr(skill, "instructions", "")),
+                    "category": str(getattr(skill, "category", "")),
+                    "core_rules": list(getattr(skill, "core_rules", []) or []),
+                    "required_tools": list(
+                        getattr(skill, "required_tools", []) or []
+                    ),
+                    "allowed_tools": list(
+                        getattr(skill, "allowed_tools", []) or []
+                    ),
+                    "aliases": list(getattr(skill, "aliases", []) or []),
+                    "enabled": bool(getattr(skill, "enabled", False)),
+                    "user_invocable": bool(
+                        getattr(skill, "user_invocable", True)
+                    ),
+                    "default_active": bool(
+                        getattr(skill, "default_active", False)
+                    ),
+                    "default_router": bool(
+                        getattr(skill, "default_router", False)
+                    ),
+                    "default_priority": int(
+                        getattr(skill, "default_priority", 100) or 100
+                    ),
+                    "market_regimes": list(
+                        getattr(skill, "market_regimes", []) or []
+                    ),
+                    "preferred_model": str(
+                        getattr(skill, "preferred_model", "")
+                    ),
+                    "system_prompt": SkillAgent.render_system_prompt(
+                        skill_id,
+                        skill,
+                    ),
+                }
+            )
+        return {
+            "version": "specialist-prompt-contract-v1",
+            "router": {
+                "mode": str(
+                    getattr(self.config, "agent_skill_routing", "auto") or "auto"
+                ),
+                "manual_skill_ids": manual_ids,
+                "requested_skill_ids": requested_ids,
+                "max_selected": 4,
+                "policy_fingerprint": self._source_fingerprint(SkillRouter),
+            },
+            "prompt_builder_fingerprint": self._source_fingerprint(
+                SkillAgent.render_system_prompt,
+                SkillAgent.build_user_message,
+            ),
+            "scheduler": {
+                "max_concurrency": self._get_skill_concurrency(),
+                "timeout_seconds": self._get_sub_agent_timeout_map().get(
+                    "skill",
+                    0.0,
+                ),
+            },
+            "skills": catalog,
+        }
 
     def run(self, task: str, context: Optional[Dict[str, Any]] = None) -> "AgentResult":
         """Run the multi-agent pipeline for a dashboard analysis.
@@ -817,7 +979,22 @@ class AgentOrchestrator:
                 skill_instructions=self.skill_instructions,
                 technical_skill_policy=self.technical_skill_policy,
             )
-            router = SkillRouter()
+            frozen_skills = (
+                list(self.skill_manager.list_skills())
+                if self.skill_manager is not None
+                else None
+            )
+            router = SkillRouter(
+                routing_mode=getattr(
+                    self.config,
+                    "agent_skill_routing",
+                    None,
+                ),
+                manual_skill_ids=list(
+                    getattr(self.config, "agent_skills", []) or []
+                ),
+                available_skills=frozen_skills,
+            )
             selected = router.select_skills(ctx, max_count=4)
             if not selected:
                 return []
@@ -825,10 +1002,24 @@ class AgentOrchestrator:
             from src.agent.skills.skill_agent import SkillAgent
             agents = []
             for skill_id in selected:
+                frozen_skill = (
+                    self.skill_manager.get(skill_id)
+                    if self.skill_manager is not None
+                    else None
+                )
+                if self.research_snapshot_locked and frozen_skill is None:
+                    logger.warning(
+                        "[Orchestrator] frozen specialist skill %r is unavailable; skipping",
+                        skill_id,
+                    )
+                    continue
                 agent = self._prepare_agent(SkillAgent(
                     skill_id=skill_id,
                     **common_kwargs,
                 ))
+                if frozen_skill is not None:
+                    agent._skill = frozen_skill
+                    agent.tool_names = list(frozen_skill.required_tools or [])
                 agents.append(agent)
             return agents
         except Exception as exc:

@@ -57,6 +57,8 @@
 | --- | --- |
 | [部署指南](DEPLOY.md) | 服务器部署、Docker、systemd、Supervisor 等部署方式 |
 | [SQLite 在线备份与恢复](operations/sqlite-backup.md) | 在线一致性备份、严格校验、隔离恢复与生产替换 |
+| [研究原始数据保留与清理](operations/research-raw-retention.md) | 30/90 天分级保留、dry-run、停写 apply、完整性校验与 staging 恢复 |
+| [研究原始数据归档与取证恢复](operations/research-raw-backup.md) | 与 SQLite 备份绑定的 raw 归档、严格校验、隔离恢复与 15 分钟 RTO 演练 |
 | [云端 WebUI 部署](deploy-webui-cloud.md) | 云服务器访问 WebUI 的部署说明 |
 | [Zeabur 部署](docker/zeabur-deployment.md) | Zeabur 平台部署说明 |
 | [桌面端打包说明](desktop-package.md) | Electron 桌面端和 Web 构建产物打包说明 |

@@ -67,9 +67,31 @@ Outbox 只保存投递所需的最小目标。静态渠道凭据始终从运行�
 
 Flag 关闭时，Bot 保持原来的同步、`TaskService` 和后台线程路径。Flag 开启时，`/analyze`、`/batch`、`/market`、`/ask`、`/research` 只提交版本化任务并立即返回任务 ID，最终结果经 Outbox 回推。飞书和 Telegram 仅保存 `platform`、`chat_id`、`message_id`；钉钉临时 Session Webhook 无法安全跨进程保存，因此会在提交前明确拒绝且不创建任务。
 
+## PR2 Tushare 研究数据与确定性因子
+
+启用 `TUSHARE_RESEARCH_ENABLED` 后，所有 Tushare Pro 请求统一经过 Durable Worker 内的共享 Provider。账号级滚动总桶默认 450 次/分钟，实际在途请求最多 2；端点限额只能进一步收紧，不能与总桶叠加放宽。Worker 启动时会在 SQLite 旁非阻塞获取 `*.tushare-owner.lock` 跨进程独占锁，第二个 Worker 直接拒绝启动；锁文件保持 0 字节，进程崩溃后的残留文件本身不代表锁仍被占用。`TUSHARE_TOKEN` 缺失会被启动依赖检查阻断，429 会保留 `Retry-After`，鉴权、权限、超时、连接、响应格式和业务错误分别记录，API、Scheduler 与同步筛选路径不得绕过 Worker 直连。
+
+共享 Provider 在线程锁内累计真实 transport 调用数、成功/失败、返回行数、总计与平均延迟、峰值在途数、60 秒窗口调用数，并按端点和错误类型分组；快照不包含 Token 或 URL。研究运行时按状态变化、最多每 5 秒一次以及每次采集结束的边界将这些指标合并投影到 `provider_health` 的 `kind=provider`、`provider_key=tushare`、`scope=account` 记录。健康投影失败只影响观测且会在下次重试，不改写已冻结数据或因子结果。
+
+| 配置 | 默认值 | 说明 |
+| --- | --- | --- |
+| `TUSHARE_GLOBAL_CALLS_PER_MINUTE` | `450` | 全账号共享的 60 秒滚动上限 |
+| `TUSHARE_MAX_INFLIGHT` | `2` | 全账号物理在途请求上限 |
+| `TUSHARE_ENDPOINT_LIMITS_JSON` | `{}` | 可选端点分钟上限，只能比总桶更严格 |
+
+研究数据按不可变快照写入 `research_dataset_snapshots`，显式区分 `available`、`empty`、`partial`、`stale`、`permission_denied`、`not_supported` 和 `fetch_failed`。财务数据以公告日期确定 `available_at`，筹码数据按股票和交易日增量采集；任何晚于研究知识时点的数据都不会进入因子或快照。Value、Quality、Trend、Catalyst、Risk 因子完全由确定性代码计算，不调用 LLM，并区分缺失与不适用。
+
+一旦本轮创建 `PreparedResearch`，`prepared.as_of` 就是后续上下文、Prompt 和 LLM 的唯一知识边界。Pipeline 只复用本轮冻结的名称、日线、估值、财务和筹码数据，并按该日期读取本地日线；当前实时报价、未版本化的搜索/社交/本地资讯、当前组合状态、板块排行和 AkShare 辅助补洞不会混入 Research Snapshot，缺失项保持缺失。外部文本在非研究旧路径中也只能作为不可信数据进入固定哨兵区，围栏、伪角色和内嵌指令会被转义且不能覆盖 system 指令。
+
+冻结后的因子和实际消费数据分别写入 `research_factor_snapshots` 与 `research_snapshots`。`GET /api/v1/research/factors/{stock_code}`、`GET /api/v1/research/snapshots/{snapshot_hash}` 和 `GET /api/v1/research/datasets/{stock_code}` 仅用于查询；功能开关关闭后仍可读取历史。数据集查询默认只返回摘要，只有显式 `detail=true` 才返回标准化数据。
+
+原始研究文件存放于 `data/research/raw/`，SQLite 在线备份不包含该目录。需要完整恢复能力时，必须按[研究原始数据归档与取证恢复](operations/research-raw-backup.md)把原始目录与对应 SQLite 备份成对归档；即使原始文件按保留策略清理，不可变 Research Snapshot 仍保留当次实际消费的标准化值。
+
+`scripts/fetch_tushare_stock_list.py` 是离线管理员维护工具，保留历史 Tushare SDK 契约，不属于 Durable Worker 账号桶。生产执行前必须停止研究 Worker，并避免与在线采集并行；正常分析、筛选任务和 Scheduler 不得以该脚本绕过统一 Provider。
+
 ## 备份与恢复
 
-生产切换前使用 [SQLite 在线备份、校验与恢复](operations/sqlite-backup.md) 创建带 SHA-256、Schema/Index hash、核心表计数、`quick_check` 和外键检查的备份对。PR1 默认核心表包括任务、事件、Outbox 和组件健康表，恢复演练不得只验证业务报告表。
+生产切换前使用 [SQLite 在线备份、校验与恢复](operations/sqlite-backup.md) 创建带 SHA-256、Schema/Index hash、核心表计数、`quick_check` 和外键检查的备份对，再按[研究原始数据归档与取证恢复](operations/research-raw-backup.md)创建与该 SQLite 哈希及引用集合绑定的 raw 归档。恢复演练必须执行 SQLite 严格校验与异名隔离恢复、raw 严格校验与隔离恢复，并通过 `RawArtifactStore` 抽样回读；记录数据库大小、raw 文件数与字节数、运行环境及总耗时，目标 RTO 不超过 15 分钟。PR1 默认核心表包括任务、事件、Outbox 和组件健康表，恢复演练不得只验证业务报告表。
 
 ## 功能开关和依赖
 

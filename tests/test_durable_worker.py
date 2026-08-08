@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, ConfigDict
 
+from data_provider.tushare_provider import TushareRateLimitError
 from src.config import Config
 from src.services.durable_job_handlers import (
     BotAskPayload,
@@ -178,6 +179,7 @@ def test_worker_executes_up_to_configured_concurrency_with_context_and_flow_even
     active = 0
     max_active = 0
     diagnostic_seen: dict[str, dict[str, Any]] = {}
+    execution_contexts: dict[str, Any] = {}
 
     def handler(payload: ProbePayload) -> dict[str, Any]:
         nonlocal active, max_active
@@ -209,6 +211,7 @@ def test_worker_executes_up_to_configured_concurrency_with_context_and_flow_even
         )
         with lock:
             diagnostic_seen[context.job_id] = diagnostic.snapshot()
+            execution_contexts[context.job_id] = context
             active += 1
             max_active = max(max_active, active)
             if active == 2:
@@ -241,6 +244,7 @@ def test_worker_executes_up_to_configured_concurrency_with_context_and_flow_even
 
     assert max_active == 2
     assert set(diagnostic_seen) == {"probe-a", "probe-b"}
+    assert all(context.lease_lost.is_set() for context in execution_contexts.values())
     assert get_current_diagnostic_context() is None
     first = store.get_job("probe-a")
     second = store.get_job("probe-b")
@@ -842,6 +846,16 @@ def test_nested_transport_failure_remains_retryable_but_auth_and_permission_do_n
     malformed_retry_after = classify_job_exception(HttpError(429, retry_after="not-a-date"))
     assert malformed_retry_after.retryable is True
     assert malformed_retry_after.retry_after is None
+
+
+def test_tushare_typed_rate_limit_preserves_retry_after() -> None:
+    disposition = classify_job_exception(
+        TushareRateLimitError("Tushare daily rate limited", retry_after=19.5)
+    )
+
+    assert disposition.error_code == "rate_limited"
+    assert disposition.retryable is True
+    assert disposition.retry_after == 19.5
 
 
 def test_error_sanitization_redacts_headers_urls_query_tokens_and_credentials() -> None:

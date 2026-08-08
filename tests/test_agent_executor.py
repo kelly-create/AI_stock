@@ -189,6 +189,35 @@ def test_agent_system_prompts_require_phase_decision_contract() -> None:
 class TestAgentExecutor(unittest.TestCase):
     """Test the ReAct loop logic."""
 
+    def test_run_consumes_the_exact_messages_exposed_for_snapshotting(self):
+        registry = ToolRegistry()
+        adapter = _make_mock_adapter()
+        executor = AgentExecutor(
+            registry,
+            adapter,
+            skill_instructions="value-quality-v1",
+            max_steps=1,
+        )
+        context = {
+            "stock_code": "600519",
+            "report_type": "simple",
+            "report_language": "zh",
+            "analysis_context_pack_summary": "[research snapshot]",
+        }
+        expected = executor.build_initial_messages("Analyze", context=context)
+        captured = {}
+
+        def fake_run_loop(messages, tool_decls, parse_dashboard):
+            captured["messages"] = messages
+            return AgentResult(success=True, content="{}", dashboard={})
+
+        with patch.object(executor, "_run_loop", side_effect=fake_run_loop):
+            executor.run("Analyze", context=context)
+
+        self.assertEqual(captured["messages"], expected)
+        self.assertEqual(captured["messages"][0]["role"], "system")
+        self.assertEqual(captured["messages"][1]["role"], "user")
+
     def test_unsupported_tool_calling_response_is_not_treated_as_agent_success(self):
         executed_calls = []
         registry = ToolRegistry()

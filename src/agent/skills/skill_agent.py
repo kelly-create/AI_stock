@@ -53,13 +53,16 @@ class SkillAgent(BaseAgent):
             logger.warning("[SkillAgent] failed to load skill '%s': %s", skill_id, exc)
         return None
 
-    def system_prompt(self, ctx: AgentContext) -> str:
-        if self._skill:
-            instructions = self._skill.instructions or self._skill.description
-            display = self._skill.display_name
+    @staticmethod
+    def render_system_prompt(skill_id: str, skill=None) -> str:
+        """Render the deterministic specialist system prompt without runtime state."""
+
+        if skill:
+            instructions = skill.instructions or skill.description
+            display = skill.display_name
         else:
-            instructions = f"Evaluate the '{self.skill_id}' skill."
-            display = self.skill_id
+            instructions = f"Evaluate the '{skill_id}' skill."
+            display = skill_id
 
         return f"""\
 You are a **Skill Evaluation Agent** applying the **{display}** skill.
@@ -74,7 +77,7 @@ criteria. Use tools if needed to verify data points.
 ## Output Format
 Return **only** a JSON object:
 {{
-  "skill_id": "{self.skill_id}",
+  "skill_id": "{skill_id}",
   "signal": "strong_buy|buy|hold|sell|strong_sell",
   "confidence": 0.0-1.0,
   "conditions_met": ["list of satisfied conditions"],
@@ -83,6 +86,9 @@ Return **only** a JSON object:
   "reasoning": "2-3 sentence skill evaluation"
 }}
 """
+
+    def system_prompt(self, ctx: AgentContext) -> str:
+        return self.render_system_prompt(self.skill_id, self._skill)
 
     def build_user_message(self, ctx: AgentContext) -> str:
         parts = [

@@ -8,6 +8,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
+
 from tests.litellm_stub import ensure_litellm_stub
 
 ensure_litellm_stub()
@@ -46,7 +48,7 @@ class TestTushareHttpClient(unittest.TestCase):
             ),
         )
 
-        with patch("data_provider.tushare_fetcher.requests.post", return_value=response) as post_mock:
+        with patch("data_provider.tushare_provider.requests.post", return_value=response) as post_mock:
             df = client.daily(ts_code="600519.SH", start_date="20260320", end_date="20260325")
 
         post_mock.assert_called_once_with(
@@ -86,6 +88,7 @@ class TestResolveTushareHttpUrl(unittest.TestCase):
     def test_unset_returns_none(self) -> None:
         with patch.dict("os.environ", {}, clear=False):
             import os
+            os.environ.pop("TUSHARE_API_URL", None)
             os.environ.pop("TUSHARE_HTTP_URL", None)
             self.assertIsNone(_resolve_tushare_http_url())
 
@@ -100,6 +103,35 @@ class TestResolveTushareHttpUrl(unittest.TestCase):
     def test_https_url_returned(self) -> None:
         with patch.dict("os.environ", {"TUSHARE_HTTP_URL": "https://gw.example.com/tushare"}):
             self.assertEqual(_resolve_tushare_http_url(), "https://gw.example.com/tushare")
+
+    def test_legacy_trailing_slash_is_preserved_byte_for_byte(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"TUSHARE_HTTP_URL": "  https://gw.example.com/tushare/  "},
+            clear=True,
+        ):
+            self.assertEqual(
+                _resolve_tushare_http_url(),
+                "https://gw.example.com/tushare/",
+            )
+
+    def test_api_url_alias_is_ignored_by_legacy_resolution(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "TUSHARE_API_URL": " HTTPS://GW.EXAMPLE.COM:443/tushare/ ",
+                "TUSHARE_HTTP_URL": "https://other.example/tushare",
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                _resolve_tushare_http_url(),
+                "https://other.example/tushare",
+            )
+            self.assertEqual(
+                _resolve_tushare_http_url(include_api_alias=True),
+                "https://gw.example.com/tushare",
+            )
 
     def test_missing_schema_raises_value_error(self) -> None:
         # 防止有人误填纯主机名（如 'api.tushare.pro'）后被 requests 当成相对路径
@@ -184,7 +216,7 @@ class TestTushareFetcherCustomHttpUrl(unittest.TestCase):
             ),
         )
 
-        with patch("data_provider.tushare_fetcher.requests.post", return_value=response) as post_mock:
+        with patch("data_provider.tushare_provider.requests.post", return_value=response) as post_mock:
             fetcher._api.daily(ts_code="600519.SH", start_date="20260320", end_date="20260325")
 
         post_mock.assert_called_once_with(
@@ -201,6 +233,84 @@ class TestTushareFetcherCustomHttpUrl(unittest.TestCase):
             },
             timeout=30,
         )
+
+    def test_feature_flag_controls_api_alias_without_changing_legacy_http_url(self) -> None:
+        cases = (
+            (
+                False,
+                {"TUSHARE_HTTP_URL": "https://legacy.example/tushare/"},
+                "https://legacy.example/tushare/",
+            ),
+            (
+                False,
+                {
+                    "TUSHARE_API_URL": "https://research.example/tushare",
+                    "TUSHARE_HTTP_URL": "https://legacy.example/tushare",
+                },
+                "https://legacy.example/tushare",
+            ),
+            (
+                True,
+                {
+                    "TUSHARE_API_URL": "https://research.example/tushare",
+                    "TUSHARE_HTTP_URL": "https://legacy.example/tushare",
+                },
+                "https://research.example/tushare",
+            ),
+            (
+                False,
+                {"TUSHARE_API_URL": "https://research.example/tushare"},
+                "http://api.tushare.pro",
+            ),
+            (
+                True,
+                {"TUSHARE_API_URL": "https://research.example/tushare"},
+                "https://research.example/tushare",
+            ),
+            (False, {}, "http://api.tushare.pro"),
+            (True, {}, "http://api.tushare.pro"),
+        )
+
+        for research_enabled, env, expected_url in cases:
+            config = SimpleNamespace(
+                tushare_token="demo-token",
+                tushare_research_enabled=research_enabled,
+            )
+            with self.subTest(research_enabled=research_enabled, env=env), patch(
+                "data_provider.tushare_fetcher.get_config",
+                return_value=config,
+            ), patch.dict("os.environ", env, clear=True):
+                fetcher = TushareFetcher()
+
+            self.assertEqual(fetcher._api._api_url, expected_url)
+
+
+class TestTushareDailyNormalization(unittest.TestCase):
+    def test_public_daily_frame_normalizer_matches_legacy_hook(self) -> None:
+        raw = pd.DataFrame(
+            [
+                {
+                    "ts_code": "600519.SH",
+                    "trade_date": "20260807",
+                    "open": 100.0,
+                    "high": 110.0,
+                    "low": 99.0,
+                    "close": 108.0,
+                    "pct_chg": 8.0,
+                    "vol": 12.5,
+                    "amount": 34.5,
+                }
+            ]
+        )
+        fetcher = object.__new__(TushareFetcher)
+
+        public = TushareFetcher.normalize_daily_frame(raw, "600519")
+        legacy = fetcher._normalize_data(raw, "600519")
+
+        pd.testing.assert_frame_equal(public, legacy)
+        self.assertEqual(public.loc[0, "volume"], 1250.0)
+        self.assertEqual(public.loc[0, "amount"], 34500.0)
+        self.assertIn("trade_date", raw.columns)
 
 
 if __name__ == "__main__":

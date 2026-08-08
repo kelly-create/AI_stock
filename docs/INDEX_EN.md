@@ -57,6 +57,8 @@ This is the entry point for project documentation. The README covers the project
 | --- | --- |
 | [Deploy Guide (EN)](DEPLOY_EN.md) | Server deployment, Docker, systemd, Supervisor, and related options |
 | [SQLite Online Backup And Restore](operations/sqlite-backup.md) <sub><sub>![P1 Badge](https://img.shields.io/badge/P1-yellow?style=flat)</sub></sub> (Chinese-only) | Consistent online backup, strict verification, isolated restore, and production replacement |
+| [Research Raw Retention And Cleanup](operations/research-raw-retention.md) | 30/90-day retention, dry-run, write-quiesced apply, integrity checks, and staging recovery |
+| [Research Raw Archive And Forensic Restore](operations/research-raw-backup_EN.md) | SQLite-bound raw archives, strict verification, isolated restore, and a 15-minute RTO drill |
 | [Cloud WebUI Deployment](deploy-webui-cloud.md) <sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub> (Chinese-only) | Cloud server WebUI access and deployment notes |
 | [Zeabur Deployment](docker/zeabur-deployment.md) <sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub> (Chinese-only) | Zeabur platform deployment |
 | [Desktop Packaging](desktop-package.md) <sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub> (Chinese-only) | Electron desktop app and Web artifact packaging |

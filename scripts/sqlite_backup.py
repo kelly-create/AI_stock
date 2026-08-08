@@ -42,6 +42,9 @@ DEFAULT_BACKUP_CORE_TABLES = DEFAULT_CORE_TABLES + (
     "job_events",
     "notification_outbox",
     "provider_health",
+    "research_dataset_snapshots",
+    "research_factor_snapshots",
+    "research_snapshots",
 )
 
 

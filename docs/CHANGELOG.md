@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] PR2 冻结研究路径以 `prepared.as_of` 为唯一知识边界：不再混入当前实时报价、未版本化搜索/社交/本地资讯、当前组合状态或 AkShare 辅助补洞；日线 ContextPack 拒绝未来日期，模型网关路径凭据不落快照，传统与 Agent 提示统一隔离并转义不可信外部内容。
+- [改进] 新增研究原始数据分级保留与显式清理工具：行情保留 30 日、搜索/新闻保留 90 日、财务/事件及未知数据集长期保留；默认 dry-run，停写 apply 绑定 active `DATABASE_PATH`、数据库相邻 raw root 与单 Worker owner 锁，并对重复抓取、共享内容哈希、缺失/损坏引用、路径穿越及 staging 清理失败执行保守保护。
+- [新功能] 新增与 SQLite 备份哈希及研究引用集合绑定的 `research/raw` 完整归档、严格校验与隔离恢复工具；恢复演练覆盖 SQLite 异名恢复、raw 抽样回读和总耗时记录，以可执行流程验证 15 分钟恢复目标。
 - [新功能] PR1 新增长生命周期持久任务 Worker 与 durable Compose profile；现有 `analyzer` 在 durable 模式下等待 Worker 数据库心跳后只入队，事件监控和 Decision Signal Outcome 也统一入队，API readiness 不依赖 Worker，关闭开关时保留原有进程内路径且不启动 Worker。
 - [新功能] PR1 任务事件支持 `Last-Event-ID` 断线续传与安全取消，通知改为逐渠道 Outbox 并以 `delivery_unknown` 避免崩溃后自动重发；Bot 分析命令统一入队，新增带完整性 manifest 的 SQLite 在线备份与隔离恢复工具。
 - [修复] 收敛 PR0 配置与容器契约：System Config 正确识别并展示个人投研分类，SQLite 单例在释放失败时仍可安全复位，报告模板随镜像发布并纳入 `docker-app-source-v2` 漂移清单；CI 同时覆盖 PR 与直接推送 `main`。
@@ -59,6 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [文档] FAQ 补充 macOS 桌面应用被 Gatekeeper quarantine 阻止启动时的受信任安装包临时放行步骤（refs #2113）。
 - [新功能] LLM 渠道新增显式 Chat Completions / Responses API Surface，支持 Anspire GPT-5.6 系列等 Responses-only 模型，并统一连接测试、主分析、筛选、图片识别与状态诊断路由；所有运行路径先按同一规则解析协议再校验 Surface，混合 Surface 的同名路由按未知能力保守处理；显式 Anspire 渠道独占共享 Key，非法 Surface 或协议不匹配时不会把该 Key 回退为旧版 Chat 部署，同时保留无关的 Gemini/OpenAI 等 legacy provider；本地 loopback 渠道可在图片识别路径继续无 Key 调用，远端渠道仍要求凭据；禁用渠道不会因残留 Surface 配置阻断其他兼容 fallback；Web 编辑器不会静默改写非法历史值，并允许将 Hermes 非法 Surface 修复为 Chat Completions。
 - [修复] 将 Responses 渠道的协议、模型 provider、公开 route alias 与 wire-model 构造收敛为统一路由契约，保存校验、运行时加载、状态诊断、选股入口和 Web 编辑器共同使用当前安装的 LiteLLM provider registry，拒绝 `openai` 协议下显式非 OpenAI provider 的模型、拒绝同一 alias 混用 Chat/Responses，并保留 OpenAI-compatible 网关自有的带斜杠模型 ID。
+- [新功能] 新增 PR2 Tushare 统一 Provider、不可变研究数据/因子/研究快照与只读 Research API；所有研究调用在 Durable Worker 内共享 450 次/分钟总桶和 2 个在途请求上限，确定性 Value、Quality、Trend、Catalyst、Risk 因子严格区分缺失与不适用，并在 LLM 调用前冻结可审计 Snapshot Hash。
 
 ## [3.29.0] - 2026-08-02
 

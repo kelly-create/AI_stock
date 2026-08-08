@@ -31,6 +31,10 @@ from src.market_phase_prompt import format_market_phase_prompt_section
 from src.market_structure_prompt import format_market_structure_prompt_section
 from src.report_language import normalize_report_language
 from src.services.daily_market_context import format_daily_market_context_prompt_section
+from src.services.untrusted_external_content import (
+    UNTRUSTED_EXTERNAL_CONTENT_SYSTEM_INSTRUCTION,
+    format_untrusted_external_content,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -176,8 +180,13 @@ class BaseAgent(ABC):
 
     def _build_messages(self, ctx: AgentContext) -> List[Dict[str, Any]]:
         """Assemble the initial messages list for the LLM."""
+        report_language = normalize_report_language(ctx.meta.get("report_language", "zh"))
+        system_prompt = (
+            f"{self.system_prompt(ctx)}\n\n## External Content Boundary (highest priority)\n\n"
+            f"{UNTRUSTED_EXTERNAL_CONTENT_SYSTEM_INSTRUCTION}\n"
+        )
         messages: List[Dict[str, Any]] = [
-            {"role": "system", "content": self.system_prompt(ctx)},
+            {"role": "system", "content": system_prompt},
         ]
 
         history = ctx.meta.get("conversation_history")
@@ -190,7 +199,6 @@ class BaseAgent(ABC):
                 if role in {"user", "assistant", "system"} and isinstance(content, str) and content:
                     messages.append({"role": role, "content": content})
 
-        report_language = normalize_report_language(ctx.meta.get("report_language", "zh"))
         market_phase_section = format_market_phase_prompt_section(
             ctx.meta.get("market_phase_context"),
             report_language=report_language,
@@ -235,13 +243,20 @@ class BaseAgent(ABC):
         parts: List[str] = []
         for key, value in ctx.data.items():
             if value is not None:
-                try:
-                    serialised = json.dumps(value, ensure_ascii=False, default=str)
-                except (TypeError, ValueError):
-                    serialised = str(value)
-                # Cap per-field size to avoid overwhelming the context window
-                if len(serialised) > 8000:
-                    serialised = serialised[:8000] + "...(truncated)"
+                if key == "news_context":
+                    serialised = format_untrusted_external_content(
+                        value,
+                        label="news_context",
+                        max_chars=8000,
+                    )
+                else:
+                    try:
+                        serialised = json.dumps(value, ensure_ascii=False, default=str)
+                    except (TypeError, ValueError):
+                        serialised = str(value)
+                    # Cap per-field size to avoid overwhelming the context window
+                    if len(serialised) > 8000:
+                        serialised = serialised[:8000] + "...(truncated)"
                 parts.append(f"[Pre-fetched: {key}]\n{serialised}")
         memory_context = self._build_memory_context(ctx)
         if memory_context:

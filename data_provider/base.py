@@ -17,10 +17,11 @@
 import logging
 import random
 import time
+from contextvars import copy_context
 from threading import BoundedSemaphore, RLock, Thread
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import Callable, Optional, List, Tuple, Dict, Any
+from typing import Callable, Optional, List, Tuple, Dict, Any, Mapping, Sequence
 
 import pandas as pd
 import numpy as np
@@ -2591,7 +2592,13 @@ class DataFetcherManager:
                 except ValueError:
                     pass
 
-        worker = Thread(target=runner, daemon=True, name=f"fundamental-{task_name}")
+        worker_context = copy_context()
+        worker = Thread(
+            target=worker_context.run,
+            args=(runner,),
+            daemon=True,
+            name=f"fundamental-{task_name}",
+        )
         try:
             worker.start()
         except Exception as exc:
@@ -2703,7 +2710,13 @@ class DataFetcherManager:
         )
         return merged
 
-    def _get_cn_fundamental_bundle(self, stock_code: str) -> Dict[str, Any]:
+    def _get_cn_fundamental_bundle(
+        self,
+        stock_code: str,
+        *,
+        preloaded_tushare_frames: Optional[Mapping[str, pd.DataFrame]] = None,
+        preloaded_tushare_errors: Optional[Sequence[str]] = None,
+    ) -> Dict[str, Any]:
         """Use Tushare fundamentals first and fill critical gaps via AkShare."""
         config = self._get_fundamental_config()
         token = str(getattr(config, "tushare_token", "") or "").strip()
@@ -2715,7 +2728,14 @@ class DataFetcherManager:
             tushare_adapter = TushareFundamentalAdapter()
             self._tushare_fundamental_adapter = tushare_adapter
         try:
-            primary = tushare_adapter.get_fundamental_bundle(stock_code)
+            if preloaded_tushare_frames is None and preloaded_tushare_errors is None:
+                primary = tushare_adapter.get_fundamental_bundle(stock_code)
+            else:
+                primary = tushare_adapter.get_fundamental_bundle(
+                    stock_code,
+                    preloaded_frames=preloaded_tushare_frames,
+                    preloaded_errors=preloaded_tushare_errors,
+                )
         except Exception as exc:
             primary = {
                 "status": "failed",
@@ -2736,6 +2756,12 @@ class DataFetcherManager:
                 "source_chain": [],
                 "errors": ["tushare_fundamental:invalid_payload"],
             }
+
+        if preloaded_tushare_frames is not None or preloaded_tushare_errors is not None:
+            # A preloaded bundle is already the complete, as-of bounded research
+            # evidence set. Missing fields stay missing; a live AkShare gap-fill
+            # would silently mix newer data into the immutable snapshot.
+            return primary
 
         earnings = primary.get("earnings", {})
         earnings = earnings if isinstance(earnings, dict) else {}
@@ -3032,11 +3058,16 @@ class DataFetcherManager:
             )
         else:
             quote_payload, valuation_err, valuation_ms = None, "fundamental stage timeout", 0
+        def _quote_value(name: str) -> Any:
+            if isinstance(quote_payload, Mapping):
+                return quote_payload.get(name)
+            return getattr(quote_payload, name, None) if quote_payload else None
+
         valuation_payload = {
-            "pe_ratio": getattr(quote_payload, "pe_ratio", None) if quote_payload else None,
-            "pb_ratio": getattr(quote_payload, "pb_ratio", None) if quote_payload else None,
-            "total_mv": getattr(quote_payload, "total_mv", None) if quote_payload else None,
-            "circ_mv": getattr(quote_payload, "circ_mv", None) if quote_payload else None,
+            "pe_ratio": _quote_value("pe_ratio"),
+            "pb_ratio": _quote_value("pb_ratio"),
+            "total_mv": _quote_value("total_mv"),
+            "circ_mv": _quote_value("circ_mv"),
         }
         valuation_status = self._infer_block_status(
             valuation_payload,
@@ -3257,7 +3288,10 @@ class DataFetcherManager:
     def get_fundamental_context(
         self,
         stock_code: str,
-        budget_seconds: Optional[float] = None
+        budget_seconds: Optional[float] = None,
+        *,
+        preloaded_tushare_frames: Optional[Mapping[str, pd.DataFrame]] = None,
+        preloaded_tushare_errors: Optional[Sequence[str]] = None,
     ) -> Dict[str, Any]:
         """
         Aggregate fundamental blocks with fail-open semantics.
@@ -3292,7 +3326,11 @@ class DataFetcherManager:
             float(getattr(config, "fundamental_auxiliary_timeout_seconds", 4.0)),
         )
 
-        cache_ttl = int(config.fundamental_cache_ttl_seconds)
+        cache_ttl = (
+            0
+            if preloaded_tushare_frames is not None
+            else int(config.fundamental_cache_ttl_seconds)
+        )
         cache_max_entries = max(0, int(getattr(config, "fundamental_cache_max_entries", 256)))
         cache_key = self._get_fundamental_cache_key(stock_code, stage_timeout)
         if cache_ttl > 0:
@@ -3325,8 +3363,43 @@ class DataFetcherManager:
             nonlocal remaining_seconds
             remaining_seconds = max(0.0, remaining_seconds - consumed_ms / 1000.0)
 
+        valuation_provider = "realtime_quote"
+        preloaded_valuation: Optional[Dict[str, Any]] = None
+        if preloaded_tushare_frames is not None:
+            daily_basic = preloaded_tushare_frames.get("daily_basic")
+            daily = preloaded_tushare_frames.get("daily")
+
+            def _latest_preloaded_row(frame: Any) -> Dict[str, Any]:
+                if not isinstance(frame, pd.DataFrame) or frame.empty:
+                    return {}
+                work = frame.copy()
+                if "trade_date" in work.columns:
+                    work = work.sort_values("trade_date", ascending=False)
+                return dict(work.iloc[0].to_dict())
+
+            valuation_row = _latest_preloaded_row(daily_basic)
+            price_row = _latest_preloaded_row(daily)
+            if valuation_row or price_row:
+                preloaded_valuation = {
+                    "price": price_row.get("close"),
+                    "pe_ratio": valuation_row.get("pe_ttm", valuation_row.get("pe")),
+                    "pb_ratio": valuation_row.get("pb"),
+                    "total_mv": valuation_row.get("total_mv"),
+                    "circ_mv": valuation_row.get("circ_mv"),
+                }
+
         valuation_timeout = min(fetch_timeout, remaining_seconds)
-        if valuation_timeout > 0:
+        if preloaded_tushare_frames is not None:
+            # The collector already froze daily/daily_basic at the job's as_of
+            # boundary.  Re-querying a live quote here would both consume the
+            # account bucket and mix a newer price into an immutable snapshot.
+            quote_payload, valuation_err, valuation_ms = (
+                preloaded_valuation,
+                None,
+                0,
+            )
+            valuation_provider = "research_dataset:daily_basic"
+        elif valuation_timeout > 0:
             quote_payload, valuation_err, valuation_ms = self._run_with_retry(
                 lambda: self.get_realtime_quote(stock_code),
                 valuation_timeout,
@@ -3336,11 +3409,16 @@ class DataFetcherManager:
         else:
             quote_payload, valuation_err, valuation_ms = None, "fundamental stage timeout", 0
 
+        def _quote_value(name: str) -> Any:
+            if isinstance(quote_payload, Mapping):
+                return quote_payload.get(name)
+            return getattr(quote_payload, name, None) if quote_payload else None
+
         valuation_payload = {
-            "pe_ratio": getattr(quote_payload, "pe_ratio", None) if quote_payload else None,
-            "pb_ratio": getattr(quote_payload, "pb_ratio", None) if quote_payload else None,
-            "total_mv": getattr(quote_payload, "total_mv", None) if quote_payload else None,
-            "circ_mv": getattr(quote_payload, "circ_mv", None) if quote_payload else None,
+            "pe_ratio": _quote_value("pe_ratio"),
+            "pb_ratio": _quote_value("pb_ratio"),
+            "total_mv": _quote_value("total_mv"),
+            "circ_mv": _quote_value("circ_mv"),
         }
         valuation_status = self._infer_block_status(
             valuation_payload,
@@ -3352,8 +3430,8 @@ class DataFetcherManager:
             valuation_status,
             valuation_payload,
             self._normalize_source_chain(
-                [{"provider": "realtime_quote", "result": valuation_status, "duration_ms": valuation_ms}],
-                "realtime_quote",
+                [{"provider": valuation_provider, "result": valuation_status, "duration_ms": valuation_ms}],
+                valuation_provider,
                 valuation_status,
                 valuation_ms,
             ),
@@ -3369,7 +3447,11 @@ class DataFetcherManager:
         else:
             bundle_timeout = min(fetch_timeout, remaining_seconds)
             bundle_payload, bundle_err_msg, bundle_ms = self._run_with_retry(
-                lambda: self._get_cn_fundamental_bundle(stock_code),
+                lambda: self._get_cn_fundamental_bundle(
+                    stock_code,
+                    preloaded_tushare_frames=preloaded_tushare_frames,
+                    preloaded_tushare_errors=preloaded_tushare_errors,
+                ),
                 bundle_timeout,
                 "fundamental_bundle",
             )
@@ -3495,8 +3577,24 @@ class DataFetcherManager:
             institution_errors,
         )
 
-        # capital flow
-        if is_etf:
+        # Unversioned auxiliary providers are deliberately excluded when a
+        # research collection is supplied. They otherwise mix current AkShare
+        # state into the immutable Tushare knowledge boundary.
+        if preloaded_tushare_frames is not None:
+            for block_name in ("capital_flow", "dragon_tiger", "boards"):
+                result_ctx[block_name] = self._build_fundamental_block(
+                    "not_supported",
+                    {},
+                    [
+                        {
+                            "provider": "research_snapshot",
+                            "result": "not_supported",
+                            "duration_ms": 0,
+                        }
+                    ],
+                    ["unfrozen auxiliary data excluded from research snapshot"],
+                )
+        elif is_etf:
             result_ctx["capital_flow"] = self._build_fundamental_block(
                 "not_supported",
                 {},

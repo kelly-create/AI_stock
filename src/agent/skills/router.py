@@ -25,6 +25,25 @@ logger = logging.getLogger(__name__)
 class SkillRouter:
     """Select applicable skills for a given analysis context."""
 
+    def __init__(
+        self,
+        *,
+        routing_mode: Optional[str] = None,
+        manual_skill_ids: Optional[List[str]] = None,
+        available_skills: Optional[list] = None,
+    ) -> None:
+        self._routing_mode_override = (
+            str(routing_mode).strip().lower() if routing_mode is not None else None
+        )
+        self._manual_skill_ids_override = (
+            tuple(str(item).strip() for item in manual_skill_ids if str(item).strip())
+            if manual_skill_ids is not None
+            else None
+        )
+        self._available_skills_override = (
+            tuple(available_skills) if available_skills is not None else None
+        )
+
     def select_skills(
         self,
         ctx: AgentContext,
@@ -35,13 +54,17 @@ class SkillRouter:
             logger.info("[SkillRouter] user-requested skills: %s", requested_skills)
             return requested_skills[:max_count]
 
-        routing_mode = self._get_routing_mode()
+        routing_mode = (
+            self._routing_mode_override
+            if self._routing_mode_override is not None
+            else self._get_routing_mode()
+        )
         if routing_mode == "manual":
-            selected = self._get_manual_skills(max_count=max_count)
+            selected = self._select_manual_skills(max_count=max_count)
             logger.info("[SkillRouter] manual mode — using skills: %s", selected)
             return selected
 
-        available_skills = self._get_available_skills()
+        available_skills = self._available_skills()
         skill_catalog = available_skills or None
         available_ids = {skill.name for skill in available_skills}
         regime = self._detect_regime(ctx)
@@ -63,6 +86,29 @@ class SkillRouter:
         )
         logger.info("[SkillRouter] using default skills: %s", default_skills)
         return default_skills
+
+    def _available_skills(self) -> list:
+        if self._available_skills_override is not None:
+            return list(self._available_skills_override)
+        return self._get_available_skills()
+
+    def _select_manual_skills(self, *, max_count: int) -> List[str]:
+        if self._manual_skill_ids_override is None:
+            return self._get_manual_skills(max_count=max_count)
+        available_skills = self._available_skills()
+        available = {skill.name for skill in available_skills}
+        selected = [
+            skill_id
+            for skill_id in self._manual_skill_ids_override
+            if not available or skill_id in available
+        ][:max_count]
+        if selected:
+            return selected
+        return get_default_router_skill_ids(
+            available_skills or None,
+            max_count=max_count,
+            available_skill_ids=available or None,
+        )
 
     def select_strategies(
         self,

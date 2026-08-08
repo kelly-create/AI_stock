@@ -23,6 +23,7 @@ from src.services.run_diagnostics import (
     current_diagnostic_snapshot,
     record_provider_run,
     reset_run_diagnostic_context,
+    update_current_diagnostic_snapshot_hash,
 )
 from src.services.task_queue import AnalysisTaskQueue, TaskInfo, TaskStatus
 
@@ -215,6 +216,16 @@ class RunDiagnosticsP1TestCase(unittest.TestCase):
         message = snapshot["provider_runs"][0]["error_message_sanitized"]
         self.assertNotIn("secret", message)
         self.assertNotIn("example.com/webhook", message)
+
+    def test_research_snapshot_hash_updates_the_active_context(self) -> None:
+        token = activate_run_diagnostic_context(trace_id="trace-research")
+        try:
+            update_current_diagnostic_snapshot_hash("a" * 64)
+            snapshot = current_diagnostic_snapshot()
+        finally:
+            reset_run_diagnostic_context(token)
+
+        self.assertEqual(snapshot["snapshot_hash"], "a" * 64)
 
     def test_diagnostic_event_sink_receives_provider_llm_history_and_notification_events(self) -> None:
         events = []

@@ -77,6 +77,14 @@ DEFAULT_LEASE_SECONDS = 90
 DEFAULT_MAX_ATTEMPTS = 4  # initial attempt plus three retries
 DEFAULT_EVENT_RETENTION_DAYS = 30
 DEFAULT_EVENT_LIMIT_PER_JOB = 1000
+_DURABLE_STATE_EVENT_TYPES = frozenset(
+    {
+        "research_reference_time",
+        "research_dataset_snapshot",
+        "research_factor_snapshot",
+        "research_snapshot",
+    }
+)
 DEFAULT_RETRY_BASE_SECONDS = 2.0
 
 
@@ -1283,7 +1291,23 @@ class DurableJobStore:
     ) -> int:
         session.flush()
         cutoff = now - timedelta(days=self.event_retention_days)
-        conditions = [JobEventRecord.created_at < cutoff]
+        # Research bindings are resumable job state, not an activity log.  An
+        # old binding must therefore survive while its job can still be
+        # claimed/reclaimed.  It becomes age-prunable only after both the
+        # binding and its terminal parent completion cross the retention
+        # boundary.  Ordinary events retain the existing global age policy.
+        old_terminal_job_ids = select(AnalysisJobRecord.task_id).where(
+            AnalysisJobRecord.status.in_(TERMINAL_JOB_STATUSES),
+            AnalysisJobRecord.completed_at.is_not(None),
+            AnalysisJobRecord.completed_at < cutoff,
+        )
+        conditions = [
+            JobEventRecord.created_at < cutoff,
+            or_(
+                JobEventRecord.event_type.not_in(_DURABLE_STATE_EVENT_TYPES),
+                JobEventRecord.job_id.in_(old_terminal_job_ids),
+            ),
+        ]
         if job_id is not None:
             conditions.append(JobEventRecord.job_id == job_id)
         expired = session.execute(
@@ -1301,7 +1325,12 @@ class DurableJobStore:
         for current_job_id in job_ids:
             keep_ids = (
                 select(JobEventRecord.id)
-                .where(JobEventRecord.job_id == current_job_id)
+                .where(
+                    JobEventRecord.job_id == current_job_id,
+                    JobEventRecord.event_type.not_in(
+                        _DURABLE_STATE_EVENT_TYPES
+                    ),
+                )
                 .order_by(JobEventRecord.id.desc())
                 .limit(self.event_limit_per_job)
             )
@@ -1309,6 +1338,9 @@ class DurableJobStore:
                 delete(JobEventRecord)
                 .where(
                     JobEventRecord.job_id == current_job_id,
+                    JobEventRecord.event_type.not_in(
+                        _DURABLE_STATE_EVENT_TYPES
+                    ),
                     JobEventRecord.id.not_in(keep_ids),
                 )
                 .execution_options(synchronize_session=False)

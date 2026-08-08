@@ -39,6 +39,7 @@ except ImportError:  # pragma: no cover - POSIX
 BASELINE_SCHEMA_VERSION = "2026-06-05-create-all-baseline"
 PR0_CONVERGENCE_SCHEMA_VERSION = "2026-08-07-pr0-schema-convergence"
 PR1_DURABLE_JOBS_SCHEMA_VERSION = "2026-08-08-pr1-durable-jobs"
+PR2_RESEARCH_DATA_SCHEMA_VERSION = "2026-08-08-pr2-research-data"
 
 
 class MigrationError(RuntimeError):
@@ -97,6 +98,14 @@ def _upgrade_pr1_durable_jobs_schema(engine: Engine) -> None:
     run_pr1_durable_jobs_schema_upgrade(engine)
 
 
+def _upgrade_pr2_research_data_schema(engine: Engine) -> None:
+    """Install the immutable research dataset/factor/pack snapshot contract."""
+
+    from src.storage import run_pr2_research_schema_upgrade
+
+    run_pr2_research_schema_upgrade(engine)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=BASELINE_SCHEMA_VERSION,
@@ -118,6 +127,14 @@ MIGRATIONS: tuple[Migration, ...] = (
             "health, and cross-record idempotency/trace columns"
         ),
         apply=_upgrade_pr1_durable_jobs_schema,
+    ),
+    Migration(
+        version=PR2_RESEARCH_DATA_SCHEMA_VERSION,
+        description=(
+            "Add immutable research dataset, deterministic factor, and "
+            "versioned research pack snapshots"
+        ),
+        apply=_upgrade_pr2_research_data_schema,
     ),
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version

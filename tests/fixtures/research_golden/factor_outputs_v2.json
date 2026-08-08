@@ -1,0 +1,144 @@
+{
+  "fixture_version": "research-factor-golden-v2",
+  "policy_version": "factor-policy-v1",
+  "as_of": "2025-06-30T18:00:00+08:00",
+  "profile_comp_types": {
+    "industrial": 1,
+    "bank": 2,
+    "insurance": 3,
+    "securities": 4
+  },
+  "bars_recipe": {
+    "count": 300,
+    "initial_price": 100.0,
+    "daily_drift": 0.0008,
+    "wave_radians": 0.41,
+    "volatility": 0.012,
+    "initial_volume": 1000000.0,
+    "daily_volume_increment": 1000.0,
+    "completed": true
+  },
+  "fundamentals": {
+    "industrial": {
+      "pe_ttm": 18.0,
+      "pb": 3.2,
+      "ps_ttm": 2.5,
+      "dividend_yield": 3.2,
+      "roe": 20.0,
+      "gross_margin": 42.0,
+      "net_margin": 18.0,
+      "revenue_growth": 14.0,
+      "profit_growth": 22.0,
+      "debt_to_assets": 38.0
+    },
+    "bank": {
+      "pe_ttm": 6.0,
+      "pb": 0.65,
+      "dividend_yield": 6.0,
+      "roe": 12.0,
+      "net_interest_margin": 2.1,
+      "provision_coverage_ratio": 220.0,
+      "nonperforming_loan_ratio": 1.1,
+      "capital_adequacy_ratio": 17.0
+    },
+    "insurance": {
+      "pe_ttm": 11.0,
+      "pb": 1.1,
+      "dividend_yield": 3.0,
+      "roe": 13.0,
+      "solvency_adequacy_ratio": 220.0,
+      "premium_growth": 11.0,
+      "combined_ratio": 94.0,
+      "investment_yield": 4.5
+    },
+    "securities": {
+      "pe_ttm": 17.0,
+      "pb": 1.7,
+      "dividend_yield": 2.5,
+      "roe": 11.0,
+      "net_capital_ratio": 190.0,
+      "revenue_growth": 18.0,
+      "profit_growth": 24.0
+    }
+  },
+  "catalysts": {
+    "forecast": {"status": "empty"},
+    "dividend": {"status": "empty"},
+    "holder": {"status": "empty"},
+    "event": {"status": "empty"}
+  },
+  "cases": [
+    {
+      "id": "consumer_value_quality_600519",
+      "stock_code": "600519",
+      "profile": "industrial",
+      "scenario": {"trading_status": "normal", "limit_state": "none", "buy_executable": true, "sell_executable": true, "risk_flags": []},
+      "expected": {"value": 60.95, "quality": 80.64, "trend": 78.98, "catalyst": 50.0, "risk": 9.5, "output_sha256": "4b70c3bc258b78267dd5a89d50fd99941a2d9fa13e6ae6ecfa9bd61a34342a2b"}
+    },
+    {
+      "id": "bank_601398",
+      "stock_code": "601398",
+      "profile": "bank",
+      "scenario": {"trading_status": "normal", "limit_state": "none", "buy_executable": true, "sell_executable": true, "risk_flags": []},
+      "expected": {"value": 87.7, "quality": 74.0, "trend": 78.98, "catalyst": 50.0, "risk": 8.1, "output_sha256": "d2ef407a1ca239b48bf0bca27cf52893c2ffdb28ba454f1c09376cbff36f3838"}
+    },
+    {
+      "id": "growth_volatility_300750",
+      "stock_code": "300750",
+      "profile": "industrial",
+      "scenario": {"trading_status": "normal", "limit_state": "none", "buy_executable": true, "sell_executable": true, "risk_flags": ["high_volatility"]},
+      "expected": {"value": 60.95, "quality": 80.64, "trend": 78.98, "catalyst": 50.0, "risk": 9.5, "output_sha256": "4a5094977102acf77b1c3ba37a77620ae7466a3edaa58be1afb6ee1e6e337422"}
+    },
+    {
+      "id": "insurance_601318",
+      "stock_code": "601318",
+      "profile": "insurance",
+      "scenario": {"trading_status": "normal", "limit_state": "none", "buy_executable": true, "sell_executable": true, "risk_flags": []},
+      "expected": {"value": 79.0, "quality": 79.28, "trend": 78.98, "catalyst": 50.0, "risk": 8.1, "output_sha256": "bba37e516ebcd361ddfd3f4f0f13c8c328cfb4bd78cd77a4ef209b062662b225"}
+    },
+    {
+      "id": "securities_600030",
+      "stock_code": "600030",
+      "profile": "securities",
+      "scenario": {"trading_status": "normal", "limit_state": "none", "buy_executable": true, "sell_executable": true, "risk_flags": []},
+      "expected": {"value": 78.5, "quality": 75.84, "trend": 78.98, "catalyst": 50.0, "risk": 8.1, "output_sha256": "5268829eeb24ba310baf3bb0ec76d81711645caef2aa14b8d1d417f7d54cc5b8"}
+    },
+    {
+      "id": "st_stock",
+      "stock_code": "SYNTH-ST-001",
+      "profile": "industrial",
+      "scenario": {"trading_status": "normal", "limit_state": "none", "buy_executable": true, "sell_executable": true, "risk_flags": ["st"]},
+      "expected": {"value": 60.95, "quality": 80.64, "trend": 78.98, "catalyst": 50.0, "risk": 85.0, "output_sha256": "1f146a8bd046f85bd9617a0826a25fe777c8d549a84c2907ec39d6d77fb36de5"}
+    },
+    {
+      "id": "suspended_stock",
+      "stock_code": "SYNTH-SUSPENDED-001",
+      "profile": "industrial",
+      "omit_bars": true,
+      "scenario": {"trading_status": "suspended", "limit_state": "none", "buy_executable": false, "sell_executable": false, "risk_flags": ["suspended"]},
+      "expected": {"value": 60.95, "quality": 80.64, "trend": null, "catalyst": 50.0, "risk": 100.0, "output_sha256": "8ddc678b833a95b151bf6281142dcc5ebc5ff4de2f4472212215863a0205fa6b"}
+    },
+    {
+      "id": "limit_up_not_buyable",
+      "stock_code": "SYNTH-LIMIT-UP-001",
+      "profile": "industrial",
+      "scenario": {"trading_status": "normal", "limit_state": "one_price_limit_up", "buy_executable": false, "sell_executable": true, "risk_flags": ["limit_up"]},
+      "expected": {"value": 60.95, "quality": 80.64, "trend": 78.98, "catalyst": 50.0, "risk": 70.0, "output_sha256": "706964c68915f69762f9f2ffc8e07da1575b8bc68490e0cbaab79267c9e8cbb9"}
+    },
+    {
+      "id": "limit_down_not_sellable",
+      "stock_code": "SYNTH-LIMIT-DOWN-001",
+      "profile": "industrial",
+      "scenario": {"trading_status": "normal", "limit_state": "one_price_limit_down", "buy_executable": true, "sell_executable": false, "risk_flags": ["limit_down"]},
+      "expected": {"value": 60.95, "quality": 80.64, "trend": 78.98, "catalyst": 50.0, "risk": 70.0, "output_sha256": "355cc44045644949ddbfe693e6b97f7871c7c4b19d874e859b9f6a2772606991"}
+    },
+    {
+      "id": "missing_data",
+      "stock_code": "SYNTH-MISSING-001",
+      "profile": "industrial",
+      "omit_fundamentals": true,
+      "scenario": {"trading_status": "normal", "limit_state": "none", "buy_executable": true, "sell_executable": true, "risk_flags": ["missing_fundamental"]},
+      "expected": {"value": null, "quality": null, "trend": 78.98, "catalyst": 50.0, "risk": 5.625, "output_sha256": "38acfad6690aaeec1ce774e2e33e3d7dbf58c3ce3bc7612bf8c6352a8123c8e5"}
+    }
+  ]
+}

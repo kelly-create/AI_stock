@@ -83,6 +83,7 @@ class DurableWorker:
         poll_interval_seconds: float = 0.25,
         heartbeat_interval_seconds: Optional[float] = None,
         outbox_dispatcher: Optional[Any] = None,
+        owner_lock: Optional[Any] = None,
     ) -> None:
         if (
             isinstance(max_workers, bool)
@@ -107,6 +108,7 @@ class DurableWorker:
         self.poll_interval_seconds = float(poll_interval_seconds)
         self.heartbeat_interval_seconds = heartbeat_interval
         self.outbox_dispatcher = outbox_dispatcher
+        self._owner_lock = owner_lock
 
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers,
@@ -174,8 +176,8 @@ class DurableWorker:
     def run_forever(self) -> None:
         """Poll until a stop signal, then drain without abandoning live leases."""
 
-        self.start()
         try:
+            self.start()
             while not self._stop_accepting.is_set():
                 claimed = self.run_claim_cycle()
                 outbox_dispatched = self._dispatch_outbox_once()
@@ -187,8 +189,8 @@ class DurableWorker:
     def run_until_idle(self) -> None:
         """Drain currently claimable work and exit before delayed retries become due."""
 
-        self.start()
         try:
+            self.start()
             while True:
                 claimed = self.run_claim_cycle()
                 outbox_dispatched = self._dispatch_outbox_once()
@@ -215,6 +217,7 @@ class DurableWorker:
         """Stop claiming; a graceful shutdown keeps heartbeats until work drains."""
 
         if self._closed:
+            self._release_owner_lock()
             return
         self.request_stop()
         if wait:
@@ -227,35 +230,50 @@ class DurableWorker:
             # Stopping heartbeats with live executions would make a nominally
             # graceful API abandon leases.  Callers must explicitly wait.
             raise RuntimeError("cannot close a durable worker while jobs are active")
+        try:
+            if wait and self.outbox_dispatcher is not None:
+                # Finish a bounded number of already-accepted deliveries after the
+                # last handler exits. Remaining rows stay durable for the restart.
+                try:
+                    self.outbox_dispatcher.dispatch_available(max_messages=16)
+                except Exception as exc:  # noqa: BLE001 - local resources must still close.
+                    logger.warning(
+                        "Durable notification shutdown drain failed: message=%s",
+                        sanitize_error_message(exc),
+                    )
 
-        if wait and self.outbox_dispatcher is not None:
-            # Finish a bounded number of already-accepted deliveries after the
-            # last handler exits. Remaining rows stay durable for the restart.
+            self._stop_heartbeat.set()
+            heartbeat_thread = self._heartbeat_thread
+            if heartbeat_thread is not None:
+                heartbeat_thread.join(timeout=max(1.0, self.heartbeat_interval_seconds * 2))
             try:
-                self.outbox_dispatcher.dispatch_available(max_messages=16)
-            except Exception as exc:  # noqa: BLE001 - local resources must still close.
+                self.store.heartbeat_component(
+                    "durable_worker",
+                    self.worker_id,
+                    status="stopped",
+                )
+            except Exception as exc:  # noqa: BLE001 - shutdown must still close local resources.
                 logger.warning(
-                    "Durable notification shutdown drain failed: message=%s",
+                    "Durable worker final component heartbeat failed: message=%s",
                     sanitize_error_message(exc),
                 )
+            self._executor.shutdown(wait=True, cancel_futures=False)
+            self._closed = True
+        finally:
+            self._release_owner_lock()
 
-        self._stop_heartbeat.set()
-        heartbeat_thread = self._heartbeat_thread
-        if heartbeat_thread is not None:
-            heartbeat_thread.join(timeout=max(1.0, self.heartbeat_interval_seconds * 2))
+    def _release_owner_lock(self) -> None:
+        owner_lock = self._owner_lock
+        if owner_lock is None:
+            return
+        self._owner_lock = None
         try:
-            self.store.heartbeat_component(
-                "durable_worker",
-                self.worker_id,
-                status="stopped",
-            )
-        except Exception as exc:  # noqa: BLE001 - shutdown must still close local resources.
+            owner_lock.release()
+        except Exception as exc:  # noqa: BLE001 - process shutdown must continue.
             logger.warning(
-                "Durable worker final component heartbeat failed: message=%s",
-                sanitize_error_message(exc),
+                "Durable worker owner lock release failed: error_type=%s",
+                type(exc).__name__,
             )
-        self._executor.shutdown(wait=True, cancel_futures=False)
-        self._closed = True
 
     def _dispatch_outbox_once(self) -> bool:
         """Interleave at most one serial notification without using job slots."""
@@ -356,6 +374,10 @@ class DurableWorker:
                     "Durable job failure was fenced by a newer lease: job_id=%s",
                     claimed.task_id,
                 )
+        finally:
+            # ContextVar copies held by timed-out daemon helpers must not remain
+            # a valid worker boundary after this execution has terminated.
+            context.lease_lost.set()
 
     def _emit_diagnostic_event(
         self,
@@ -508,6 +530,13 @@ def classify_job_exception(exc: Exception) -> FailureDisposition:
             True,
             getattr(busy_error, "retry_after", None),
         )
+    # Tushare exposes a typed 429-equivalent without fabricating an HTTP
+    # response object. Import lazily so worker preflight stays independent from
+    # optional data-provider initialization.
+    from data_provider.tushare_provider import TushareRateLimitError
+
+    if any(isinstance(item, TushareRateLimitError) for item in chain):
+        return FailureDisposition("rate_limited", safe_message, True, retry_after)
     if any(isinstance(item, DurableHandlerExecutionError) for item in chain):
         return FailureDisposition("handler_failed", safe_message, False)
     if any(isinstance(item, (PermissionError,)) for item in chain) or _chain_name_contains(
@@ -630,31 +659,43 @@ def build_worker_from_runtime(
     resolved_url = database_url or config.get_db_url()
     preflight_worker(config, resolved_url)
 
+    owner_lock = None
+    if bool(getattr(config, "tushare_research_enabled", False)):
+        from src.services.research.worker_owner import acquire_tushare_worker_owner
+
+        owner_lock = acquire_tushare_worker_owner(resolved_url, enabled=True)
+
     # A dedicated worker must never become a competing first-DDL writer.  The
     # read-only preflight above proves the schema is current; explicit mode then
     # makes DatabaseManager independently enforce that invariant.
-    config.database_migration_mode = "explicit"
-    db_manager = DatabaseManager(resolved_url)
-    registry = build_default_durable_job_registry()
-    store = DurableJobStore(registry, db_manager)
-    resolved_worker_id = worker_id or _default_worker_id()
-    # Import notification delivery only after feature and migration preflight,
-    # keeping a failed startup read-only and free of provider initialization.
-    from src.services.durable_jobs import NotificationOutboxStore
-    from src.services.notification_outbox_dispatcher import NotificationOutboxDispatcher
+    try:
+        config.database_migration_mode = "explicit"
+        db_manager = DatabaseManager(resolved_url)
+        registry = build_default_durable_job_registry()
+        store = DurableJobStore(registry, db_manager)
+        resolved_worker_id = worker_id or _default_worker_id()
+        # Import notification delivery only after feature and migration preflight,
+        # keeping a failed startup read-only and free of provider initialization.
+        from src.services.durable_jobs import NotificationOutboxStore
+        from src.services.notification_outbox_dispatcher import NotificationOutboxDispatcher
 
-    outbox_dispatcher = NotificationOutboxDispatcher(
-        NotificationOutboxStore(db_manager),
-        worker_id=f"{resolved_worker_id}:outbox",
-        health_recorder=store,
-    )
-    return DurableWorker(
-        store,
-        worker_id=resolved_worker_id,
-        max_workers=(int(config.max_workers) if max_workers is None else max_workers),
-        poll_interval_seconds=poll_interval_seconds,
-        outbox_dispatcher=outbox_dispatcher,
-    )
+        outbox_dispatcher = NotificationOutboxDispatcher(
+            NotificationOutboxStore(db_manager),
+            worker_id=f"{resolved_worker_id}:outbox",
+            health_recorder=store,
+        )
+        return DurableWorker(
+            store,
+            worker_id=resolved_worker_id,
+            max_workers=(int(config.max_workers) if max_workers is None else max_workers),
+            poll_interval_seconds=poll_interval_seconds,
+            outbox_dispatcher=outbox_dispatcher,
+            owner_lock=owner_lock,
+        )
+    except Exception:
+        if owner_lock is not None:
+            owner_lock.release()
+        raise
 
 
 def check_worker_heartbeat(
@@ -850,6 +891,9 @@ def _status_code(exc: Exception) -> Optional[int]:
 
 def _extract_retry_after(chain: Iterable[Exception]) -> Any:
     for exc in chain:
+        direct_value = getattr(exc, "retry_after", None)
+        if direct_value is not None:
+            return direct_value
         response = getattr(exc, "response", None)
         for headers in (getattr(response, "headers", None), getattr(exc, "headers", None)):
             if headers is None:

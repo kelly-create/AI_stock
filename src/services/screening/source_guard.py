@@ -5,12 +5,24 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar, copy_context
 import os
 from queue import Queue
 import threading
 from typing import Any, Callable, TypeVar
 
 T = TypeVar("T")
+
+_CURRENT_SOURCE_CALL_CANCEL_EVENT: ContextVar[threading.Event | None] = ContextVar(
+    "dsa_current_source_call_cancel_event",
+    default=None,
+)
+
+
+def get_current_source_call_cancel_event() -> threading.Event | None:
+    """Return the cancellation signal shared with the active source wrapper."""
+
+    return _CURRENT_SOURCE_CALL_CANCEL_EVENT.get()
 
 
 class SourceCallTimeout(TimeoutError):
@@ -53,17 +65,28 @@ def call_with_timeout(
         return func(*args, **kwargs)
 
     result_queue: Queue[tuple[bool, object]] = Queue(maxsize=1)
+    cancel_event = threading.Event()
 
     def run() -> None:
+        token = _CURRENT_SOURCE_CALL_CANCEL_EVENT.set(cancel_event)
         try:
             result_queue.put((True, func(*args, **kwargs)))
         except BaseException as exc:  # noqa: BLE001 - propagate worker failures to caller.
             result_queue.put((False, exc))
+        finally:
+            _CURRENT_SOURCE_CALL_CANCEL_EVENT.reset(token)
 
-    worker = threading.Thread(target=run, name=f"screening-source:{label}", daemon=True)
+    worker_context = copy_context()
+    worker = threading.Thread(
+        target=worker_context.run,
+        args=(run,),
+        name=f"screening-source:{label}",
+        daemon=True,
+    )
     worker.start()
     worker.join(float(timeout_sec))
     if worker.is_alive():
+        cancel_event.set()
         raise SourceCallTimeout(f"{label} timed out after {float(timeout_sec):g}s")
 
     ok, payload = result_queue.get_nowait()

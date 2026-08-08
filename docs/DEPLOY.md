@@ -76,6 +76,12 @@ docker compose -f ./docker/docker-compose.yml up -d --force-recreate analyzer se
 
 Worker 健康检查只读 `provider_health` 中的组件心跳，要求 `DURABLE_WORKER_ID` 对应的心跳处于 `idle`/`busy` 且不超过 `DURABLE_WORKER_HEALTH_MAX_AGE_SECONDS`。同一个 `analyzer` 在开关关闭时执行旧分析，在开启时仅入队；durable 启动时它会在注册任何定时任务前等待新鲜 Worker 心跳，超过 `DURABLE_WORKER_STARTUP_TIMEOUT_SECONDS` 后退出并由容器策略重启。API `server` 只依赖迁移成功，不依赖 Worker 健康。Compose 中不存在第二个 `scheduler` 服务，因此任何 profile 都不会产生两个调度 owner。
 
+### 3.3 PR2 Tushare 研究数据（按需启用）
+
+启用前必须确认 `TUSHARE_TOKEN` 有效，并保持 `PERSONAL_RESEARCH_ENABLED=true`、`DURABLE_JOBS_ENABLED=true`、`TUSHARE_RESEARCH_ENABLED=true`。默认 `TUSHARE_GLOBAL_CALLS_PER_MINUTE=450`、`TUSHARE_MAX_INFLIGHT=2`；`TUSHARE_ENDPOINT_LIMITS_JSON` 只能设置更严格的端点上限。生产只允许一个 Durable Worker 持有 Tushare 调用权，API 与 Analyzer 不直接调用 Tushare Pro。启用研究后，Worker 会在 SQLite 同目录持有 `数据库文件名.tushare-owner.lock` 跨进程独占锁；意外启动第二个 Worker 会立即失败，进程正常退出后释放锁，崩溃留下的 0 字节文件无需删除且可由下一进程重新获取。Provider 的累计调用、成功/失败、行数、延迟、峰值在途数、端点和错误类型会以不高于每 5 秒一次并在采集结束时合并写入 `provider_health` 的 `provider/tushare/account` 行。原始研究文件位于 `data/research/raw/`，它不属于 SQLite 备份；生产必须按[研究原始数据归档与取证恢复](operations/research-raw-backup.md)将它与对应 SQLite 备份成对归档、校验并演练恢复。
+
+Research 运行以本轮 `prepared.as_of` 为严格知识边界；冻结路径不会补入当前实时报价、未版本化外部资讯、当前组合状态或 AkShare 辅助数据。缺失数据保持缺失，日线日期晚于边界会直接拒绝冻结。`scripts/fetch_tushare_stock_list.py` 仅是离线管理员工具，不受 Worker 账号桶保护，生产使用时必须先停止研究 Worker且不得与在线采集并行。
+
 ### 4. 常用管理命令
 
 ```bash

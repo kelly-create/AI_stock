@@ -1056,6 +1056,13 @@ const settingsHelpZhCN: SettingsHelpMap = {
     impact: ['只影响后续个人投研链路；关闭全部开关即可恢复现有运行行为。'],
     notes: ['生产启用前先执行数据库迁移检查与显式迁移。'],
   },
+  'settings.research.tushare_quota': {
+    title: 'Tushare 全局限流',
+    summary: '控制单一 Tushare 账号的滚动分钟请求总量、在途并发和端点子限额。',
+    usage: '总桶不超过 450 次/分钟，在途请求最多 2；端点 JSON 只能进一步收紧。',
+    valueNotes: ['端点配置示例：{"cyq_chips":200}。未公开分钟限额的端点不要自行编造。'],
+    impact: ['需重启 Worker 生效；调低会降低采集吞吐，但不会放宽硬限制。'],
+  },
   'settings.research.policy_gate': {
     title: '组合策略 Gate',
     summary: '控制确定性组合策略 Gate 关闭、只观察或正式执行。',
@@ -2287,6 +2294,13 @@ const settingsHelpEnUS: SettingsHelpMap = {
     ],
     impact: ['Only affects the new personal-research path; turning every flag off restores existing behavior.'],
     notes: ['Run the read-only migration check and explicit migration apply before production activation.'],
+  },
+  'settings.research.tushare_quota': {
+    title: 'Tushare Global Quota',
+    summary: 'Controls the rolling account-wide request cap, transport concurrency, and optional endpoint sub-limits.',
+    usage: 'Keep the global bucket at or below 450 calls/minute and in-flight requests at or below 2. Endpoint JSON may only tighten those limits.',
+    valueNotes: ['Example endpoint map: {"cyq_chips":200}. Do not invent a minute limit for endpoints whose provider documentation does not publish one.'],
+    impact: ['Requires a Worker restart. Lower values reduce collection throughput but never loosen the hard provider guardrails.'],
   },
   'settings.research.policy_gate': {
     title: 'Portfolio Policy Gate',

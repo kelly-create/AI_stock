@@ -36,10 +36,12 @@ from src.config import (
     is_supported_llm_channel_api_surface_value,
     normalize_agent_litellm_model,
     normalize_news_strategy_profile,
+    normalize_tushare_endpoint_limits,
     normalize_llm_channel_api_surface,
     normalize_llm_channel_model,
     parse_env_bool,
     parse_env_int,
+    parse_tushare_quota_int,
     resolve_news_window_days,
     resolve_llm_channel_protocol,
     setup_env,
@@ -2662,6 +2664,23 @@ class SystemConfigService:
                                 "actual": f"rule #{rule_index or 1}",
                             }
                         )
+                elif key == "TUSHARE_ENDPOINT_LIMITS_JSON":
+                    try:
+                        normalize_tushare_endpoint_limits(parsed)
+                    except ValueError as exc:
+                        issues.append(
+                            {
+                                "key": key,
+                                "code": "invalid_tushare_endpoint_limits",
+                                "message": str(exc),
+                                "severity": "error",
+                                "expected": (
+                                    "JSON object mapping endpoint names to integers "
+                                    "from 1 to 450"
+                                ),
+                                "actual": value[:120],
+                            }
+                        )
 
         elif validation.get("pattern"):
             pattern = validation["pattern"]
@@ -4491,7 +4510,11 @@ class SystemConfigService:
         research_keys = {
             "PERSONAL_RESEARCH_ENABLED",
             "DURABLE_JOBS_ENABLED",
+            "TUSHARE_TOKEN",
             "TUSHARE_RESEARCH_ENABLED",
+            "TUSHARE_GLOBAL_CALLS_PER_MINUTE",
+            "TUSHARE_MAX_INFLIGHT",
+            "TUSHARE_ENDPOINT_LIMITS_JSON",
             "RESEARCH_FACTORS_ENABLED",
             "RESEARCH_EVIDENCE_ENABLED",
             "RESEARCH_DEBATE_ENABLED",
@@ -4500,8 +4523,16 @@ class SystemConfigService:
             "PORTFOLIO_POLICY_GATE_MODE",
         }
         if research_keys & updated_keys:
+            try:
+                endpoint_limits = normalize_tushare_endpoint_limits(
+                    effective_map.get("TUSHARE_ENDPOINT_LIMITS_JSON")
+                )
+            except ValueError:
+                # Field-level JSON validation reports the actionable error.
+                endpoint_limits = {}
             research_config = Config(
                 stock_list=[],
+                tushare_token=(effective_map.get("TUSHARE_TOKEN") or "").strip() or None,
                 personal_research_enabled=parse_env_bool(
                     effective_map.get("PERSONAL_RESEARCH_ENABLED"),
                     default=False,
@@ -4514,6 +4545,19 @@ class SystemConfigService:
                     effective_map.get("TUSHARE_RESEARCH_ENABLED"),
                     default=False,
                 ),
+                tushare_global_calls_per_minute=parse_tushare_quota_int(
+                    effective_map.get("TUSHARE_GLOBAL_CALLS_PER_MINUTE"),
+                    450,
+                    field_name="TUSHARE_GLOBAL_CALLS_PER_MINUTE",
+                    maximum=450,
+                ),
+                tushare_max_inflight=parse_tushare_quota_int(
+                    effective_map.get("TUSHARE_MAX_INFLIGHT"),
+                    2,
+                    field_name="TUSHARE_MAX_INFLIGHT",
+                    maximum=2,
+                ),
+                tushare_endpoint_limits=endpoint_limits,
                 research_factors_enabled=parse_env_bool(
                     effective_map.get("RESEARCH_FACTORS_ENABLED"),
                     default=False,

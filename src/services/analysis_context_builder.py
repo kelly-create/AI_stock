@@ -72,6 +72,7 @@ class PipelineAnalysisArtifacts:
     news_result_count: Optional[int]
     metadata: Dict[str, Any]
     portfolio_context: Optional[Dict[str, Any]] = None
+    research_context: Optional[Dict[str, Any]] = None
 
 
 class AnalysisContextBuilder:
@@ -94,6 +95,9 @@ class AnalysisContextBuilder:
         blocks["chip"] = _build_chip_block(artifacts)
         blocks["fundamentals"] = _build_fundamentals_block(artifacts)
         blocks["news"] = _build_news_block(artifacts)
+        research_block = _build_research_factors_block(artifacts)
+        if research_block is not None:
+            blocks["research_factors"] = research_block
         portfolio_block = _build_portfolio_block(artifacts)
         if portfolio_block is not None:
             blocks["portfolio"] = portfolio_block
@@ -497,6 +501,73 @@ def _build_portfolio_block(artifacts: PipelineAnalysisArtifacts) -> Optional[Ana
         items=items,
         source="portfolio_context",
         warnings=warnings,
+        metadata={"auxiliary": True, "quality_weighted": False},
+    )
+
+
+def _build_research_factors_block(
+    artifacts: PipelineAnalysisArtifacts,
+) -> Optional[AnalysisContextBlock]:
+    """Project deterministic research factors without changing legacy quality scoring."""
+
+    context = _to_dict(artifacts.research_context)
+    if not context:
+        return None
+
+    raw_status = str(context.get("status") or "partial").strip().lower()
+    status_map = {
+        "available": ContextFieldStatus.AVAILABLE,
+        "empty": ContextFieldStatus.MISSING,
+        "partial": ContextFieldStatus.PARTIAL,
+        "stale": ContextFieldStatus.STALE,
+        "permission_denied": ContextFieldStatus.FETCH_FAILED,
+        "not_supported": ContextFieldStatus.NOT_SUPPORTED,
+        "fetch_failed": ContextFieldStatus.FETCH_FAILED,
+    }
+    block_status = status_map.get(raw_status, ContextFieldStatus.PARTIAL)
+    missing_reason = None
+    if block_status != ContextFieldStatus.AVAILABLE:
+        missing_reason = f"research_{raw_status or 'partial'}"
+
+    factors = context.get("factors")
+    factor_status = (
+        ContextFieldStatus.AVAILABLE
+        if isinstance(factors, Mapping) and factors
+        else block_status
+    )
+    items: Dict[str, AnalysisContextItem] = {
+        "status": AnalysisContextItem(
+            status=block_status,
+            value=raw_status,
+            source="deterministic_research_factors",
+            missing_reason=missing_reason,
+        ),
+        "factors": AnalysisContextItem(
+            status=factor_status,
+            value=dict(factors) if isinstance(factors, Mapping) else None,
+            source="deterministic_research_factors",
+            missing_reason=None if factor_status == ContextFieldStatus.AVAILABLE else missing_reason,
+        ),
+    }
+    unknowns = context.get("unknowns")
+    if isinstance(unknowns, list):
+        items["unknowns"] = AnalysisContextItem(
+            status=(
+                ContextFieldStatus.PARTIAL
+                if unknowns
+                else ContextFieldStatus.AVAILABLE
+            ),
+            value=list(unknowns),
+            source="deterministic_research_factors",
+        )
+
+    warnings = [str(item) for item in context.get("warnings", []) if str(item).strip()]
+    return AnalysisContextBlock(
+        status=block_status,
+        items=items,
+        source="deterministic_research_factors",
+        timestamp=_metadata_iso_datetime_value(context, "available_at"),
+        warnings=warnings[:10],
         metadata={"auxiliary": True, "quality_weighted": False},
     )
 

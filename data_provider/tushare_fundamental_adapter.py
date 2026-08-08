@@ -12,8 +12,9 @@ from __future__ import annotations
 import math
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from datetime import date, timedelta
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -321,15 +322,37 @@ class TushareFundamentalAdapter:
     def __init__(self, request_timeout_seconds: float = 9.0) -> None:
         self.request_timeout_seconds = max(1.0, float(request_timeout_seconds))
 
-    def _build_client(self, token: str):
+    def _build_client(self, token: str, *, config: Optional[object] = None):
         # Delayed import avoids a cycle: ``tushare_fetcher`` imports ``base``.
         from .tushare_fetcher import _TushareHttpClient, _resolve_tushare_http_url
 
-        api_url = _resolve_tushare_http_url() or "http://api.tushare.pro"
+        effective_config = config
+        if effective_config is None:
+            from src.config import get_config
+
+            effective_config = get_config()
+        research_enabled = bool(
+            getattr(effective_config, "tushare_research_enabled", False)
+        )
+        api_url = (
+            _resolve_tushare_http_url(include_api_alias=research_enabled)
+            or "http://api.tushare.pro"
+        )
         return _TushareHttpClient(
             token=token,
             timeout=self.request_timeout_seconds,
             api_url=api_url,
+            enforce_limits=research_enabled,
+            worker_only=research_enabled,
+            global_calls_per_minute=int(
+                getattr(effective_config, "tushare_global_calls_per_minute", 450)
+            ),
+            max_inflight=int(
+                getattr(effective_config, "tushare_max_inflight", 2)
+            ),
+            endpoint_limits=dict(
+                getattr(effective_config, "tushare_endpoint_limits", {}) or {}
+            ),
         )
 
     @staticmethod
@@ -350,7 +373,13 @@ class TushareFundamentalAdapter:
             "forecast": {"ts_code": ts_code, "start_date": forecast_start, "end_date": end},
         }
 
-    def _fetch_frames(self, client: Any, ts_code: str) -> Tuple[Dict[str, pd.DataFrame], List[str]]:
+    def _fetch_frames(
+        self,
+        client: Any,
+        ts_code: str,
+        *,
+        research_enabled: bool = False,
+    ) -> Tuple[Dict[str, pd.DataFrame], List[str]]:
         specs = self._query_specs(ts_code)
         frames: Dict[str, pd.DataFrame] = {}
         failures: Dict[str, str] = {}
@@ -359,10 +388,13 @@ class TushareFundamentalAdapter:
             return client.query(name, fields=_QUERY_FIELDS[name], **params)
 
         with ThreadPoolExecutor(
-            max_workers=len(specs),
+            max_workers=(min(2, len(specs)) if research_enabled else len(specs)),
             thread_name_prefix="tushare-fundamental",
         ) as pool:
-            futures = {pool.submit(fetch, name, params): name for name, params in specs.items()}
+            futures = {
+                pool.submit(copy_context().run, fetch, name, params): name
+                for name, params in specs.items()
+            }
             for future in as_completed(futures):
                 name = futures[future]
                 try:
@@ -373,27 +405,46 @@ class TushareFundamentalAdapter:
                     failures[name] = f"{name}:{type(exc).__name__}:{message}"
                     frames[name] = pd.DataFrame()
 
-        # Compatible gateways can queue one request from the initial burst.
-        # Retry at most two critical tables after that burst has drained.
-        critical_order = (
-            "income",
-            "cashflow",
-            "fina_indicator",
-            "balancesheet",
-            "daily_basic",
-        )
-        retry_names = [name for name in critical_order if name in failures][:2]
-        for name in retry_names:
-            try:
-                frame = fetch(name, specs[name])
-                frames[name] = frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
-                failures.pop(name, None)
-            except Exception as exc:
-                message = _clean_text(exc, 160)
-                failures[name] = f"{name}:{type(exc).__name__}:{message}"
+        if not research_enabled:
+            # Preserve the legacy compatibility path: gateways can queue one
+            # request from the initial burst, so retry at most two critical
+            # tables after the burst has drained. Research jobs delegate all
+            # retry and Retry-After policy to DurableWorker instead.
+            critical_order = (
+                "income",
+                "cashflow",
+                "fina_indicator",
+                "balancesheet",
+                "daily_basic",
+            )
+            retry_names = [name for name in critical_order if name in failures][:2]
+            for name in retry_names:
+                try:
+                    frame = fetch(name, specs[name])
+                    frames[name] = (
+                        frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+                    )
+                    failures.pop(name, None)
+                except Exception as exc:
+                    message = _clean_text(exc, 160)
+                    failures[name] = f"{name}:{type(exc).__name__}:{message}"
+
         return frames, [failures[name] for name in specs if name in failures]
 
-    def get_fundamental_bundle(self, stock_code: str) -> Dict[str, Any]:
+    def get_fundamental_bundle(
+        self,
+        stock_code: str,
+        *,
+        preloaded_frames: Optional[Mapping[str, pd.DataFrame]] = None,
+        preloaded_errors: Optional[Sequence[str]] = None,
+    ) -> Dict[str, Any]:
+        """Build the normalized bundle, optionally from already collected frames.
+
+        The preloaded path is used by PR2 research collection so the legacy
+        fundamental context consumes the exact frozen Provider response rather
+        than issuing a second set of Tushare requests.
+        """
+
         result: Dict[str, Any] = {
             "status": "not_supported",
             "valuation": {},
@@ -404,18 +455,37 @@ class TushareFundamentalAdapter:
             "errors": [],
         }
 
-        from src.config import get_config
+        if preloaded_frames is None:
+            from src.config import get_config
 
-        token = str(getattr(get_config(), "tushare_token", "") or "").strip()
-        if not token:
-            return result
-        try:
-            ts_code = _to_ts_code(stock_code)
-            client = self._build_client(token)
-            frames, errors = self._fetch_frames(client, ts_code)
-        except Exception as exc:
-            result["errors"].append(f"init:{type(exc).__name__}:{_clean_text(exc, 160)}")
-            return result
+            config = get_config()
+            research_enabled = bool(
+                getattr(config, "tushare_research_enabled", False)
+            )
+            token = str(getattr(config, "tushare_token", "") or "").strip()
+            if not token:
+                return result
+            try:
+                ts_code = _to_ts_code(stock_code)
+                client = self._build_client(token, config=config)
+                frames, errors = self._fetch_frames(
+                    client,
+                    ts_code,
+                    research_enabled=research_enabled,
+                )
+            except Exception as exc:
+                result["errors"].append(
+                    f"init:{type(exc).__name__}:{_clean_text(exc, 160)}"
+                )
+                return result
+        else:
+            frames = {
+                str(name): frame.copy(deep=True)
+                if isinstance(frame, pd.DataFrame)
+                else pd.DataFrame()
+                for name, frame in preloaded_frames.items()
+            }
+            errors = [str(item) for item in (preloaded_errors or ()) if str(item).strip()]
         result["errors"].extend(errors)
 
         daily_row = _latest_row(frames.get("daily_basic"), date_column="trade_date")

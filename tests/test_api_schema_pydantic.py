@@ -62,6 +62,17 @@ P6_SIGNAL_LINKED_SCHEMAS = (
     "PortfolioDecisionSignalRiskItem",
     "PortfolioRiskResponse",
 )
+RESEARCH_PATHS = (
+    "/api/v1/research/factors/{stock_code}",
+    "/api/v1/research/snapshots/{snapshot_hash}",
+    "/api/v1/research/datasets/{stock_code}",
+)
+RESEARCH_SCHEMAS = (
+    "ResearchDatasetItem",
+    "ResearchDatasetListResponse",
+    "ResearchFactorResponse",
+    "ResearchSnapshotResponse",
+)
 
 
 def _collect_component_schema_refs(node: Any) -> set[str]:
@@ -261,6 +272,23 @@ def test_decision_signal_static_api_spec_matches_runtime_paths() -> None:
 
     status_schema = static_spec["components"]["schemas"]["DecisionSignalStatusUpdateRequest"]["properties"]["status"]
     assert status_schema["enum"] == ["active", "expired", "invalidated", "closed", "archived"]
+
+
+def test_research_static_api_spec_matches_runtime_paths() -> None:
+    static_spec_path = Path(__file__).resolve().parents[1] / "docs" / "architecture" / "api_spec.json"
+    static_spec = json.loads(static_spec_path.read_text(encoding="utf-8"))
+    runtime_spec = create_app().openapi()
+
+    for path in RESEARCH_PATHS:
+        assert static_spec["paths"][path] == runtime_spec["paths"][path]
+        assert set(static_spec["paths"][path]) == {"get"}
+        assert static_spec["paths"][path]["get"]["security"] == [
+            {"AdminSessionCookie": []}
+        ]
+    for schema_name in RESEARCH_SCHEMAS:
+        assert static_spec["components"]["schemas"][schema_name] == runtime_spec[
+            "components"
+        ]["schemas"][schema_name]
 
 
 def test_v1_prefix_is_applied_at_app_mount_level() -> None:

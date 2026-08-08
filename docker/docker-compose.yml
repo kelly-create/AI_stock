@@ -89,6 +89,8 @@ services:
 
   # The durable Worker is opt-in; the existing analyzer remains the sole
   # Scheduler process and waits for this Worker's fresh database heartbeat.
+  # When Tushare research is enabled this process also holds the SQLite-adjacent
+  # *.tushare-owner.lock; any accidental second Worker fails startup immediately.
   worker:
     <<: *common
     profiles: ["durable"]

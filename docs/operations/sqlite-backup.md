@@ -9,6 +9,8 @@
 `quick_check` 和 `foreign_key_check` 结果。缺少核心表或任一完整性检查失败时，不会发布备份。
 PR1 起默认核心表还强制包含 `analysis_jobs`、`job_events`、`notification_outbox` 和
 `provider_health`，避免只备份业务结果却遗漏正在执行的任务、通知或组件健康状态。
+PR2 起还强制包含 `research_dataset_snapshots`、`research_factor_snapshots` 和
+`research_snapshots`，使迁移、恢复和生产切换能够逐表核对研究数据、确定性因子与冻结快照行数。
 manifest 另含一个排除自身字段后计算的 canonical SHA-256，用于发现文件内容的意外改写；它不是签名，不能替代
 对 manifest 文件本身的只读保管或外部校验和记录。
 

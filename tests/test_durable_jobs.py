@@ -33,6 +33,7 @@ from src.services.durable_jobs import (
     UnknownJobHandlerError,
     parse_retry_after_seconds,
 )
+from src.services.research.repositories import LeaseFence, ResearchSnapshotRepository
 from src.storage import (
     AnalysisJobRecord,
     DatabaseManager,
@@ -418,6 +419,137 @@ def test_event_global_cursor_and_per_job_retention(isolated_db, registry) -> Non
         session.add(old)
         session.commit()
     assert store.prune_events(now=now) == 1
+
+
+def test_research_state_events_follow_parent_lifecycle_retention(
+    isolated_db,
+    registry,
+) -> None:
+    now = datetime(2026, 8, 8, 5, 0, 0)
+    old = now - timedelta(days=30)
+    reference_time = datetime(2026, 7, 1, 1, 2, 3, tzinfo=timezone.utc)
+    store = DurableJobStore(
+        registry,
+        isolated_db,
+        event_retention_days=1,
+        event_limit_per_job=2,
+    )
+    store.enqueue(_request("active", task_id="active-research-job"), now=old)
+    first_lease = store.claim_next("worker-a", now=old)
+    assert first_lease is not None
+
+    store.enqueue(_request("terminal", task_id="terminal-research-job"), now=old)
+    terminal_lease = store.claim_next("terminal-worker", now=old + timedelta(seconds=1))
+    assert terminal_lease is not None
+    assert terminal_lease.task_id == "terminal-research-job"
+    store.complete(
+        terminal_lease.task_id,
+        "terminal-worker",
+        terminal_lease.lease_token,
+        now=old + timedelta(seconds=2),
+    )
+
+    with isolated_db.get_session() as session:
+        session.add_all(
+            [
+                JobEventRecord(
+                    job_id="active-research-job",
+                    event_type="research_reference_time",
+                    payload_json=(
+                        '{"scope_type": "stock", "scope_value": "600519", '
+                        '"as_of": "2026-07-01T01:02:03.000000Z", '
+                        '"marker": "active-old-state"}'
+                    ),
+                    created_at=old,
+                ),
+                JobEventRecord(
+                    job_id="terminal-research-job",
+                    event_type="research_reference_time",
+                    payload_json='{"marker": "terminal-old-state"}',
+                    created_at=old,
+                ),
+                JobEventRecord(
+                    job_id="active-research-job",
+                    event_type="ordinary-old-event",
+                    payload_json='{"marker": "ordinary-old"}',
+                    created_at=old,
+                ),
+            ]
+        )
+        for event_type in (
+            "research_reference_time",
+            "research_dataset_snapshot",
+            "research_factor_snapshot",
+            "research_snapshot",
+        ):
+            payload_json = '{"marker": "fresh-state"}'
+            if event_type == "research_reference_time":
+                payload_json = (
+                    '{"scope_type": "stock", "scope_value": "600519", '
+                    '"as_of": "2026-07-01T01:02:03.000000Z", '
+                    '"marker": "fresh-state"}'
+                )
+            session.add(
+                JobEventRecord(
+                    job_id="active-research-job",
+                    event_type=event_type,
+                    payload_json=payload_json,
+                    created_at=now,
+                )
+            )
+        for index in range(4):
+            session.add(
+                JobEventRecord(
+                    job_id="active-research-job",
+                    event_type="task_progress",
+                    payload_json=f'{{"progress": {index}}}',
+                    created_at=now,
+                )
+            )
+        session.commit()
+
+    store.prune_events(now=now)
+
+    events = store.read_events(job_id="active-research-job")
+    assert any(event.payload.get("marker") == "active-old-state" for event in events)
+    assert all(event.payload.get("marker") != "ordinary-old" for event in events)
+    assert {
+        event.event_type
+        for event in events
+        if event.event_type.startswith("research_")
+    } == {
+        "research_reference_time",
+        "research_dataset_snapshot",
+        "research_factor_snapshot",
+        "research_snapshot",
+    }
+    assert len([event for event in events if event.event_type == "task_progress"]) == 2
+
+    terminal_events = store.read_events(job_id="terminal-research-job")
+    assert all(
+        event.payload.get("marker") != "terminal-old-state"
+        for event in terminal_events
+    )
+
+    second_lease = store.claim_next("worker-b", now=now)
+    assert second_lease is not None
+    assert second_lease.task_id == "active-research-job"
+    assert second_lease.lease_token != first_lease.lease_token
+    resumed_events = store.read_events(job_id=second_lease.task_id)
+    assert any(
+        event.payload.get("marker") == "active-old-state"
+        for event in resumed_events
+    )
+    repository = ResearchSnapshotRepository(isolated_db)
+    assert repository.get_research_reference_time(
+        scope_value="600519",
+        lease=LeaseFence(
+            job_id=second_lease.task_id,
+            worker_id=second_lease.worker_id,
+            lease_token=second_lease.lease_token,
+        ),
+        now=now + timedelta(seconds=1),
+    ) == reference_time
 
 
 def test_payload_version_mismatch_fails_closed(store, isolated_db) -> None:

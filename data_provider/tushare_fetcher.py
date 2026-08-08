@@ -14,7 +14,6 @@ TushareFetcher - 备用数据源 1 (Priority 2)
 3. 使用 tenacity 实现指数退避重试
 """
 
-import json as _json
 import logging
 import re
 import time
@@ -22,7 +21,6 @@ from datetime import datetime, timedelta
 from typing import Optional, Tuple, List, Dict, Any
 
 import pandas as pd
-import requests
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -33,6 +31,7 @@ from tenacity import (
 
 from .base import BaseFetcher, DataFetchError, RateLimitError, STANDARD_COLUMNS,is_bse_code, is_st_stock, is_kc_cy_stock, normalize_stock_code, _is_hk_market
 from .realtime_types import UnifiedRealtimeQuote, ChipDistribution
+from .tushare_provider import TushareProvider, resolve_tushare_api_url_from_env
 from src.config import get_config
 import os
 from zoneinfo import ZoneInfo
@@ -72,7 +71,7 @@ def _is_us_code(stock_code: str) -> bool:
     return bool(re.match(r'^[A-Z]{1,5}(\.[A-Z])?$', code))
 
 
-def _resolve_tushare_http_url() -> Optional[str]:
+def _resolve_tushare_http_url(*, include_api_alias: bool = False) -> Optional[str]:
     """读取 ``TUSHARE_HTTP_URL`` 环境变量并做基本校验。
 
     - 留空 / 仅空白 / 未设置 → 返回 ``None``，调用方继续走官方默认地址。
@@ -80,6 +79,8 @@ def _resolve_tushare_http_url() -> Optional[str]:
       避免有人误填成纯主机名（如 ``api.tushare.pro``）导致 ``requests`` 把它
       当成相对路径请求失败。
     """
+    if include_api_alias:
+        return resolve_tushare_api_url_from_env(include_api_alias=True)
     raw = os.getenv("TUSHARE_HTTP_URL")
     if not raw:
         return None
@@ -91,6 +92,9 @@ def _resolve_tushare_http_url() -> Optional[str]:
             "TUSHARE_HTTP_URL 必须以 http:// 或 https:// 开头，"
             f"当前值为 {url!r}"
         )
+    # Flag-off is byte-for-byte compatible with the historical gateway
+    # contract. In particular, a meaningful trailing slash must not be
+    # canonicalized away by the PR2 account-level coordinator.
     return url
 
 
@@ -116,42 +120,23 @@ def _resolve_tushare_priority() -> Optional[int]:
     return priority
 
 
-class _TushareHttpClient:
-    """Lightweight Tushare Pro client that does not require the tushare SDK."""
+class _TushareHttpClient(TushareProvider):
+    """Compatibility name for the project's unified Tushare provider."""
 
-    def __init__(self, token: str, timeout: int = 30, api_url: str = "http://api.tushare.pro") -> None:
-        self._token = token
-        self._timeout = timeout
-        self._api_url = api_url
-
-    def query(self, api_name: str, fields: str = "", **kwargs) -> pd.DataFrame:
-        req_params = {
-            "api_name": api_name,
-            "token": self._token,
-            "params": kwargs,
-            "fields": fields,
-        }
-        res = requests.post(self._api_url, json=req_params, timeout=self._timeout)
-        if res.status_code != 200:
-            raise Exception(f"Tushare API HTTP {res.status_code}")
-
-        result = _json.loads(res.text)
-        if result.get("code") != 0:
-            raise Exception(result.get("msg") or f"Tushare API error code {result.get('code')}")
-
-        data = result.get("data") or {}
-        columns = data.get("fields") or []
-        items = data.get("items") or []
-        return pd.DataFrame(items, columns=columns)
-
-    def __getattr__(self, api_name: str):
-        if api_name.startswith("_"):
-            raise AttributeError(api_name)
-
-        def caller(**kwargs) -> pd.DataFrame:
-            return self.query(api_name, **kwargs)
-
-        return caller
+    def __init__(
+        self,
+        token: str,
+        timeout: float = 30,
+        api_url: str = "http://api.tushare.pro",
+        **kwargs: Any,
+    ) -> None:
+        kwargs.setdefault("enforce_limits", False)
+        kwargs.setdefault("worker_only", False)
+        kwargs.setdefault(
+            "preserve_api_url",
+            not bool(kwargs.get("enforce_limits", False)),
+        )
+        super().__init__(token=token, timeout=timeout, api_url=api_url, **kwargs)
 
 
 class TushareFetcher(BaseFetcher):
@@ -185,6 +170,7 @@ class TushareFetcher(BaseFetcher):
         self._call_count = 0  # 当前分钟内的调用次数
         self._minute_start: Optional[float] = None  # 当前计数周期开始时间
         self._api: Optional[object] = None  # Tushare API 实例
+        self._research_limits_enabled = False
         self.date_list: Optional[List[str]] = None  # 交易日列表缓存（倒序，最新日期在前）
         self._date_list_end: Optional[str] = None  # 缓存对应的截止日期，用于跨日刷新
 
@@ -203,19 +189,27 @@ class TushareFetcher(BaseFetcher):
         从而减少 Docker / PyInstaller / 多虚拟环境场景下因缺包导致的初始化失败。
         """
         config = get_config()
+        self._research_limits_enabled = bool(
+            getattr(config, "tushare_research_enabled", False)
+        )
 
         if not config.tushare_token:
             logger.warning("Tushare Token 未配置，此数据源不可用")
             return
 
         try:
-            self._api = self._build_api_client(config.tushare_token)
+            self._api = self._build_api_client(config.tushare_token, config=config)
             logger.info("Tushare API 初始化成功")
         except Exception as e:
             logger.error(f"Tushare API 初始化失败: {e}")
             self._api = None
 
-    def _build_api_client(self, token: str) -> _TushareHttpClient:
+    def _build_api_client(
+        self,
+        token: str,
+        *,
+        config: Optional[object] = None,
+    ) -> _TushareHttpClient:
         """
         Build a lightweight Tushare Pro client over direct HTTP requests.
 
@@ -226,12 +220,34 @@ class TushareFetcher(BaseFetcher):
         端点，便于在网络无法直达 ``api.tushare.pro`` 时切换镜像/网关。
         留空或不设置则保持官方默认地址，行为与历史版本完全一致。
         """
-        api_url = _resolve_tushare_http_url()
+        effective_config = config or get_config()
+        research_enabled = bool(
+            getattr(effective_config, "tushare_research_enabled", False)
+        )
+        api_url = _resolve_tushare_http_url(include_api_alias=research_enabled)
+        provider_options = {
+            "enforce_limits": research_enabled,
+            "worker_only": research_enabled,
+            "global_calls_per_minute": int(
+                getattr(effective_config, "tushare_global_calls_per_minute", 450)
+            ),
+            "max_inflight": int(
+                getattr(effective_config, "tushare_max_inflight", 2)
+            ),
+            "endpoint_limits": dict(
+                getattr(effective_config, "tushare_endpoint_limits", {}) or {}
+            ),
+        }
         if api_url:
-            logger.info("Tushare 使用自定义接入地址: %s", api_url)
-            client = _TushareHttpClient(token=token, api_url=api_url)
+            # Gateway URLs can contain embedded credentials; never log them.
+            logger.info("Tushare uses the configured HTTP gateway")
+            client = _TushareHttpClient(
+                token=token,
+                api_url=api_url,
+                **provider_options,
+            )
         else:
-            client = _TushareHttpClient(token=token)
+            client = _TushareHttpClient(token=token, **provider_options)
         logger.debug("Tushare API client configured for direct HTTP calls")
         return client
 
@@ -281,6 +297,12 @@ class TushareFetcher(BaseFetcher):
         2. 如果是，重置计数器
         3. 如果当前分钟调用次数超过限制，强制休眠
         """
+        # The research provider reserves capacity atomically immediately before
+        # transport. Keep the historical per-instance limiter only while the
+        # feature flag is disabled.
+        if getattr(self, "_research_limits_enabled", False):
+            return
+
         current_time = time.time()
         
         # 检查是否需要重置计数器（新的一分钟）
@@ -574,7 +596,8 @@ class TushareFetcher(BaseFetcher):
             
             raise DataFetchError(f"Tushare 获取数据失败: {e}") from e
     
-    def _normalize_data(self, df: pd.DataFrame, stock_code: str) -> pd.DataFrame:
+    @staticmethod
+    def normalize_daily_frame(df: pd.DataFrame, stock_code: str) -> pd.DataFrame:
         """
         标准化 Tushare 数据
         
@@ -622,6 +645,11 @@ class TushareFetcher(BaseFetcher):
         df = df[existing_cols]
         
         return df
+
+    def _normalize_data(self, df: pd.DataFrame, stock_code: str) -> pd.DataFrame:
+        """Compatibility hook delegating to the side-effect-free daily converter."""
+
+        return self.normalize_daily_frame(df, stock_code)
 
     def get_stock_name(self, stock_code: str) -> Optional[str]:
         """
@@ -790,6 +818,12 @@ class TushareFetcher(BaseFetcher):
         except Exception as e:
             # 仅记录调试日志，不报错，继续尝试降级
             logger.debug(f"Tushare Pro 实时行情不可用 (可能是积分不足): {e}")
+
+        # Research mode keeps every account call behind the unified provider.
+        # The legacy SDK endpoint has no compatible Pro transport contract and
+        # therefore remains available only on the flag-off compatibility path.
+        if getattr(self, "_research_limits_enabled", False):
+            return None
 
         # 降级：尝试旧版接口
         try:
@@ -1229,21 +1263,14 @@ class TushareFetcher(BaseFetcher):
                 )
                 if daily_df is None or daily_df.empty:
                     return None
-                current_price = daily_df.iloc[0]['close']
-                metrics = self.compute_cyq_metrics(df, current_price)
-
-                chip = ChipDistribution(
-                    code=stock_code,
-                    date=datetime.strptime(start_date, '%Y%m%d').strftime('%Y-%m-%d'),
-                    profit_ratio=metrics['获利比例'],
-                    avg_cost=metrics['平均成本'],
-                    cost_90_low=metrics['90成本-低'],
-                    cost_90_high=metrics['90成本-高'],
-                    concentration_90=metrics['90集中度'],
-                    cost_70_low=metrics['70成本-低'],
-                    cost_70_high=metrics['70成本-高'],
-                    concentration_70=metrics['70集中度'],
+                chip = self.build_chip_distribution_from_frames(
+                    stock_code,
+                    df,
+                    daily_df,
+                    trade_date=start_date,
                 )
+                if chip is None:
+                    return None
                 
                 logger.info(f"[筹码分布] {stock_code} 日期={chip.date}: 获利比例={chip.profit_ratio:.1%}, "
                         f"平均成本={chip.avg_cost}, 90%集中度={chip.concentration_90:.2%}, "
@@ -1254,7 +1281,63 @@ class TushareFetcher(BaseFetcher):
             logger.warning(f"[Tushare] 获取筹码分布失败 {stock_code}: {e}")
             return None
 
-    def compute_cyq_metrics(self, df: pd.DataFrame, current_price: float) -> dict:
+    @staticmethod
+    def build_chip_distribution_from_frames(
+        stock_code: str,
+        chips_frame: pd.DataFrame,
+        daily_frame: pd.DataFrame,
+        *,
+        trade_date: Optional[str] = None,
+    ) -> Optional[ChipDistribution]:
+        """Build legacy chip metrics from PR2 frozen frames without refetching."""
+
+        if not isinstance(chips_frame, pd.DataFrame) or chips_frame.empty:
+            return None
+        if not isinstance(daily_frame, pd.DataFrame) or daily_frame.empty:
+            return None
+        if "price" not in chips_frame or "percent" not in chips_frame:
+            return None
+        if "close" not in daily_frame:
+            return None
+
+        chips = chips_frame.copy(deep=True)
+        daily = daily_frame.copy(deep=True)
+        latest_trade_date = str(trade_date or "").strip() or None
+        if "trade_date" in chips:
+            valid_dates = chips["trade_date"].dropna().astype(str)
+            valid_dates = valid_dates[valid_dates.str.fullmatch(r"\d{8}")]
+            if valid_dates.empty:
+                return None
+            latest_trade_date = valid_dates.max()
+            chips = chips[chips["trade_date"].astype(str) == latest_trade_date]
+        if latest_trade_date is not None and "trade_date" in daily:
+            matching = daily[daily["trade_date"].astype(str) == latest_trade_date]
+            if not matching.empty:
+                daily = matching
+        current_price = pd.to_numeric(daily.iloc[0].get("close"), errors="coerce")
+        if pd.isna(current_price) or float(current_price) <= 0:
+            return None
+        metrics = TushareFetcher.compute_cyq_metrics(chips, float(current_price))
+        chip_date = (
+            datetime.strptime(latest_trade_date, "%Y%m%d").strftime("%Y-%m-%d")
+            if latest_trade_date is not None
+            else str(daily.iloc[0].get("trade_date") or "")
+        )
+        return ChipDistribution(
+            code=stock_code,
+            date=chip_date,
+            profit_ratio=metrics["获利比例"],
+            avg_cost=metrics["平均成本"],
+            cost_90_low=metrics["90成本-低"],
+            cost_90_high=metrics["90成本-高"],
+            concentration_90=metrics["90集中度"],
+            cost_70_low=metrics["70成本-低"],
+            cost_70_high=metrics["70成本-高"],
+            concentration_70=metrics["70集中度"],
+        )
+
+    @staticmethod
+    def compute_cyq_metrics(df: pd.DataFrame, current_price: float) -> dict:
         """
         基于 Tushare 的筹码分布明细表 (cyq_chips) 计算常用筹码指标  
         :param df: 包含 'price' 和 'percent' 列的 DataFrame  

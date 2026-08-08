@@ -14,12 +14,15 @@ from scripts import sqlite_backup
 CORE_TABLES = ("schema_migrations", "parents", "children", "items")
 
 
-def test_default_backup_contract_includes_pr1_durable_tables() -> None:
+def test_default_backup_contract_includes_durable_and_research_tables() -> None:
     assert {
         "analysis_jobs",
         "job_events",
         "notification_outbox",
         "provider_health",
+        "research_dataset_snapshots",
+        "research_factor_snapshots",
+        "research_snapshots",
     }.issubset(sqlite_backup.DEFAULT_BACKUP_CORE_TABLES)
 
 

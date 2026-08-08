@@ -544,6 +544,14 @@ def update_current_diagnostic_stage(stage: Optional[str]) -> None:
         context.stage = stage
 
 
+def update_current_diagnostic_snapshot_hash(snapshot_hash: Optional[str]) -> None:
+    """Attach the immutable research snapshot consumed by later LLM calls."""
+
+    context = get_current_diagnostic_context()
+    if context is not None:
+        context.snapshot_hash = (str(snapshot_hash).strip() or None) if snapshot_hash else None
+
+
 def reset_run_diagnostic_context(token: Optional[Token]) -> None:
     if token is None:
         return

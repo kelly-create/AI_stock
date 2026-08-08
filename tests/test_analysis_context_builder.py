@@ -147,6 +147,57 @@ def test_quote_block_maps_available_missing_fallback_and_explicit_stale() -> Non
     assert "quote_stale" in stale.warnings
 
 
+def test_research_factors_block_is_additive_and_not_quality_weighted() -> None:
+    legacy = AnalysisContextBuilder.build(_artifacts())
+    assert "research_factors" not in legacy.blocks
+
+    enriched = AnalysisContextBuilder.build(
+        _artifacts(
+            research_context={
+                "status": "partial",
+                "available_at": "2026-05-24T15:00:00Z",
+                "factors": {
+                    "value": {"score": 72.5},
+                    "risk": {"score": 31.0},
+                },
+                "unknowns": ["forecast_missing"],
+            }
+        )
+    )
+    block = enriched.blocks["research_factors"]
+    assert block.status == ContextFieldStatus.PARTIAL
+    assert block.timestamp == "2026-05-24T15:00:00Z"
+    assert block.items["factors"].status == ContextFieldStatus.AVAILABLE
+    assert block.items["factors"].value["value"]["score"] == 72.5
+    assert block.metadata == {"auxiliary": True, "quality_weighted": False}
+    assert enriched.data_quality == legacy.data_quality
+
+
+@pytest.mark.parametrize(
+    ("research_status", "pack_status", "missing_reason"),
+    [
+        ("empty", ContextFieldStatus.MISSING, "research_empty"),
+        (
+            "permission_denied",
+            ContextFieldStatus.FETCH_FAILED,
+            "research_permission_denied",
+        ),
+        ("not_supported", ContextFieldStatus.NOT_SUPPORTED, "research_not_supported"),
+        ("fetch_failed", ContextFieldStatus.FETCH_FAILED, "research_fetch_failed"),
+    ],
+)
+def test_research_dataset_statuses_map_to_existing_pack_contract(
+    research_status: str,
+    pack_status: ContextFieldStatus,
+    missing_reason: str,
+) -> None:
+    block = AnalysisContextBuilder.build(
+        _artifacts(research_context={"status": research_status})
+    ).blocks["research_factors"]
+    assert block.status == pack_status
+    assert block.items["status"].missing_reason == missing_reason
+
+
 def test_quote_block_maps_realtime_metadata_and_status_priority() -> None:
     fallback = AnalysisContextBuilder.build(
         _artifacts(

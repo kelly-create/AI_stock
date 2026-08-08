@@ -21,6 +21,11 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from data_provider.tushare_provider import (
+    DEFAULT_TUSHARE_HTTP_URL as _RESEARCH_TUSHARE_HTTP_URL,
+    build_runtime_tushare_provider,
+    resolve_tushare_api_url_from_env,
+)
 from src.services.screening.source_guard import call_with_timeout, parse_source_timeout_seconds
 
 logger = logging.getLogger(__name__)
@@ -590,10 +595,18 @@ def _fetch_tushare() -> pd.DataFrame:
     if not token:
         raise RuntimeError("tushare requires TUSHARE_TOKEN")
 
-    import tushare as ts
+    if _tushare_research_enabled():
+        api_url = resolve_tushare_api_url_from_env(
+            default=_RESEARCH_TUSHARE_HTTP_URL
+        )
+        pro = build_runtime_tushare_provider(token=token, api_url=api_url)
+    else:
+        # Feature-flag-off compatibility: retain the historical SDK transport,
+        # default URL, private token assignment, and exception behavior.
+        import tushare as ts
 
-    pro = ts.pro_api(token)
-    _configure_tushare_client(pro, token=token)
+        pro = ts.pro_api(token)
+        _configure_tushare_client(pro, token=token)
     trade_date = _resolve_tushare_trade_date(pro)
     daily = pro.daily(
         trade_date=trade_date,
@@ -615,6 +628,12 @@ def _fetch_tushare() -> pd.DataFrame:
         raise RuntimeError(f"tushare daily_basic returned empty data for {trade_date}")
 
     return _prepare_tushare_snapshot(daily, daily_basic, stock_basic)
+
+
+def _tushare_research_enabled() -> bool:
+    from src.config import get_config
+
+    return bool(getattr(get_config(), "tushare_research_enabled", False))
 
 
 def _configure_tushare_client(pro: object, *, token: str) -> None:

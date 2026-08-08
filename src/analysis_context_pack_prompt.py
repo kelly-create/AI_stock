@@ -23,7 +23,10 @@ BLOCK_LABELS_EN = {
     "chip": "chip",
     "fundamentals": "fundamentals",
     "news": "news",
+    "research_factors": "research factors",
 }
+
+BLOCK_LABELS_ZH["research_factors"] = "研究因子"
 
 STATUS_LABELS_ZH = {
     "available": "可用",
