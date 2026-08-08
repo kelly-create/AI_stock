@@ -9,6 +9,7 @@ import { RunFlowEventList } from './RunFlowEventList';
 import { RunFlowGraph } from './RunFlowGraph';
 import { RunFlowNodeDetails } from './RunFlowNodeDetails';
 import { RunFlowSummaryBar } from './RunFlowSummaryBar';
+import { ResearchEvidencePanel } from './ResearchEvidencePanel';
 import { buildRunFlowTopologyModel } from './topologyViewModel';
 
 interface RunFlowPanelProps {
@@ -150,6 +151,10 @@ export const RunFlowPanel: React.FC<RunFlowPanelProps> = ({ source, title }) => 
       </div>
 
       <RunFlowSummaryBar snapshot={snapshot} />
+
+      <ResearchEvidencePanel
+        taskId={source?.type === 'task' ? source.taskId : null}
+      />
 
       {!hasDetails ? (
         <EmptyState

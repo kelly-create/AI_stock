@@ -39,6 +39,8 @@ from .repositories import (
 )
 from .schemas import ComponentStatus, MetricStatus, ResearchFactorResult
 from .snapshot_service import (
+    EVIDENCE_FIELD_DICTIONARY_VERSION,
+    EVIDENCE_SNAPSHOT_VERSION,
     FACTOR_ENGINE_VERSION,
     FrozenResearchSnapshot,
     build_research_snapshot,
@@ -77,6 +79,10 @@ class PreparedResearch:
     factors: Optional[ResearchFactorResult]
     factor_snapshot: Optional[SnapshotWriteResult]
     factors_enabled: bool
+    evidence_snapshot: Optional[Any]
+    evidence_context: Optional[Mapping[str, Any]]
+    evidence_prompt_context: Optional[str]
+    evidence_enabled: bool
 
 
 @dataclass(frozen=True)
@@ -394,6 +400,62 @@ def _research_warnings(
     return tuple(warnings)
 
 
+def _combined_research_status(factor_status: str, evidence_status: Optional[str]) -> str:
+    if not evidence_status or evidence_status == DatasetStatus.AVAILABLE.value:
+        return factor_status
+    if factor_status == DatasetStatus.AVAILABLE.value:
+        return DatasetStatus.PARTIAL.value
+    return factor_status
+
+
+def _news_dataset_payload(collection: Any, *, market: str) -> Mapping[str, Any]:
+    content_hash = str(getattr(collection, "content_hash", "") or "").strip()
+    if not _SHA256_RE.fullmatch(content_hash):
+        raise ResearchRuntimeContractError(
+            "persisted news_search collection must expose a lowercase SHA-256 hash"
+        )
+    to_input = getattr(collection, "to_dataset_input", None)
+    if not callable(to_input):
+        raise ResearchRuntimeContractError(
+            "evidence collection must expose to_dataset_input"
+        )
+    item = to_input(market)
+    return MappingProxyType(
+        canonicalize(
+            {
+                "dataset": item.dataset,
+                "scope_type": item.scope_type,
+                "scope_value": item.scope_value,
+                "market": item.market,
+                "provider": item.provider,
+                "schema_version": item.schema_version,
+                "data_as_of": item.data_as_of,
+                "available_at": item.available_at,
+                "observed_at": item.observed_at,
+                "status": item.status,
+                "normalized": item.normalized,
+                "content_hash": content_hash,
+                "content_hashes": [content_hash],
+                "raw_ref": item.raw_ref,
+                "error_code": item.error_code,
+            }
+        )
+    )
+
+
+def _news_dataset_rows(collection: Any) -> tuple[Mapping[str, Any], ...]:
+    raw_items = getattr(collection, "items", ())
+    if not isinstance(raw_items, Sequence) or isinstance(
+        raw_items, (str, bytes, bytearray)
+    ):
+        raise ResearchRuntimeContractError("evidence collection items must be a sequence")
+    return tuple(
+        MappingProxyType(canonicalize(dict(item)))
+        for item in raw_items
+        if isinstance(item, Mapping)
+    )
+
+
 class ResearchRuntimeService:
     """Two-stage research runtime with dependency-injected stateful edges."""
 
@@ -406,6 +468,8 @@ class ResearchRuntimeService:
         provider_factory: Optional[Callable[[Any], Any]] = None,
         collector_factory: Optional[Callable[..., Any]] = None,
         raw_store_factory: Optional[Callable[[Path], Any]] = None,
+        evidence_collector: Any = None,
+        evidence_collector_factory: Optional[Callable[..., Any]] = None,
         durable_context_getter: Callable[[], Any] = _current_durable_context,
         diagnostic_updater: Callable[[str], None] = _update_diagnostic_hash,
     ) -> None:
@@ -415,6 +479,8 @@ class ResearchRuntimeService:
         self._provider_factory = provider_factory
         self._collector_factory = collector_factory or ResearchDatasetCollector
         self._raw_store_factory = raw_store_factory or RawArtifactStore
+        self._evidence_collector = evidence_collector
+        self._evidence_collector_factory = evidence_collector_factory
         self._durable_context_getter = durable_context_getter
         self._diagnostic_updater = diagnostic_updater
         self._provider_health_reporter: Optional[TushareProviderHealthReporter] = None
@@ -428,6 +494,213 @@ class ResearchRuntimeService:
 
     def _factors_enabled(self) -> bool:
         return bool(_config_value(self.config, "research_factors_enabled", False))
+
+    def _evidence_enabled(self) -> bool:
+        return bool(_config_value(self.config, "research_evidence_enabled", False))
+
+    def _new_evidence_collector(
+        self,
+        *,
+        search_callable: Optional[Callable[..., Any]],
+        repository: Any,
+    ) -> Any:
+        if self._evidence_collector is not None:
+            collector = self._evidence_collector
+            bound_repository = getattr(collector, "repository", None)
+            if bound_repository is not None and bound_repository is not repository:
+                raise ResearchRuntimeContractError(
+                    "injected evidence collector belongs to a different repository"
+                )
+            if hasattr(collector, "repository"):
+                collector.repository = repository
+            if search_callable is not None and hasattr(collector, "search_callable"):
+                collector.search_callable = search_callable
+            return collector
+        if self._evidence_collector_factory is not None:
+            return self._evidence_collector_factory(
+                search_callable=search_callable,
+                repository=repository,
+            )
+        from .evidence_collector import EvidenceCollector
+
+        return EvidenceCollector(
+            search_callable=search_callable,
+            repository=repository,
+        )
+
+    @staticmethod
+    def _load_bound_evidence(
+        repository: Any,
+        *,
+        lease: LeaseFence,
+        stock_code: str,
+        market: str,
+        base_as_of: datetime,
+        factor_snapshot_hash: str,
+        base_dataset_hashes: Sequence[str],
+    ) -> Any:
+        from .evidence_service import hydrate_evidence_snapshot
+
+        result = repository.list_evidence(
+            job_id=lease.job_id,
+            stock_code=stock_code,
+            limit=100,
+        )
+        if not isinstance(result, Mapping) or not isinstance(result.get("items"), list):
+            raise ResearchRuntimeContractError(
+                "repository.list_evidence returned an invalid contract"
+            )
+        records = result["items"]
+        if not records:
+            return None
+        distinct_hashes = {
+            str(item.get("evidence_hash") or "")
+            for item in records
+            if isinstance(item, Mapping)
+        }
+        if len(records) != 1 or len(distinct_hashes) != 1:
+            raise ResearchRuntimeContractError(
+                "durable job contains ambiguous evidence snapshots for one stock"
+            )
+        snapshot = hydrate_evidence_snapshot(records[0])
+        if snapshot.stock_code != stock_code or snapshot.market != market:
+            raise ResearchRuntimeContractError(
+                "bound evidence belongs to a different stock or market"
+            )
+        if snapshot.as_of < base_as_of:
+            raise ResearchRuntimeContractError(
+                "bound evidence predates the prepared research boundary"
+            )
+        if snapshot.factor_snapshot_hash != factor_snapshot_hash:
+            raise ResearchRuntimeContractError(
+                "bound evidence factor lineage differs from prepared research"
+            )
+        expected_base = set(base_dataset_hashes)
+        if not expected_base.issubset(set(snapshot.input_dataset_hashes)):
+            raise ResearchRuntimeContractError(
+                "bound evidence dataset lineage differs from prepared research"
+            )
+        return snapshot
+
+    def _prepare_evidence(
+        self,
+        *,
+        context: Any,
+        lease: LeaseFence,
+        stock_code: str,
+        stock_name: str,
+        market: str,
+        base_as_of: datetime,
+        reference_mode: str,
+        datasets_payload: Mapping[str, Any],
+        factors: ResearchFactorResult,
+        factor_snapshot: SnapshotWriteResult,
+        collection: Any,
+        search_callable: Optional[Callable[..., Any]],
+    ) -> tuple[Any, Mapping[str, Any], str, Any, Mapping[str, Any]]:
+        from .evidence_collector import hydrate_evidence_collection
+        from .evidence_service import (
+            build_evidence_snapshot,
+            build_research_evidence_input,
+            evidence_context_from_snapshot,
+            format_research_evidence_context,
+        )
+
+        repository = self._get_repository()
+        base_hashes = _input_dataset_hashes(collection)
+        factor_hash = factor_snapshot.content_hash
+        evidence_snapshot = self._load_bound_evidence(
+            repository,
+            lease=lease,
+            stock_code=stock_code,
+            market=market,
+            base_as_of=base_as_of,
+            factor_snapshot_hash=factor_hash,
+            base_dataset_hashes=base_hashes,
+        )
+        news_record = repository.get_job_dataset(
+            job_id=lease.job_id,
+            dataset="news_search",
+            scope_value=stock_code,
+        )
+        news_collection = (
+            hydrate_evidence_collection(news_record)
+            if news_record is not None
+            else None
+        )
+        if evidence_snapshot is None:
+            evidence_collector = self._new_evidence_collector(
+                search_callable=search_callable,
+                repository=repository,
+            )
+            _raise_if_stopped(context)
+            try:
+                news_collection = evidence_collector.collect(
+                    stock_code,
+                    stock_name=stock_name,
+                    as_of=base_as_of,
+                    reference_mode=reference_mode,
+                    existing=news_collection,
+                    cancel_event=_durable_stop_signal(context),
+                )
+            except Exception:
+                # The generic collector reports a stopped signal with its own
+                # boundary error. Translate it back through the durable
+                # context so cancellation and stale leases keep their typed
+                # worker semantics; otherwise preserve the original failure.
+                _raise_if_stopped(context)
+                raise
+            _raise_if_stopped(context)
+            news_collection = evidence_collector.persist(
+                news_collection,
+                market=market,
+                lease=lease,
+            )
+            _raise_if_stopped(context)
+            build_input = build_research_evidence_input(
+                stock_code=stock_code,
+                market=market,
+                as_of=news_collection.as_of,
+                datasets=datasets_payload,
+                factors=factors,
+                factor_snapshot_hash=factor_hash,
+                collection=news_collection,
+            )
+            evidence_snapshot = build_evidence_snapshot(build_input)
+            _raise_if_stopped(context)
+            write_result = evidence_snapshot.persist(repository, lease=lease)
+            _raise_if_stopped(context)
+            if write_result.content_hash != evidence_snapshot.evidence_hash:
+                raise ResearchRuntimeContractError(
+                    "evidence repository returned a conflicting content hash"
+                )
+        elif news_collection is None:
+            raise ResearchRuntimeContractError(
+                "bound evidence is missing its durable news_search dataset binding"
+            )
+        if news_collection is None:
+            raise ResearchRuntimeContractError(
+                "evidence preparation did not produce a news_search collection"
+            )
+        if news_collection.content_hash not in evidence_snapshot.input_dataset_hashes:
+            raise ResearchRuntimeContractError(
+                "news_search dataset is absent from evidence lineage"
+            )
+        expected_hashes = set(base_hashes)
+        expected_hashes.add(news_collection.content_hash)
+        if set(evidence_snapshot.input_dataset_hashes) != expected_hashes:
+            raise ResearchRuntimeContractError(
+                "evidence input dataset hashes do not match consumed artifacts"
+            )
+        evidence_context = dict(evidence_context_from_snapshot(evidence_snapshot))
+        evidence_context["evidence_hash"] = evidence_snapshot.evidence_hash
+        return (
+            evidence_snapshot,
+            MappingProxyType(canonicalize(evidence_context)),
+            format_research_evidence_context(evidence_snapshot),
+            news_collection,
+            _news_dataset_payload(news_collection, market=market),
+        )
 
     def _default_raw_root(self) -> Path:
         database_path = Path(str(_config_value(self.config, "database_path", "./data/stock_analysis.db")))
@@ -514,11 +787,18 @@ class ResearchRuntimeService:
         scenario: Optional[Mapping[str, Any]] = None,
         *,
         reference_mode: Literal["live", "historical"] = "historical",
+        evidence_search: Optional[Callable[..., Any]] = None,
     ) -> Optional[PreparedResearch]:
         personal_enabled = self._personal_enabled()
         tushare_enabled = self._tushare_enabled()
         factors_enabled = self._factors_enabled()
-        if not personal_enabled and not tushare_enabled and not factors_enabled:
+        evidence_enabled = self._evidence_enabled()
+        if (
+            not personal_enabled
+            and not tushare_enabled
+            and not factors_enabled
+            and not evidence_enabled
+        ):
             return None
         if factors_enabled and (not personal_enabled or not tushare_enabled):
             raise RuntimeError("RESEARCH_FACTORS_ENABLED requires PERSONAL_RESEARCH_ENABLED and TUSHARE_RESEARCH_ENABLED")
@@ -526,6 +806,10 @@ class ResearchRuntimeService:
             return None
         if not personal_enabled:
             raise RuntimeError("TUSHARE_RESEARCH_ENABLED requires PERSONAL_RESEARCH_ENABLED")
+        if evidence_enabled and not factors_enabled:
+            raise RuntimeError(
+                "RESEARCH_EVIDENCE_ENABLED requires RESEARCH_FACTORS_ENABLED"
+            )
         if reference_mode not in {"live", "historical"}:
             raise ValueError("reference_mode must be 'live' or 'historical'")
 
@@ -608,18 +892,78 @@ class ResearchRuntimeService:
             factor_snapshot = repository.write_factors(factor_snapshot_input, lease=lease)
             _raise_if_stopped(context)
 
+        evidence_snapshot = None
+        evidence_context = None
+        evidence_prompt_context = None
+        evidence_status = None
+        if evidence_enabled:
+            if factors is None or factor_snapshot is None:
+                raise ResearchRuntimeContractError(
+                    "evidence requires a persisted deterministic factor snapshot"
+                )
+            stock_name = str(stock_code).strip()
+            for item in rows_by_dataset.get("stock_basic", ()):
+                if not isinstance(item, Mapping):
+                    continue
+                candidate = str(item.get("name") or item.get("fullname") or "").strip()
+                if candidate:
+                    stock_name = candidate
+                    break
+            (
+                evidence_snapshot,
+                evidence_context,
+                evidence_prompt_context,
+                news_collection,
+                news_payload,
+            ) = self._prepare_evidence(
+                context=context,
+                lease=lease,
+                stock_code=str(stock_code).strip(),
+                stock_name=stock_name,
+                market=str(market).strip() or "A",
+                base_as_of=collection_boundary,
+                reference_mode=reference_mode,
+                datasets_payload=datasets_payload,
+                factors=factors,
+                factor_snapshot=factor_snapshot,
+                collection=collection,
+                search_callable=evidence_search,
+            )
+            if evidence_snapshot.as_of < collection_boundary:
+                raise ResearchRuntimeContractError(
+                    "evidence boundary cannot precede dataset collection boundary"
+                )
+            collection_boundary = evidence_snapshot.as_of
+            available_at = max(available_at, evidence_snapshot.available_at)
+            combined_datasets = dict(datasets_payload)
+            combined_datasets["news_search"] = news_payload
+            datasets_payload = MappingProxyType(combined_datasets)
+            combined_rows = dict(rows_by_dataset)
+            combined_rows["news_search"] = _news_dataset_rows(news_collection)
+            rows_by_dataset = MappingProxyType(combined_rows)
+            evidence_status = evidence_snapshot.status
+
         factor_unknowns = _factor_unknowns(factors) if factors is not None else ()
-        research_status = (
+        factor_or_dataset_status = (
             _factor_status(factors)
             if factors is not None
             else _collection_status_without_factors(datasets_payload)
         )
+        research_status = _combined_research_status(
+            factor_or_dataset_status,
+            evidence_status,
+        )
         research_warnings = _research_warnings(
             datasets_payload,
             factors_enabled=factors_enabled,
-            factor_status=research_status,
+            factor_status=factor_or_dataset_status,
             unknowns=factor_unknowns,
         )
+        if evidence_enabled and evidence_status != DatasetStatus.AVAILABLE.value:
+            research_warnings = (
+                *research_warnings,
+                f"research_evidence_{evidence_status or 'partial'}",
+            )
         dataset_summary = {
             dataset: {
                 "row_count": len(rows),
@@ -632,22 +976,29 @@ class ResearchRuntimeService:
             }
             for dataset, rows in rows_by_dataset.items()
         }
-        research_context = MappingProxyType(
-            canonicalize(
+        research_context_values = {
+            "stock_code": str(stock_code).strip(),
+            "market": str(market).strip() or "A",
+            "as_of": collection_boundary,
+            "available_at": available_at,
+            "status": research_status,
+            "datasets": dataset_summary,
+            "factors": factors.to_dict() if factors is not None else None,
+            "unknowns": factor_unknowns,
+            "warnings": research_warnings,
+            "factor_snapshot_hash": (
+                factor_snapshot.content_hash if factor_snapshot is not None else None
+            ),
+        }
+        if evidence_snapshot is not None:
+            research_context_values.update(
                 {
-                    "stock_code": str(stock_code).strip(),
-                    "market": str(market).strip() or "A",
-                    "as_of": collection_boundary,
-                    "available_at": available_at,
-                    "status": research_status,
-                    "datasets": dataset_summary,
-                    "factors": factors.to_dict() if factors is not None else None,
-                    "unknowns": factor_unknowns,
-                    "warnings": research_warnings,
-                    "factor_snapshot_hash": factor_snapshot.content_hash if factor_snapshot is not None else None,
+                    "evidence_snapshot_hash": evidence_snapshot.evidence_hash,
+                    "evidence_status": evidence_snapshot.status,
+                    "evidence_coverage": evidence_snapshot.coverage,
                 }
             )
-        )
+        research_context = MappingProxyType(canonicalize(research_context_values))
         return PreparedResearch(
             stock_code=str(stock_code).strip(),
             market=str(market).strip() or "A",
@@ -662,6 +1013,10 @@ class ResearchRuntimeService:
             factors=factors,
             factor_snapshot=factor_snapshot,
             factors_enabled=factors_enabled,
+            evidence_snapshot=evidence_snapshot,
+            evidence_context=evidence_context,
+            evidence_prompt_context=evidence_prompt_context,
+            evidence_enabled=evidence_enabled,
         )
 
     def freeze(
@@ -688,6 +1043,20 @@ class ResearchRuntimeService:
         pack_version_text = str(pack_version or "").strip()
         if not pack_version_text:
             raise ResearchRuntimeContractError("context_pack must expose pack_version")
+        snapshot_kwargs: dict[str, Any] = {}
+        if prepared.evidence_enabled:
+            if prepared.evidence_snapshot is None or prepared.evidence_context is None:
+                raise ResearchRuntimeContractError(
+                    "evidence-enabled research must expose a frozen evidence snapshot"
+                )
+            snapshot_kwargs.update(
+                {
+                    "snapshot_version": EVIDENCE_SNAPSHOT_VERSION,
+                    "field_dictionary_version": EVIDENCE_FIELD_DICTIONARY_VERSION,
+                    "evidence": prepared.evidence_snapshot.canonical_payload,
+                    "evidence_snapshot_hash": prepared.evidence_snapshot.evidence_hash,
+                }
+            )
         snapshot = build_research_snapshot(
             stock_code=prepared.stock_code,
             market=prepared.market,
@@ -703,9 +1072,7 @@ class ResearchRuntimeService:
             policy=policy,
             pack_version=pack_version_text,
             status=(
-                _factor_status(prepared.factors)
-                if prepared.factors is not None
-                else _collection_status_without_factors(prepared.datasets_payload)
+                str(prepared.research_context.get("status") or "partial")
             ),
             factor_engine_version=FACTOR_ENGINE_VERSION,
             factor_snapshot_hash=(
@@ -713,6 +1080,7 @@ class ResearchRuntimeService:
                 if prepared.factor_snapshot is not None
                 else None
             ),
+            **snapshot_kwargs,
         )
         _raise_if_stopped(context)
         write_result = snapshot.persist(self._get_repository(), lease=prepared.lease)

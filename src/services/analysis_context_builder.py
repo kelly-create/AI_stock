@@ -73,6 +73,7 @@ class PipelineAnalysisArtifacts:
     metadata: Dict[str, Any]
     portfolio_context: Optional[Dict[str, Any]] = None
     research_context: Optional[Dict[str, Any]] = None
+    research_evidence_context: Optional[Dict[str, Any]] = None
 
 
 class AnalysisContextBuilder:
@@ -98,6 +99,9 @@ class AnalysisContextBuilder:
         research_block = _build_research_factors_block(artifacts)
         if research_block is not None:
             blocks["research_factors"] = research_block
+        evidence_block = _build_research_evidence_block(artifacts)
+        if evidence_block is not None:
+            blocks["research_evidence"] = evidence_block
         portfolio_block = _build_portfolio_block(artifacts)
         if portfolio_block is not None:
             blocks["portfolio"] = portfolio_block
@@ -566,6 +570,115 @@ def _build_research_factors_block(
         status=block_status,
         items=items,
         source="deterministic_research_factors",
+        timestamp=_metadata_iso_datetime_value(context, "available_at"),
+        warnings=warnings[:10],
+        metadata={"auxiliary": True, "quality_weighted": False},
+    )
+
+
+def _build_research_evidence_block(
+    artifacts: PipelineAnalysisArtifacts,
+) -> Optional[AnalysisContextBlock]:
+    """Expose frozen claims/citations without changing legacy quality scoring."""
+
+    context = _to_dict(artifacts.research_evidence_context)
+    if not context:
+        return None
+    raw_status = str(context.get("status") or "partial").strip().lower()
+    status_map = {
+        "available": ContextFieldStatus.AVAILABLE,
+        "empty": ContextFieldStatus.MISSING,
+        "partial": ContextFieldStatus.PARTIAL,
+        "stale": ContextFieldStatus.STALE,
+        "permission_denied": ContextFieldStatus.FETCH_FAILED,
+        "not_supported": ContextFieldStatus.NOT_SUPPORTED,
+        "fetch_failed": ContextFieldStatus.FETCH_FAILED,
+    }
+    block_status = status_map.get(raw_status, ContextFieldStatus.PARTIAL)
+    missing_reason = (
+        None
+        if block_status == ContextFieldStatus.AVAILABLE
+        else f"research_evidence_{raw_status or 'partial'}"
+    )
+    raw_claims = context.get("claims")
+    raw_citations = context.get("citations")
+    raw_limitations = context.get("limitations")
+    claims = (
+        list(raw_claims)
+        if isinstance(raw_claims, Sequence)
+        and not isinstance(raw_claims, (str, bytes, bytearray))
+        else []
+    )
+    citations = (
+        list(raw_citations)
+        if isinstance(raw_citations, Sequence)
+        and not isinstance(raw_citations, (str, bytes, bytearray))
+        else []
+    )
+    limitations = (
+        list(raw_limitations)
+        if isinstance(raw_limitations, Sequence)
+        and not isinstance(raw_limitations, (str, bytes, bytearray))
+        else []
+    )
+    items: Dict[str, AnalysisContextItem] = {
+        "status": AnalysisContextItem(
+            status=block_status,
+            value=raw_status,
+            source="frozen_research_evidence",
+            missing_reason=missing_reason,
+        ),
+        "claims": AnalysisContextItem(
+            status=(
+                ContextFieldStatus.AVAILABLE
+                if claims
+                else block_status
+            ),
+            value=claims,
+            source="frozen_research_evidence",
+            missing_reason=(
+                None if claims else missing_reason
+            ),
+        ),
+        "citations": AnalysisContextItem(
+            status=(
+                ContextFieldStatus.AVAILABLE
+                if citations
+                else block_status
+            ),
+            value=citations,
+            source="frozen_research_evidence",
+            missing_reason=(
+                None if citations else missing_reason
+            ),
+        ),
+    }
+    if limitations:
+        items["limitations"] = AnalysisContextItem(
+            status=(
+                ContextFieldStatus.PARTIAL
+                if limitations
+                else ContextFieldStatus.AVAILABLE
+            ),
+            value=list(limitations),
+            source="frozen_research_evidence",
+        )
+    evidence_hash = str(context.get("evidence_hash") or "").strip()
+    if evidence_hash:
+        items["evidence_hash"] = AnalysisContextItem(
+            status=ContextFieldStatus.AVAILABLE,
+            value=evidence_hash,
+            source="frozen_research_evidence",
+        )
+    warnings = [
+        str(item)
+        for item in context.get("warnings", [])
+        if str(item).strip()
+    ]
+    return AnalysisContextBlock(
+        status=block_status,
+        items=items,
+        source="frozen_research_evidence",
         timestamp=_metadata_iso_datetime_value(context, "available_at"),
         warnings=warnings[:10],
         metadata={"auxiliary": True, "quality_weighted": False},

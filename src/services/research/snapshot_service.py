@@ -25,6 +25,8 @@ if TYPE_CHECKING:
 
 SNAPSHOT_VERSION = "research-snapshot-v1"
 FIELD_DICTIONARY_VERSION = "research-fields-v1"
+EVIDENCE_SNAPSHOT_VERSION = "research-snapshot-v2"
+EVIDENCE_FIELD_DICTIONARY_VERSION = "research-fields-v2"
 FACTOR_ENGINE_VERSION = "factor-engine-v1"
 
 _EXTERNAL_TOKENS = frozenset({"news", "search", "article", "intelligence", "external"})
@@ -710,6 +712,17 @@ def project_factors(factors: Any, *, as_of: Any) -> Any:
     return canonicalize(_project_tree(safe))
 
 
+def project_evidence(evidence: Any, *, as_of: Any) -> Any:
+    """Project a frozen Evidence payload into the final research snapshot."""
+
+    cutoff = _aware_datetime(as_of, field="as_of")
+    if evidence is None:
+        return None
+    safe = _safe_object(evidence, field="evidence")
+    _validate_evidence_times(safe, snapshot_as_of=cutoff, path="evidence")
+    return canonicalize(_project_tree(safe))
+
+
 def _route_output_parameters(route: Mapping[str, Any]) -> Mapping[str, Any]:
     parameter_sources = [route]
     for container_key in sorted(_ROUTE_PARAMETER_CONTAINERS):
@@ -817,6 +830,7 @@ class FrozenResearchSnapshot:
     canonical_json: str
     snapshot_hash: str
     factor_snapshot_hash: Optional[str] = None
+    evidence_snapshot_hash: Optional[str] = None
 
     def to_repository_input(self) -> "ResearchSnapshotInput":
         from .repositories import ResearchSnapshotInput
@@ -836,6 +850,7 @@ class FrozenResearchSnapshot:
             status=self.status,
             canonical_payload=self.canonical_payload,
             factor_snapshot_hash=self.factor_snapshot_hash,
+            evidence_snapshot_hash=self.evidence_snapshot_hash,
         )
 
     def persist(
@@ -868,6 +883,8 @@ def build_research_snapshot(
     field_dictionary_version: str = FIELD_DICTIONARY_VERSION,
     factor_engine_version: str = FACTOR_ENGINE_VERSION,
     factor_snapshot_hash: Optional[str] = None,
+    evidence: Any = None,
+    evidence_snapshot_hash: Optional[str] = None,
 ) -> FrozenResearchSnapshot:
     cutoff = _aware_datetime(as_of, field="as_of")
     observable_at = _aware_datetime(available_at, field="available_at")
@@ -875,18 +892,27 @@ def build_research_snapshot(
         raise ValueError("available_at cannot be after as_of")
     if factor_snapshot_hash is not None and not _SHA256_RE.fullmatch(str(factor_snapshot_hash)):
         raise ValueError("factor_snapshot_hash must be a lowercase SHA-256 digest")
+    if evidence_snapshot_hash is not None and not _SHA256_RE.fullmatch(
+        str(evidence_snapshot_hash)
+    ):
+        raise ValueError("evidence_snapshot_hash must be a lowercase SHA-256 digest")
+    if (evidence is None) != (evidence_snapshot_hash is None):
+        raise ValueError(
+            "evidence and evidence_snapshot_hash must either both be set or both be omitted"
+        )
     route_fingerprint = model_route_fingerprint(model_route)
-    payload = canonicalize(
-        {
-            "context_pack": safe_project_context_pack(context_pack, as_of=cutoff),
-            "datasets": project_structured_datasets(datasets, as_of=cutoff),
-            "factors": project_factors(factors, as_of=cutoff),
-            # Prompt and policy bodies are not retained.  Their fingerprints
-            # make semantic changes alter the immutable snapshot identity.
-            "prompt_fingerprint": canonical_hash(prompt),
-            "policy_fingerprint": canonical_hash(policy),
-        }
-    )
+    payload_values = {
+        "context_pack": safe_project_context_pack(context_pack, as_of=cutoff),
+        "datasets": project_structured_datasets(datasets, as_of=cutoff),
+        "factors": project_factors(factors, as_of=cutoff),
+        # Prompt and policy bodies are not retained.  Their fingerprints make
+        # semantic changes alter the immutable snapshot identity.
+        "prompt_fingerprint": canonical_hash(prompt),
+        "policy_fingerprint": canonical_hash(policy),
+    }
+    if evidence_snapshot_hash is not None:
+        payload_values["evidence"] = project_evidence(evidence, as_of=cutoff)
+    payload = canonicalize(payload_values)
     values = {
         "stock_code": _required_text(stock_code, "stock_code"),
         "market": _required_text(market, "market"),
@@ -903,6 +929,8 @@ def build_research_snapshot(
         "canonical_json": payload,
         "factor_snapshot_hash": factor_snapshot_hash,
     }
+    if evidence_snapshot_hash is not None:
+        values["evidence_snapshot_hash"] = evidence_snapshot_hash
     snapshot_hash = canonical_hash(values)
     return FrozenResearchSnapshot(
         stock_code=values["stock_code"],
@@ -921,6 +949,7 @@ def build_research_snapshot(
         canonical_json=canonical_json(payload),
         snapshot_hash=snapshot_hash,
         factor_snapshot_hash=factor_snapshot_hash,
+        evidence_snapshot_hash=evidence_snapshot_hash,
     )
 
 
@@ -935,6 +964,8 @@ def persist_research_snapshot(
 
 
 __all__ = [
+    "EVIDENCE_FIELD_DICTIONARY_VERSION",
+    "EVIDENCE_SNAPSHOT_VERSION",
     "FACTOR_ENGINE_VERSION",
     "FIELD_DICTIONARY_VERSION",
     "FrozenResearchSnapshot",
@@ -943,6 +974,7 @@ __all__ = [
     "model_route_fingerprint",
     "persist_research_snapshot",
     "project_factors",
+    "project_evidence",
     "project_model_route",
     "project_structured_datasets",
     "safe_project_context_pack",

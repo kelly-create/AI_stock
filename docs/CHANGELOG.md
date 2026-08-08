@@ -63,6 +63,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [新功能] LLM 渠道新增显式 Chat Completions / Responses API Surface，支持 Anspire GPT-5.6 系列等 Responses-only 模型，并统一连接测试、主分析、筛选、图片识别与状态诊断路由；所有运行路径先按同一规则解析协议再校验 Surface，混合 Surface 的同名路由按未知能力保守处理；显式 Anspire 渠道独占共享 Key，非法 Surface 或协议不匹配时不会把该 Key 回退为旧版 Chat 部署，同时保留无关的 Gemini/OpenAI 等 legacy provider；本地 loopback 渠道可在图片识别路径继续无 Key 调用，远端渠道仍要求凭据；禁用渠道不会因残留 Surface 配置阻断其他兼容 fallback；Web 编辑器不会静默改写非法历史值，并允许将 Hermes 非法 Surface 修复为 Chat Completions。
 - [修复] 将 Responses 渠道的协议、模型 provider、公开 route alias 与 wire-model 构造收敛为统一路由契约，保存校验、运行时加载、状态诊断、选股入口和 Web 编辑器共同使用当前安装的 LiteLLM provider registry，拒绝 `openai` 协议下显式非 OpenAI provider 的模型、拒绝同一 alias 混用 Chat/Responses，并保留 OpenAI-compatible 网关自有的带斜杠模型 ID。
 - [新功能] 新增 PR2 Tushare 统一 Provider、不可变研究数据/因子/研究快照与只读 Research API；所有研究调用在 Durable Worker 内共享 450 次/分钟总桶和 2 个在途请求上限，确定性 Value、Quality、Trend、Catalyst、Risk 因子严格区分缺失与不适用，并在 LLM 调用前冻结可审计 Snapshot Hash。
+- [新功能] 新增 PR3 Research Evidence：以已冻结 dataset/factor 构造 typed claim/citation DAG，持久化不可变 Evidence Hash 并通过 JobEvent 和 Research Snapshot 建立真实消费链；提供带稳定 opaque cursor 的只读列表/详情 API，Run Flow 默认折叠并按 Task 懒加载 status、coverage、count、hash 与安全来源链接，关闭写入开关后历史仍可读。
 
 ## [3.29.0] - 2026-08-02
 

@@ -89,9 +89,24 @@ Flag 关闭时，Bot 保持原来的同步、`TaskService` 和后台线程路径
 
 `scripts/fetch_tushare_stock_list.py` 是离线管理员维护工具，保留历史 Tushare SDK 契约，不属于 Durable Worker 账号桶。生产执行前必须停止研究 Worker，并避免与在线采集并行；正常分析、筛选任务和 Scheduler 不得以该脚本绕过统一 Provider。
 
+## PR3 Research Evidence 与可见性
+
+启用 `RESEARCH_EVIDENCE_ENABLED=true` 后，Durable Worker 在已经持久化的因子快照和本轮冻结数据之上构造确定性 Evidence Snapshot。每份快照最多包含 32 条 claim 和 16 条 citation；claim 只使用 `factor_metric` / `reported_event`，citation 只引用已经持久化的 dataset / factor hash，并同时冻结 JSON Pointer、值哈希、可用时间、来源、标题、短摘录和可选规范 URL。构建和持久化边界会重新核对股票、市场、`as_of`、lineage、JSON Pointer 与值哈希；不合法或晚于知识边界的证据 fail closed，不会静默改成“支持”。
+
+Evidence 阶段最多调用一次已注入的 SearchService 结果列表入口；这次高层调用保留既有 provider fallback，因此不承诺最多一次底层 provider 请求，但所有候选 provider 都禁止跟随结果 URL 抓正文。系统只把 bounded normalized 标题、snippet、来源、发布时间和经过校验的 `http` / `https` 规范 URL 写入 SQLite Dataset，`raw_ref=None`；本版不创建或持久化 result-page/raw sidecar。历史恢复只读取 durable job 已绑定的 `news_search` Dataset 与 Evidence Snapshot，不重新搜索。外部 snippet 继续按不可信内容隔离后才进入 Prompt。未来若引入搜索 raw sidecar，才适用搜索/新闻 90 天保留分类，并必须补齐可覆盖去重后重复引用的 occurrence / `last_observed` 边界。
+
+Evidence 写入 `research_evidence_snapshots`，并以 `research_evidence_snapshot` JobEvent 绑定到每次实际消费它的 durable job；查询 job 时不依赖可能指向首次创建任务的 `origin_job_id`。`research_snapshots.evidence_snapshot_hash` 显式链接本轮消费的 Evidence hash。内容相同的重试或 lease reclaim 复用同一不可变行，但仍为实际消费任务写入绑定事件。
+
+只读接口：
+
+- `GET /api/v1/research/evidence`：至少提供 `job_id`、`research_snapshot_hash`、`stock_code` 之一；可选 `as_of` 必须带 UTC offset，`limit` 默认 20、最大 100。结果按 `as_of DESC, id DESC` 排序，`next_cursor` 是 opaque keyset cursor，客户端不得解析或自行构造。列表只返回 status、coverage、claim/citation count、hash 与 lineage 摘要，不返回完整 Evidence payload。
+- `GET /api/v1/research/evidence/{evidence_hash}`：按 64 位小写 SHA-256 读取完整 typed claims/citations。管理员认证开启时，这两个接口与其它 `/api/v1/*` 接口一样需要有效 session Cookie。
+
+关闭 `RESEARCH_EVIDENCE_ENABLED` 只停止新 Evidence 的采集、构建和写入；已有 Evidence、Research Snapshot 及其只读 API 仍可查询。Web 的 Run Flow 默认折叠“研究证据”，只有用户展开且当前来源是 Task 时才按 `taskId` 加载；先读分页摘要，再按 hash 加载展开项的 claim/citation。空结果使用中性状态，失败可重试，Task 切换会丢弃旧请求结果；来源链接仅在协议为 `http` / `https` 时渲染，并使用 `noopener noreferrer`。
+
 ## 备份与恢复
 
-生产切换前使用 [SQLite 在线备份、校验与恢复](operations/sqlite-backup.md) 创建带 SHA-256、Schema/Index hash、核心表计数、`quick_check` 和外键检查的备份对，再按[研究原始数据归档与取证恢复](operations/research-raw-backup.md)创建与该 SQLite 哈希及引用集合绑定的 raw 归档。恢复演练必须执行 SQLite 严格校验与异名隔离恢复、raw 严格校验与隔离恢复，并通过 `RawArtifactStore` 抽样回读；记录数据库大小、raw 文件数与字节数、运行环境及总耗时，目标 RTO 不超过 15 分钟。PR1 默认核心表包括任务、事件、Outbox 和组件健康表，恢复演练不得只验证业务报告表。
+生产切换前使用 [SQLite 在线备份、校验与恢复](operations/sqlite-backup.md) 创建带 SHA-256、Schema/Index hash、核心表计数、`quick_check` 和外键检查的备份对，再按[研究原始数据归档与取证恢复](operations/research-raw-backup.md)创建与该 SQLite 哈希及引用集合绑定的 raw 归档。恢复演练必须执行 SQLite 严格校验与异名隔离恢复、raw 严格校验与隔离恢复，并通过 `RawArtifactStore` 抽样回读；记录数据库大小、raw 文件数与字节数、运行环境及总耗时，目标 RTO 不超过 15 分钟。默认核心表包括任务、事件、Outbox、组件健康以及不可变 Research Dataset / Factor / Evidence / Research Snapshot 表；恢复演练不得只验证业务报告表。
 
 ## 功能开关和依赖
 

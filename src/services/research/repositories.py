@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 import json
@@ -17,6 +19,7 @@ from src.storage import (
     DatabaseManager,
     JobEventRecord,
     ResearchDatasetSnapshotRecord,
+    ResearchEvidenceSnapshotRecord,
     ResearchFactorSnapshotRecord,
     ResearchSnapshotRecord,
     to_utc_naive_datetime,
@@ -106,6 +109,23 @@ class FactorSnapshotInput:
 
 
 @dataclass(frozen=True)
+class EvidenceSnapshotInput:
+    stock_code: str
+    market: str
+    evidence_engine_version: str
+    claim_policy_version: str
+    as_of: datetime
+    available_at: datetime
+    status: str
+    coverage: float
+    claim_count: int
+    citation_count: int
+    canonical_payload: Any
+    input_dataset_hashes: Sequence[str]
+    factor_snapshot_hash: str
+
+
+@dataclass(frozen=True)
 class ResearchSnapshotInput:
     stock_code: str
     market: str
@@ -121,6 +141,7 @@ class ResearchSnapshotInput:
     status: str
     canonical_payload: Any
     factor_snapshot_hash: Optional[str] = None
+    evidence_snapshot_hash: Optional[str] = None
 
 
 def _required_text(value: Any, field_name: str, *, max_length: int) -> str:
@@ -130,6 +151,13 @@ def _required_text(value: Any, field_name: str, *, max_length: int) -> str:
     if len(normalized) > max_length:
         raise ValueError(f"{field_name} exceeds {max_length} characters")
     return normalized
+
+
+def _market_identity(value: Any) -> str:
+    """Normalize the two established A-share labels for cross-row checks."""
+
+    normalized = str(value or "").strip().casefold()
+    return "cn" if normalized in {"a", "cn"} else normalized
 
 
 def _optional_text(value: Any, *, max_length: int) -> Optional[str]:
@@ -241,6 +269,53 @@ def _score(value: Optional[float], field_name: str) -> Optional[float]:
     if not math.isfinite(normalized) or normalized < 0 or normalized > 100:
         raise ValueError(f"{field_name} must be finite and between 0 and 100")
     return normalized
+
+
+def _nonnegative_int(value: Any, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{field_name} must be a non-negative integer")
+    return value
+
+
+def _utc_text(value: datetime) -> str:
+    return value.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _encode_evidence_cursor(as_of: datetime, record_id: int) -> str:
+    payload = canonical_json(
+        [_utc_text(as_of), int(record_id)],
+        exclude_volatile=False,
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_evidence_cursor(value: str) -> tuple[datetime, int]:
+    normalized = str(value or "").strip()
+    if not normalized or len(normalized) > 256:
+        raise ValueError("cursor is invalid")
+    try:
+        padding = "=" * (-len(normalized) % 4)
+        decoded = base64.b64decode(
+            normalized + padding,
+            altchars=b"-_",
+            validate=True,
+        ).decode("utf-8")
+        payload = json.loads(decoded)
+        if (
+            not isinstance(payload, list)
+            or len(payload) != 2
+            or not isinstance(payload[0], str)
+            or isinstance(payload[1], bool)
+            or not isinstance(payload[1], int)
+            or payload[1] <= 0
+        ):
+            raise ValueError
+        parsed = datetime.fromisoformat(payload[0].replace("Z", "+00:00"))
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError
+        return to_utc_naive_datetime(parsed), payload[1]
+    except (binascii.Error, UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("cursor is invalid") from exc
 
 
 class ResearchSnapshotRepository:
@@ -734,6 +809,276 @@ class ResearchSnapshotRepository:
 
         return self.db._run_write_transaction("write research factor snapshot", _write)
 
+    def write_evidence(
+        self,
+        snapshot: EvidenceSnapshotInput,
+        *,
+        lease: LeaseFence,
+        now: Optional[datetime] = None,
+    ) -> SnapshotWriteResult:
+        """Persist one immutable evidence graph after validating every source."""
+
+        stock_code = _required_text(
+            snapshot.stock_code,
+            "stock_code",
+            max_length=16,
+        )
+        market = _required_text(snapshot.market, "market", max_length=16)
+        evidence_engine_version = _required_text(
+            snapshot.evidence_engine_version,
+            "evidence_engine_version",
+            max_length=64,
+        )
+        claim_policy_version = _required_text(
+            snapshot.claim_policy_version,
+            "claim_policy_version",
+            max_length=64,
+        )
+        as_of = _utc_datetime(snapshot.as_of, "as_of")
+        available_at = _utc_datetime(snapshot.available_at, "available_at")
+        if available_at > as_of:
+            raise ValueError("available_at cannot be after as_of")
+        status = normalize_status(snapshot.status)
+        coverage = float(snapshot.coverage)
+        if not math.isfinite(coverage) or coverage < 0 or coverage > 1:
+            raise ValueError("coverage must be finite and between 0 and 1")
+        claim_count = _nonnegative_int(snapshot.claim_count, "claim_count")
+        citation_count = _nonnegative_int(snapshot.citation_count, "citation_count")
+        factor_snapshot_hash = _sha256(
+            snapshot.factor_snapshot_hash,
+            "factor_snapshot_hash",
+        )
+        dataset_hashes = sorted(
+            {
+                _sha256(value, "input_dataset_hash")
+                for value in snapshot.input_dataset_hashes
+            }
+        )
+        evidence_payload = canonicalize(
+            snapshot.canonical_payload,
+            exclude_volatile=False,
+        )
+        if not isinstance(evidence_payload, Mapping):
+            raise ValueError("canonical_payload must be an object")
+        claims = evidence_payload.get("claims")
+        citations = evidence_payload.get("citations")
+        if not isinstance(claims, list) or len(claims) != claim_count:
+            raise ValueError("claim_count must match canonical_payload claims")
+        if not isinstance(citations, list) or len(citations) != citation_count:
+            raise ValueError("citation_count must match canonical_payload citations")
+        expected_payload_fields = {
+            "stock_code": stock_code,
+            "market": market,
+            "evidence_engine_version": evidence_engine_version,
+            "claim_policy_version": claim_policy_version,
+            "as_of": _utc_text(as_of),
+            "available_at": _utc_text(available_at),
+            "status": status,
+            "coverage": coverage,
+            "input_dataset_hashes": dataset_hashes,
+            "factor_snapshot_hash": factor_snapshot_hash,
+        }
+        mismatched_fields = sorted(
+            field_name
+            for field_name, expected_value in expected_payload_fields.items()
+            if evidence_payload.get(field_name) != expected_value
+        )
+        if mismatched_fields:
+            raise ValueError(
+                "canonical_payload conflicts with typed evidence fields: "
+                + ",".join(mismatched_fields)
+            )
+        values = {
+            "stock_code": stock_code,
+            "market": market,
+            "evidence_engine_version": evidence_engine_version,
+            "claim_policy_version": claim_policy_version,
+            "as_of": as_of,
+            "available_at": available_at,
+            "status": status,
+            "coverage": coverage,
+            "claim_count": claim_count,
+            "citation_count": citation_count,
+            "canonical_json": canonical_json(
+                evidence_payload,
+                exclude_volatile=False,
+            ),
+            "input_dataset_hashes_json": canonical_json(
+                dataset_hashes,
+                exclude_volatile=False,
+            ),
+            "factor_snapshot_hash": factor_snapshot_hash,
+        }
+        evidence_hash = canonical_hash(
+            evidence_payload,
+            exclude_volatile=False,
+        )
+        validation_record = {
+            **values,
+            "evidence": evidence_payload,
+            "evidence_hash": evidence_hash,
+            "claim_count": claim_count,
+            "citation_count": citation_count,
+            "input_dataset_hashes": dataset_hashes,
+        }
+        from .evidence_service import hydrate_evidence_snapshot
+
+        # The persistence boundary independently rehydrates the typed domain
+        # graph. This rejects malformed shapes, dangling claim/citation edges,
+        # duplicate identifiers, invalid statuses, and count/hash drift even
+        # when a caller bypasses the normal evidence builder.
+        hydrate_evidence_snapshot(validation_record)
+        requested_now = _utc_datetime(now, "now") if now is not None else None
+
+        def _write(session) -> SnapshotWriteResult:
+            current = requested_now or utc_naive_now()
+            self._assert_live_lease(session, lease, current)
+            artifacts = self._validate_evidence_sources(
+                session,
+                stock_code=stock_code,
+                market=market,
+                as_of=as_of,
+                factor_snapshot_hash=factor_snapshot_hash,
+                dataset_hashes=dataset_hashes,
+            )
+            # With persisted artifacts available, the same domain validator
+            # also checks citation JSON pointers, value hashes, source
+            # boundaries, and artifact types before any row can be published.
+            hydrate_evidence_snapshot(validation_record, artifacts=artifacts)
+            existing = session.execute(
+                select(ResearchEvidenceSnapshotRecord).where(
+                    ResearchEvidenceSnapshotRecord.evidence_hash == evidence_hash
+                )
+            ).scalar_one_or_none()
+            event_payload = {
+                "stock_code": stock_code,
+                "as_of": _utc_text(as_of),
+                "evidence_hash": evidence_hash,
+                "status": status,
+            }
+            if existing is not None:
+                self._bind_artifact_to_job(
+                    session,
+                    lease=lease,
+                    event_type="research_evidence_snapshot",
+                    stage="research_evidence",
+                    payload=event_payload,
+                    now=current,
+                )
+                return SnapshotWriteResult(int(existing.id), evidence_hash, False)
+            row = ResearchEvidenceSnapshotRecord(
+                **values,
+                evidence_hash=evidence_hash,
+                origin_job_id=lease.job_id,
+                created_at=current,
+            )
+            session.add(row)
+            session.flush()
+            self._bind_artifact_to_job(
+                session,
+                lease=lease,
+                event_type="research_evidence_snapshot",
+                stage="research_evidence",
+                payload=event_payload,
+                now=current,
+            )
+            return SnapshotWriteResult(int(row.id), evidence_hash, True)
+
+        return self.db._run_write_transaction(
+            "write research evidence snapshot",
+            _write,
+        )
+
+    @staticmethod
+    def _validate_evidence_sources(
+        session,
+        *,
+        stock_code: str,
+        market: str,
+        as_of: datetime,
+        factor_snapshot_hash: str,
+        dataset_hashes: Sequence[str],
+    ) -> tuple[Any, ...]:
+        from .evidence_service import EvidenceArtifact
+
+        factor = session.execute(
+            select(ResearchFactorSnapshotRecord).where(
+                ResearchFactorSnapshotRecord.content_hash == factor_snapshot_hash
+            )
+        ).scalar_one_or_none()
+        if factor is None:
+            raise ValueError("factor_snapshot_hash does not reference stored factors")
+        if (
+            factor.stock_code != stock_code
+            or _market_identity(factor.market) != _market_identity(market)
+        ):
+            raise ValueError("factor_snapshot_hash belongs to a different stock or market")
+        if factor.as_of > as_of or factor.available_at > as_of:
+            raise ValueError("factor_snapshot_hash is after evidence as_of")
+
+        datasets = (
+            session.execute(
+                select(ResearchDatasetSnapshotRecord).where(
+                    ResearchDatasetSnapshotRecord.content_hash.in_(dataset_hashes)
+                )
+            ).scalars().all()
+            if dataset_hashes
+            else []
+        )
+        datasets_by_hash = {row.content_hash: row for row in datasets}
+        missing_hashes = sorted(set(dataset_hashes).difference(datasets_by_hash))
+        if missing_hashes:
+            raise ValueError(
+                "input_dataset_hashes do not reference stored datasets: "
+                + ",".join(missing_hashes)
+            )
+        for content_hash in dataset_hashes:
+            dataset = datasets_by_hash[content_hash]
+            if (
+                dataset.scope_type != "stock"
+                or dataset.scope_value != stock_code
+                or _market_identity(dataset.market) != _market_identity(market)
+            ):
+                raise ValueError(
+                    "input dataset belongs to a different stock or market: "
+                    + content_hash
+                )
+            if (
+                dataset.data_as_of > as_of
+                or dataset.available_at > as_of
+                or (
+                    dataset.dataset == "stock_basic"
+                    and dataset.observed_at > as_of
+                )
+            ):
+                raise ValueError("input dataset is after evidence as_of: " + content_hash)
+        factor_lineage = _json_value(factor.input_dataset_hashes_json)
+        if not isinstance(factor_lineage, list):
+            raise ValueError("stored factor input_dataset_hashes are invalid")
+        artifacts = [
+            EvidenceArtifact(
+                artifact_type="dataset",
+                artifact_hash=dataset.content_hash,
+                stock_code=dataset.scope_value,
+                available_at=dataset.available_at.replace(tzinfo=timezone.utc),
+                payload=_json_value(dataset.normalized_json),
+                source_name="",
+            )
+            for dataset in datasets
+        ]
+        artifacts.append(
+            EvidenceArtifact(
+                artifact_type="factor",
+                artifact_hash=factor.content_hash,
+                stock_code=factor.stock_code,
+                available_at=factor.available_at.replace(tzinfo=timezone.utc),
+                payload=_json_value(factor.factor_json),
+                lineage_hashes=tuple(factor_lineage),
+                source_name="deterministic_factor_engine",
+            )
+        )
+        return tuple(artifacts)
+
     def write_research_snapshot(
         self,
         snapshot: ResearchSnapshotInput,
@@ -750,6 +1095,25 @@ class ResearchSnapshotRepository:
         factor_snapshot_hash = _optional_sha256(
             snapshot.factor_snapshot_hash, "factor_snapshot_hash"
         )
+        evidence_snapshot_hash = _optional_sha256(
+            snapshot.evidence_snapshot_hash,
+            "evidence_snapshot_hash",
+        )
+        has_evidence_projection = (
+            isinstance(canonical_payload, Mapping)
+            and "evidence" in canonical_payload
+        )
+        if evidence_snapshot_hash is None and has_evidence_projection:
+            raise ValueError(
+                "canonical_payload cannot carry evidence without evidence_snapshot_hash"
+            )
+        if evidence_snapshot_hash is not None and (
+            not has_evidence_projection
+            or not isinstance(canonical_payload.get("evidence"), Mapping)
+        ):
+            raise ValueError(
+                "evidence_snapshot_hash requires a frozen evidence projection"
+            )
         values = {
             "stock_code": _required_text(snapshot.stock_code, "stock_code", max_length=16),
             "market": _required_text(snapshot.market, "market", max_length=16),
@@ -785,18 +1149,40 @@ class ResearchSnapshotRepository:
             "status": status,
             "canonical_json": canonical_json(canonical_payload),
             "factor_snapshot_hash": factor_snapshot_hash,
+            "evidence_snapshot_hash": evidence_snapshot_hash,
         }
+        identity_values = dict(values)
+        if evidence_snapshot_hash is None:
+            # Preserve the exact PR2 content identity while evidence is off.
+            identity_values.pop("evidence_snapshot_hash")
         snapshot_hash = canonical_hash(
             {
-                **values,
+                **identity_values,
                 "canonical_json": canonical_payload,
             }
         )
+        binding_payload = {
+            "stock_code": values["stock_code"],
+            "as_of": as_of.isoformat(timespec="microseconds") + "Z",
+            "snapshot_hash": snapshot_hash,
+            "status": status,
+        }
+        if evidence_snapshot_hash is not None:
+            binding_payload["evidence_snapshot_hash"] = evidence_snapshot_hash
         requested_now = _utc_datetime(now, "now") if now is not None else None
 
         def _write(session) -> SnapshotWriteResult:
             current = requested_now or utc_naive_now()
             self._assert_live_lease(session, lease, current)
+            if evidence_snapshot_hash is not None:
+                self._validate_research_evidence_reference(
+                    session,
+                    stock_code=values["stock_code"],
+                    market=values["market"],
+                    as_of=as_of,
+                    evidence_snapshot_hash=evidence_snapshot_hash,
+                    evidence_projection=canonical_payload["evidence"],
+                )
             existing = session.execute(
                 select(ResearchSnapshotRecord).where(
                     ResearchSnapshotRecord.snapshot_hash == snapshot_hash
@@ -808,12 +1194,7 @@ class ResearchSnapshotRepository:
                     lease=lease,
                     event_type="research_snapshot",
                     stage="research_snapshot",
-                    payload={
-                        "stock_code": values["stock_code"],
-                        "as_of": as_of.isoformat(timespec="microseconds") + "Z",
-                        "snapshot_hash": snapshot_hash,
-                        "status": status,
-                    },
+                    payload=binding_payload,
                     now=current,
                 )
                 return SnapshotWriteResult(int(existing.id), snapshot_hash, False)
@@ -830,17 +1211,55 @@ class ResearchSnapshotRepository:
                 lease=lease,
                 event_type="research_snapshot",
                 stage="research_snapshot",
-                payload={
-                    "stock_code": values["stock_code"],
-                    "as_of": as_of.isoformat(timespec="microseconds") + "Z",
-                    "snapshot_hash": snapshot_hash,
-                    "status": status,
-                },
+                payload=binding_payload,
                 now=current,
             )
             return SnapshotWriteResult(int(row.id), snapshot_hash, True)
 
         return self.db._run_write_transaction("write immutable research snapshot", _write)
+
+    @staticmethod
+    def _validate_research_evidence_reference(
+        session,
+        *,
+        stock_code: str,
+        market: str,
+        as_of: datetime,
+        evidence_snapshot_hash: str,
+        evidence_projection: Mapping[str, Any],
+    ) -> None:
+        evidence = session.execute(
+            select(ResearchEvidenceSnapshotRecord).where(
+                ResearchEvidenceSnapshotRecord.evidence_hash
+                == evidence_snapshot_hash
+            )
+        ).scalar_one_or_none()
+        if evidence is None:
+            raise ValueError(
+                "evidence_snapshot_hash does not reference stored evidence"
+            )
+        if evidence.stock_code != stock_code or evidence.market != market:
+            raise ValueError(
+                "evidence_snapshot_hash belongs to a different stock or market"
+            )
+        if evidence.as_of > as_of or evidence.available_at > as_of:
+            raise ValueError("evidence_snapshot_hash is after research snapshot as_of")
+        from .evidence_service import hydrate_evidence_snapshot
+        from .snapshot_service import project_evidence
+
+        stored = hydrate_evidence_snapshot(_evidence_record_dict(evidence))
+        stored_payload = stored.canonical_payload
+        expected_projection = project_evidence(
+            stored_payload,
+            as_of=as_of.replace(tzinfo=timezone.utc),
+        )
+        if canonical_json(
+            evidence_projection,
+            exclude_volatile=False,
+        ) != canonical_json(expected_projection, exclude_volatile=False):
+            raise ValueError(
+                "frozen evidence projection conflicts with evidence_snapshot_hash"
+            )
 
     @staticmethod
     def _bind_artifact_to_job(
@@ -913,6 +1332,104 @@ class ResearchSnapshotRepository:
             ).scalars().all()
             return [_dataset_record_dict(row) for row in rows]
 
+    def get_job_dataset(
+        self,
+        *,
+        job_id: str,
+        dataset: str,
+        scope_value: str,
+        as_of: Optional[datetime] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Recover one unambiguous dataset through its durable job binding."""
+
+        normalized_job_id = _required_text(job_id, "job_id", max_length=64)
+        normalized_dataset = _required_text(dataset, "dataset", max_length=64)
+        normalized_scope = _required_text(
+            scope_value,
+            "scope_value",
+            max_length=128,
+        )
+        requested_cutoff = (
+            _utc_datetime(as_of, "as_of") if as_of is not None else None
+        )
+        with self.db.get_session() as session:
+            event_payloads = session.execute(
+                select(JobEventRecord.payload_json)
+                .where(
+                    JobEventRecord.job_id == normalized_job_id,
+                    JobEventRecord.event_type == "research_dataset_snapshot",
+                )
+                .order_by(JobEventRecord.id.desc())
+            ).scalars().all()
+            candidates: list[tuple[str, datetime, Any]] = []
+            for payload_json in event_payloads:
+                try:
+                    payload = json.loads(payload_json)
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise ValueError(
+                        "stored research dataset binding is invalid JSON"
+                    ) from exc
+                if not isinstance(payload, Mapping):
+                    raise ValueError(
+                        "stored research dataset binding must be an object"
+                    )
+                if (
+                    payload.get("dataset") != normalized_dataset
+                    or payload.get("scope_type") != "stock"
+                    or payload.get("scope_value") != normalized_scope
+                ):
+                    continue
+                boundary = self._parse_reference_time(
+                    payload.get("knowledge_as_of")
+                )
+                if requested_cutoff is not None and boundary != requested_cutoff:
+                    continue
+                content_hash = _sha256(
+                    payload.get("content_hash"),
+                    "content_hash",
+                )
+                candidates.append((content_hash, boundary, payload.get("status")))
+            if not candidates:
+                return None
+            if requested_cutoff is None:
+                distinct_bindings = {
+                    (content_hash, boundary)
+                    for content_hash, boundary, _status in candidates
+                }
+                if len(distinct_bindings) > 1:
+                    raise ValueError(
+                        "research dataset binding is ambiguous for job, dataset, and scope"
+                    )
+
+            content_hash, cutoff, bound_status = candidates[0]
+            row = session.execute(
+                select(ResearchDatasetSnapshotRecord).where(
+                    ResearchDatasetSnapshotRecord.content_hash == content_hash
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                raise ValueError(
+                    "research dataset binding references a missing snapshot"
+                )
+            if (
+                row.dataset != normalized_dataset
+                or row.scope_type != "stock"
+                or row.scope_value != normalized_scope
+                or row.status != bound_status
+            ):
+                raise ValueError(
+                    "research dataset binding conflicts with its snapshot"
+                )
+            if row.data_as_of > cutoff or row.available_at > cutoff:
+                raise ValueError(
+                    "research dataset binding is after its frozen boundary"
+                )
+            if row.dataset == "stock_basic" and row.observed_at > cutoff:
+                raise ValueError(
+                    "stock_basic binding was observed after its frozen boundary"
+                )
+            return _dataset_record_dict(row)
+
     def get_latest_factors(
         self,
         *,
@@ -960,6 +1477,130 @@ class ResearchSnapshotRepository:
                 )
             ).scalar_one_or_none()
             return _research_record_dict(row) if row is not None else None
+
+    def get_evidence(self, evidence_hash: str) -> Optional[dict[str, Any]]:
+        """Read one immutable evidence snapshot by its content identity."""
+
+        digest = _sha256(evidence_hash, "evidence_hash")
+        with self.db.get_session() as session:
+            row = session.execute(
+                select(ResearchEvidenceSnapshotRecord).where(
+                    ResearchEvidenceSnapshotRecord.evidence_hash == digest
+                )
+            ).scalar_one_or_none()
+            return _evidence_record_dict(row) if row is not None else None
+
+    def list_evidence(
+        self,
+        *,
+        job_id: Optional[str] = None,
+        research_snapshot_hash: Optional[str] = None,
+        stock_code: Optional[str] = None,
+        as_of: Optional[datetime] = None,
+        cursor: Optional[str] = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """List evidence with stable keyset pagination and durable bindings."""
+
+        bounded_limit = max(1, min(int(limit), 200))
+        normalized_job_id = (
+            _required_text(job_id, "job_id", max_length=64)
+            if job_id is not None
+            else None
+        )
+        normalized_stock_code = (
+            _required_text(stock_code, "stock_code", max_length=16)
+            if stock_code is not None
+            else None
+        )
+        normalized_snapshot_hash = (
+            _sha256(research_snapshot_hash, "research_snapshot_hash")
+            if research_snapshot_hash is not None
+            else None
+        )
+        cutoff = _utc_datetime(as_of, "as_of") if as_of is not None else None
+        decoded_cursor = (
+            _decode_evidence_cursor(cursor) if cursor is not None else None
+        )
+
+        with self.db.get_session() as session:
+            statement = select(ResearchEvidenceSnapshotRecord)
+            if normalized_job_id is not None:
+                payload_rows = session.execute(
+                    select(JobEventRecord.payload_json).where(
+                        JobEventRecord.job_id == normalized_job_id,
+                        JobEventRecord.event_type == "research_evidence_snapshot",
+                    )
+                ).scalars().all()
+                bound_hashes: set[str] = set()
+                for payload_json in payload_rows:
+                    try:
+                        payload = json.loads(payload_json)
+                    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                        raise ValueError(
+                            "stored research evidence binding is invalid JSON"
+                        ) from exc
+                    if not isinstance(payload, Mapping):
+                        raise ValueError(
+                            "stored research evidence binding must be an object"
+                        )
+                    bound_hashes.add(
+                        _sha256(payload.get("evidence_hash"), "evidence_hash")
+                    )
+                if not bound_hashes:
+                    return {"items": [], "next_cursor": None}
+                statement = statement.where(
+                    ResearchEvidenceSnapshotRecord.evidence_hash.in_(bound_hashes)
+                )
+            if normalized_snapshot_hash is not None:
+                linked_hash = session.execute(
+                    select(ResearchSnapshotRecord.evidence_snapshot_hash).where(
+                        ResearchSnapshotRecord.snapshot_hash
+                        == normalized_snapshot_hash
+                    )
+                ).scalar_one_or_none()
+                if linked_hash is None:
+                    return {"items": [], "next_cursor": None}
+                statement = statement.where(
+                    ResearchEvidenceSnapshotRecord.evidence_hash == linked_hash
+                )
+            if normalized_stock_code is not None:
+                statement = statement.where(
+                    ResearchEvidenceSnapshotRecord.stock_code
+                    == normalized_stock_code
+                )
+            if cutoff is not None:
+                statement = statement.where(
+                    ResearchEvidenceSnapshotRecord.as_of <= cutoff,
+                    ResearchEvidenceSnapshotRecord.available_at <= cutoff,
+                )
+            if decoded_cursor is not None:
+                cursor_as_of, cursor_id = decoded_cursor
+                statement = statement.where(
+                    or_(
+                        ResearchEvidenceSnapshotRecord.as_of < cursor_as_of,
+                        (
+                            ResearchEvidenceSnapshotRecord.as_of == cursor_as_of
+                        )
+                        & (ResearchEvidenceSnapshotRecord.id < cursor_id),
+                    )
+                )
+            rows = session.execute(
+                statement.order_by(
+                    ResearchEvidenceSnapshotRecord.as_of.desc(),
+                    ResearchEvidenceSnapshotRecord.id.desc(),
+                ).limit(bounded_limit + 1)
+            ).scalars().all()
+            has_more = len(rows) > bounded_limit
+            visible_rows = rows[:bounded_limit]
+            next_cursor = None
+            if has_more and visible_rows:
+                last = visible_rows[-1]
+                next_cursor = _encode_evidence_cursor(last.as_of, int(last.id))
+            return {
+                "items": [_evidence_record_dict(row) for row in visible_rows],
+                "next_cursor": next_cursor,
+            }
 
 
 def _json_value(value: Optional[str]) -> Any:
@@ -1034,6 +1675,30 @@ def _factor_record_dict(row: ResearchFactorSnapshotRecord) -> dict[str, Any]:
     }
 
 
+def _evidence_record_dict(
+    row: ResearchEvidenceSnapshotRecord,
+) -> dict[str, Any]:
+    return {
+        "id": int(row.id),
+        "stock_code": row.stock_code,
+        "market": row.market,
+        "evidence_engine_version": row.evidence_engine_version,
+        "claim_policy_version": row.claim_policy_version,
+        "as_of": _datetime_value(row.as_of),
+        "available_at": _datetime_value(row.available_at),
+        "status": row.status,
+        "coverage": float(row.coverage),
+        "claim_count": int(row.claim_count),
+        "citation_count": int(row.citation_count),
+        "evidence": _json_value(row.canonical_json),
+        "input_dataset_hashes": _json_value(row.input_dataset_hashes_json),
+        "factor_snapshot_hash": row.factor_snapshot_hash,
+        "evidence_hash": row.evidence_hash,
+        "origin_job_id": row.origin_job_id,
+        "created_at": _datetime_value(row.created_at),
+    }
+
+
 def _requested_trend_metric(
     factors: Any,
     horizon_days: int,
@@ -1071,6 +1736,7 @@ def _research_record_dict(row: ResearchSnapshotRecord) -> dict[str, Any]:
         "snapshot": _json_value(row.canonical_json),
         "snapshot_hash": row.snapshot_hash,
         "factor_snapshot_hash": row.factor_snapshot_hash,
+        "evidence_snapshot_hash": row.evidence_snapshot_hash,
         "origin_job_id": row.origin_job_id,
         "created_at": _datetime_value(row.created_at),
     }
@@ -1078,6 +1744,7 @@ def _research_record_dict(row: ResearchSnapshotRecord) -> dict[str, Any]:
 
 __all__ = [
     "DatasetSnapshotInput",
+    "EvidenceSnapshotInput",
     "FactorSnapshotInput",
     "LeaseFence",
     "ResearchSnapshotInput",

@@ -82,6 +82,7 @@ _DURABLE_STATE_EVENT_TYPES = frozenset(
         "research_reference_time",
         "research_dataset_snapshot",
         "research_factor_snapshot",
+        "research_evidence_snapshot",
         "research_snapshot",
     }
 )

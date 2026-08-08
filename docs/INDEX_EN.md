@@ -37,7 +37,7 @@ This is the entry point for project documentation. The README covers the project
 | [LiteLLM YAML Example](examples/litellm_config.example.yaml) | Example LiteLLM multi-provider configuration |
 | [Notification Baseline](notifications.md) <sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub> (Chinese-only) | WeChat Work, Feishu, Telegram, Discord, Slack, Email, and other notification channels |
 | [Tushare Stock List Guide](TUSHARE_STOCK_LIST_GUIDE.md) <sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub> (Chinese-only) | Tushare stock-list configuration and usage notes |
-| [Personal Research Rollout](personal-research-rollout.md) <sub><sub>![P1 Badge](https://img.shields.io/badge/P1-yellow?style=flat)</sub></sub> (Chinese-only) | Explicit migrations, Durable Worker, notification Outbox, Bot queueing, and staged flags |
+| [Personal Research Rollout](personal-research-rollout.md) <sub><sub>![P1 Badge](https://img.shields.io/badge/P1-yellow?style=flat)</sub></sub> (Chinese-only) | Explicit migrations, Durable Worker, Tushare data/factors, Research Evidence, read-only API/Web visibility, and staged flags |
 
 ## Usage Topics
 
@@ -68,7 +68,7 @@ This is the entry point for project documentation. The README covers the project
 | Document | Contents |
 | --- | --- |
 | [API Spec](architecture/api_spec.json) | FastAPI OpenAPI artifact |
-| [Personal Research Rollout](personal-research-rollout.md) <sub><sub>![P1 Badge](https://img.shields.io/badge/P1-yellow?style=flat)</sub></sub> (Chinese-only) | PR0/PR1 migration, durable jobs, Outbox behavior, and rollout order |
+| [Personal Research Rollout](personal-research-rollout.md) <sub><sub>![P1 Badge](https://img.shields.io/badge/P1-yellow?style=flat)</sub></sub> (Chinese-only) | PR0–PR3 migration, durable jobs, immutable research data/factors/Evidence, Outbox behavior, visibility, and rollout order |
 | [Contributing Guide (EN)](CONTRIBUTING_EN.md) | Issues, pull requests, tests, documentation sync, and collaboration expectations |
 
 ## Languages

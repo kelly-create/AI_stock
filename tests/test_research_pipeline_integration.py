@@ -93,8 +93,22 @@ class _FrozenCollection:
         return {name: frame.copy(deep=True) for name, frame in self._frames.items()}
 
 
-def _prepared_research(*, factors_enabled: bool = True) -> SimpleNamespace:
+def _prepared_research(
+    *,
+    factors_enabled: bool = True,
+    evidence_prompt_context: str | None = None,
+) -> SimpleNamespace:
     collection = _FrozenCollection()
+    evidence_context = None
+    if evidence_prompt_context is not None:
+        evidence_context = {
+            "status": "available",
+            "available_at": _AS_OF.isoformat(),
+            "evidence_hash": "e" * 64,
+            "claims": ({"id": "claim-1", "statement": "Frozen claim"},),
+            "citations": ({"id": "citation-1", "artifact_hash": "d" * 64},),
+            "limitations": (),
+        }
     return SimpleNamespace(
         as_of=_AS_OF,
         lease=SimpleNamespace(
@@ -108,6 +122,9 @@ def _prepared_research(*, factors_enabled: bool = True) -> SimpleNamespace:
         },
         research_context={"factor_snapshot_hash": "f" * 64},
         factors_enabled=factors_enabled,
+        evidence_enabled=evidence_prompt_context is not None,
+        evidence_context=evidence_context,
+        evidence_prompt_context=evidence_prompt_context,
     )
 
 
@@ -116,6 +133,7 @@ def _base_config(**overrides: object) -> SimpleNamespace:
         "tushare_research_enabled": False,
         "personal_research_enabled": False,
         "research_factors_enabled": False,
+        "research_evidence_enabled": False,
         "enable_realtime_quote": False,
         "enable_chip_distribution": True,
         "realtime_source_priority": [],
@@ -310,6 +328,39 @@ class TestResearchProcessSingleStockIntegration:
         assert prepared_as_of.utcoffset() == timedelta(hours=8)
         assert prepared_as_of.replace(tzinfo=None) == naive_local_time
 
+    def test_evidence_flag_injects_snippet_only_search_into_runtime(self) -> None:
+        runtime = MagicMock()
+        runtime.prepare.return_value = _prepared_research()
+        pipeline = _bare_pipeline(
+            tushare_research_enabled=True,
+            personal_research_enabled=True,
+            research_factors_enabled=True,
+            research_evidence_enabled=True,
+        )
+        pipeline._get_research_runtime = MagicMock(return_value=runtime)
+        response = object()
+        pipeline.search_service = SimpleNamespace(
+            is_available=True,
+            search_stock_news=MagicMock(return_value=response),
+        )
+
+        pipeline._prepare_research_for_stock("600519", current_time=_AS_OF)
+
+        prepare_kwargs = runtime.prepare.call_args.kwargs
+        assert prepare_kwargs["reference_mode"] == "live"
+        evidence_search = prepare_kwargs["evidence_search"]
+        assert evidence_search(
+            stock_code="600519",
+            stock_name="Kweichow Moutai",
+            max_results=5,
+        ) is response
+        pipeline.search_service.search_stock_news.assert_called_once_with(
+            "600519",
+            "Kweichow Moutai",
+            max_results=5,
+            snippet_only=True,
+        )
+
     def test_non_a_share_and_flag_off_do_not_construct_or_call_runtime(self) -> None:
         for code, research_enabled in (
             ("00700.HK", True),
@@ -407,7 +458,10 @@ class TestResearchAnalyzeStockIntegration:
         _mock_started: MagicMock,
         _mock_record: MagicMock,
     ) -> None:
-        prepared = _prepared_research(factors_enabled=False)
+        evidence_prompt = "DSA-EXACT-FROZEN-EVIDENCE"
+        prepared = _prepared_research(
+            evidence_prompt_context=evidence_prompt,
+        )
         pipeline = _analysis_pipeline(
             agent_mode=False,
             enable_realtime_quote=True,
@@ -462,7 +516,7 @@ class TestResearchAnalyzeStockIntegration:
             pipeline.analyzer._format_prompt.call_args.kwargs[
                 "analysis_context_pack_summary"
             ]
-            == "PACK-SUMMARY"
+            == f"PACK-SUMMARY\n\n{evidence_prompt}"
         )
         pipeline.analyzer.analyze.assert_called_once()
         runtime_freeze_args = pipeline._research_runtime.freeze.call_args.args
@@ -494,7 +548,7 @@ class TestResearchAnalyzeStockIntegration:
             pipeline.analyzer.analyze.call_args.kwargs[
                 "analysis_context_pack_summary"
             ]
-            == "PACK-SUMMARY"
+            == f"PACK-SUMMARY\n\n{evidence_prompt}"
         )
 
     def test_execution_policy_changes_with_agent_guardrail_configuration(self) -> None:
@@ -594,7 +648,10 @@ class TestResearchAnalyzeStockIntegration:
         _mock_started: MagicMock,
         _mock_record: MagicMock,
     ) -> None:
-        prepared = _prepared_research()
+        evidence_prompt = "DSA-EXACT-FROZEN-EVIDENCE"
+        prepared = _prepared_research(
+            evidence_prompt_context=evidence_prompt,
+        )
         pipeline = _analysis_pipeline(agent_mode=True)
         pipeline._ensure_agent_history = MagicMock()
         pipeline._load_agent_analysis_context = MagicMock(
@@ -701,6 +758,8 @@ class TestResearchAnalyzeStockIntegration:
         assert len(frozen_prompts) == 1
         assert frozen_prompts[0]["architecture"] == "single-agent"
         assert frozen_prompts[0]["messages"][0]["content"] == "EXACT-AGENT-SYSTEM"
+        assert evidence_prompt in frozen_prompts[0]["messages"][1]["content"]
+        assert frozen_prompts[0]["messages"][1]["content"].count(evidence_prompt) == 1
         assert executor.tool_registry.list_names() == []
         assert executor.tool_registry.resolve("get_stock_info") is None
         assert factory.call_args.kwargs["research_snapshot_locked"] is True

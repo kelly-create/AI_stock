@@ -463,9 +463,21 @@ def test_research_state_events_follow_parent_lifecycle_retention(
                     created_at=old,
                 ),
                 JobEventRecord(
+                    job_id="active-research-job",
+                    event_type="research_evidence_snapshot",
+                    payload_json='{"marker": "active-old-evidence"}',
+                    created_at=old,
+                ),
+                JobEventRecord(
                     job_id="terminal-research-job",
                     event_type="research_reference_time",
                     payload_json='{"marker": "terminal-old-state"}',
+                    created_at=old,
+                ),
+                JobEventRecord(
+                    job_id="terminal-research-job",
+                    event_type="research_evidence_snapshot",
+                    payload_json='{"marker": "terminal-old-evidence"}',
                     created_at=old,
                 ),
                 JobEventRecord(
@@ -480,6 +492,7 @@ def test_research_state_events_follow_parent_lifecycle_retention(
             "research_reference_time",
             "research_dataset_snapshot",
             "research_factor_snapshot",
+            "research_evidence_snapshot",
             "research_snapshot",
         ):
             payload_json = '{"marker": "fresh-state"}'
@@ -512,6 +525,10 @@ def test_research_state_events_follow_parent_lifecycle_retention(
 
     events = store.read_events(job_id="active-research-job")
     assert any(event.payload.get("marker") == "active-old-state" for event in events)
+    assert any(
+        event.payload.get("marker") == "active-old-evidence"
+        for event in events
+    )
     assert all(event.payload.get("marker") != "ordinary-old" for event in events)
     assert {
         event.event_type
@@ -521,13 +538,15 @@ def test_research_state_events_follow_parent_lifecycle_retention(
         "research_reference_time",
         "research_dataset_snapshot",
         "research_factor_snapshot",
+        "research_evidence_snapshot",
         "research_snapshot",
     }
     assert len([event for event in events if event.event_type == "task_progress"]) == 2
 
     terminal_events = store.read_events(job_id="terminal-research-job")
     assert all(
-        event.payload.get("marker") != "terminal-old-state"
+        event.payload.get("marker")
+        not in {"terminal-old-state", "terminal-old-evidence"}
         for event in terminal_events
     )
 

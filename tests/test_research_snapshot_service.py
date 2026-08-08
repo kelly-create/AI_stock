@@ -9,6 +9,8 @@ import pytest
 from src.services.research.canonical import CanonicalJSONError, canonical_hash
 from src.services.research.repositories import LeaseFence, ResearchSnapshotInput
 from src.services.research.snapshot_service import (
+    EVIDENCE_FIELD_DICTIONARY_VERSION,
+    EVIDENCE_SNAPSHOT_VERSION,
     FrozenResearchSnapshot,
     build_research_snapshot,
     model_route_fingerprint,
@@ -114,6 +116,54 @@ def _build(**overrides) -> FrozenResearchSnapshot:
     }
     values.update(overrides)
     return build_research_snapshot(**values)
+
+
+def _evidence_payload() -> dict:
+    return {
+        "evidence_engine_version": "research-evidence-v1",
+        "claim_policy_version": "research-claims-v1",
+        "as_of": "2025-06-30T10:00:00Z",
+        "available_at": "2025-06-30T09:55:00Z",
+        "status": "available",
+        "coverage": 1.0,
+        "claims": [{"id": "claim-1", "status": "supported"}],
+        "citations": [{"id": "citation-1", "artifact_hash": "d" * 64}],
+        "limitations": [],
+    }
+
+
+def test_evidence_is_strictly_additive_and_v1_identity_remains_unchanged():
+    legacy = _build()
+    explicit_none = _build(evidence=None, evidence_snapshot_hash=None)
+
+    assert explicit_none.snapshot_hash == legacy.snapshot_hash
+    assert explicit_none.canonical_json == legacy.canonical_json
+    assert explicit_none.evidence_snapshot_hash is None
+    assert "evidence" not in json.loads(legacy.canonical_json)
+
+
+def test_evidence_v2_is_linked_into_payload_hash_and_repository_input():
+    evidence_hash = "e" * 64
+    frozen = _build(
+        evidence=_evidence_payload(),
+        evidence_snapshot_hash=evidence_hash,
+        snapshot_version=EVIDENCE_SNAPSHOT_VERSION,
+        field_dictionary_version=EVIDENCE_FIELD_DICTIONARY_VERSION,
+    )
+
+    assert frozen.snapshot_version == EVIDENCE_SNAPSHOT_VERSION
+    assert frozen.field_dictionary_version == EVIDENCE_FIELD_DICTIONARY_VERSION
+    assert frozen.evidence_snapshot_hash == evidence_hash
+    assert json.loads(frozen.canonical_json)["evidence"]["claims"][0]["id"] == "claim-1"
+    assert frozen.snapshot_hash != _build().snapshot_hash
+    assert frozen.to_repository_input().evidence_snapshot_hash == evidence_hash
+
+
+def test_evidence_payload_and_hash_must_be_supplied_together():
+    with pytest.raises(ValueError, match="both be set"):
+        _build(evidence=_evidence_payload())
+    with pytest.raises(ValueError, match="both be set"):
+        _build(evidence_snapshot_hash="e" * 64)
 
 
 def test_snapshot_is_canonical_utf8_stable_and_ignores_execution_metadata():

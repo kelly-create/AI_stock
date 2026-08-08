@@ -66,10 +66,18 @@ RESEARCH_PATHS = (
     "/api/v1/research/factors/{stock_code}",
     "/api/v1/research/snapshots/{snapshot_hash}",
     "/api/v1/research/datasets/{stock_code}",
+    "/api/v1/research/evidence",
+    "/api/v1/research/evidence/{evidence_hash}",
 )
 RESEARCH_SCHEMAS = (
     "ResearchDatasetItem",
     "ResearchDatasetListResponse",
+    "ResearchEvidenceCitation",
+    "ResearchEvidenceClaim",
+    "ResearchEvidenceDetailResponse",
+    "ResearchEvidenceListResponse",
+    "ResearchEvidencePayload",
+    "ResearchEvidenceSummary",
     "ResearchFactorResponse",
     "ResearchSnapshotResponse",
 )

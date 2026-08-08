@@ -78,6 +78,39 @@ Before enabling it, verify `TUSHARE_TOKEN` and set `PERSONAL_RESEARCH_ENABLED=tr
 
 Each Research run treats `prepared.as_of` as a strict knowledge boundary. The frozen path never supplements current quotes, unversioned external intelligence, current portfolio state, or AkShare auxiliary data; missing inputs remain missing, and a daily-bar date beyond the boundary fails closed. `scripts/fetch_tushare_stock_list.py` remains an offline administrative SDK tool outside the Worker account bucket, so stop the research Worker before using it in production and never run it alongside online collection.
 
+### 3.4 PR3 Research Evidence (opt in)
+
+Apply the additive migration first, then enable the complete dependency chain in order:
+
+```bash
+python -m src.migrations --apply
+# .env
+PERSONAL_RESEARCH_ENABLED=true
+DURABLE_JOBS_ENABLED=true
+TUSHARE_RESEARCH_ENABLED=true
+RESEARCH_FACTORS_ENABLED=true
+RESEARCH_EVIDENCE_ENABLED=true
+
+docker compose -f ./docker/docker-compose.yml --profile durable up -d --force-recreate worker
+docker compose -f ./docker/docker-compose.yml up -d --force-recreate analyzer server
+```
+
+The Worker builds Evidence over frozen dataset/factor artifacts, persists it in `research_evidence_snapshots`, and binds every consuming task through a JobEvent. The Research Snapshot pins it through `evidence_snapshot_hash`. Live collection invokes the injected SearchService result-list entry point at most once. That high-level call retains the existing provider fallback chain, so it does not mean at most one underlying provider request; no candidate provider may follow a result URL to fetch page content. Historical recovery only replays durable bindings. Search output is stored only as bounded normalized snippets in a SQLite Dataset with `raw_ref=None`; this release does not create a result-page/raw sidecar. The 90-day search/news class applies only if a future release introduces that sidecar. Core SQLite backup covers the Dataset and Evidence tables, while other existing research raw files still require a paired archive under the [research raw archive and forensic restore runbook](operations/research-raw-backup_EN.md).
+
+The read-only list requires at least one of `job_id`, `research_snapshot_hash`, or `stock_code` and uses an opaque cursor over `as_of DESC, id DESC`; detail hashes are 64-character lowercase SHA-256 values. Historical reads remain available after the feature flag is disabled. In Web Run Flow, Research Evidence is collapsed by default and only loads task summaries and claim/citation detail after expansion. Source links are rendered only for `http` / `https` URLs.
+
+Use one completed durable task for a read-only verification. When admin authentication is enabled, add a valid session Cookie to `curl`:
+
+```bash
+API_BASE="${API_BASE:-http://127.0.0.1:8000}"
+TASK_ID="replace-with-completed-task-id"
+curl -fsS --get "$API_BASE/api/v1/research/evidence" \
+  --data-urlencode "job_id=$TASK_ID" \
+  --data-urlencode "limit=20"
+```
+
+To roll back, set `RESEARCH_EVIDENCE_ENABLED=false` first and recreate the Worker, Analyzer, and Server. Do not drop or downgrade the Evidence table and do not delete existing JobEvent/hash bindings. Confirm that the same read-only query still returns historical data before disabling the remaining personal-research flags in reverse order.
+
 ### 4. Common Management Commands
 
 ```bash

@@ -16,6 +16,7 @@ from src.services.research.collector import (
     ResearchCollectionResult,
 )
 from src.services.research.factor_policy_v1 import factor_policy_payload
+from src.services.research.evidence_collector import EvidenceCollector
 from src.services.research.repositories import (
     LeaseFence,
     SnapshotWriteResult,
@@ -84,6 +85,10 @@ class _Repository:
         self.research_calls = []
         self._research_hashes = set()
         self.lease_checks = []
+        self.dataset_calls = []
+        self.evidence_calls = []
+        self.job_dataset = None
+        self.evidence_records = []
 
     def assert_live_lease(self, lease, *, now=None):
         self.lease_checks.append((lease, now))
@@ -117,6 +122,8 @@ class _Repository:
             "canonical_json": snapshot.canonical_payload,
             "factor_snapshot_hash": snapshot.factor_snapshot_hash,
         }
+        if snapshot.evidence_snapshot_hash is not None:
+            payload["evidence_snapshot_hash"] = snapshot.evidence_snapshot_hash
         content_hash = canonical_hash(payload)
         created = content_hash not in self._research_hashes
         self._research_hashes.add(content_hash)
@@ -128,6 +135,73 @@ class _Repository:
         if self.research_hook is not None:
             self.research_hook()
         return result
+
+    def write_dataset(self, snapshot, *, lease, now=None):
+        self.dataset_calls.append((snapshot, lease, now))
+        content_hash = canonical_hash(
+            {
+                "dataset": snapshot.dataset,
+                "scope_value": snapshot.scope_value,
+                "market": snapshot.market,
+                "provider": snapshot.provider,
+                "schema_version": snapshot.schema_version,
+                "data_as_of": snapshot.data_as_of,
+                "available_at": snapshot.available_at,
+                "status": snapshot.status,
+                "normalized": snapshot.normalized,
+            }
+        )
+        self.job_dataset = {
+            "dataset": snapshot.dataset,
+            "scope_type": snapshot.scope_type,
+            "scope_value": snapshot.scope_value,
+            "market": snapshot.market,
+            "provider": snapshot.provider,
+            "schema_version": snapshot.schema_version,
+            "data_as_of": snapshot.data_as_of,
+            "available_at": snapshot.available_at,
+            "observed_at": snapshot.observed_at,
+            "knowledge_as_of": snapshot.knowledge_as_of,
+            "status": snapshot.status,
+            "normalized": snapshot.normalized,
+            "content_hash": content_hash,
+            "raw_ref": snapshot.raw_ref,
+            "error_code": snapshot.error_code,
+            "error_message_sanitized": snapshot.error_message_sanitized,
+        }
+        return SnapshotWriteResult(30, content_hash, len(self.dataset_calls) == 1)
+
+    def get_job_dataset(self, **_kwargs):
+        return self.job_dataset
+
+    def write_evidence(self, snapshot, *, lease, now=None):
+        self.evidence_calls.append((snapshot, lease, now))
+        evidence_hash = canonical_hash(
+            snapshot.canonical_payload,
+            exclude_volatile=False,
+        )
+        record = {
+            "stock_code": snapshot.stock_code,
+            "market": snapshot.market,
+            "evidence_engine_version": snapshot.evidence_engine_version,
+            "claim_policy_version": snapshot.claim_policy_version,
+            "as_of": snapshot.as_of,
+            "available_at": snapshot.available_at,
+            "status": snapshot.status,
+            "coverage": snapshot.coverage,
+            "claim_count": snapshot.claim_count,
+            "citation_count": snapshot.citation_count,
+            "evidence": snapshot.canonical_payload,
+            "input_dataset_hashes": list(snapshot.input_dataset_hashes),
+            "factor_snapshot_hash": snapshot.factor_snapshot_hash,
+            "evidence_hash": evidence_hash,
+        }
+        if not self.evidence_records:
+            self.evidence_records.append(record)
+        return SnapshotWriteResult(40, evidence_hash, len(self.evidence_calls) == 1)
+
+    def list_evidence(self, **_kwargs):
+        return {"items": list(self.evidence_records), "next_cursor": None}
 
 
 class _HealthStore:
@@ -169,11 +243,19 @@ def _factor_hash(snapshot) -> str:
     )
 
 
-def _config(tmp_path, *, personal=True, tushare=True, factors=True):
+def _config(
+    tmp_path,
+    *,
+    personal=True,
+    tushare=True,
+    factors=True,
+    evidence=False,
+):
     return SimpleNamespace(
         personal_research_enabled=personal,
         tushare_research_enabled=tushare,
         research_factors_enabled=factors,
+        research_evidence_enabled=evidence,
         database_path=str(tmp_path / "data" / "stock_analysis.db"),
         tushare_token="test-token",
         tushare_global_calls_per_minute=450,
@@ -443,10 +525,132 @@ def test_prepare_collects_builds_factors_and_persists_with_same_lease(tmp_path):
     assert prepared.collection is collector.collection
     assert prepared.available_at == AVAILABLE_AT
     assert prepared.as_of == AS_OF
-    assert prepared.rows_by_dataset["stock_basic"][0]["name"] == "贵州茅台"
+    assert prepared.rows_by_dataset["stock_basic"][0]["name"]
     assert prepared.factor_input["stock_code"] == "600519"
     assert prepared.factors.profile.profile == "industrial"
     assert prepared.factor_snapshot is not None
+
+
+def test_live_evidence_advances_boundary_persists_once_and_retry_reuses(
+    tmp_path,
+):
+    context = _Context()
+    repository = _Repository()
+    research_collector = _Collector(_collection())
+    observed_at = AS_OF + timedelta(minutes=5)
+    search_calls = []
+
+    def search(**kwargs):
+        search_calls.append(kwargs)
+        return {
+            "success": True,
+            "provider": "fixture-search",
+            "results": [
+                {
+                    "title": "贵州茅台发布经营公告",
+                    "snippet": "公司披露阶段性经营数据。",
+                    "url": "https://example.com/news/600519?token=secret",
+                    "source": "example.com",
+                    "published_date": "2025-06-29",
+                }
+            ],
+        }
+
+    evidence_collector = EvidenceCollector(clock=lambda: observed_at)
+    service = ResearchRuntimeService(
+        _config(tmp_path, evidence=True),
+        collector=research_collector,
+        repository=repository,
+        evidence_collector=evidence_collector,
+        durable_context_getter=lambda: context,
+    )
+
+    first = service.prepare(
+        "600519",
+        "A",
+        AS_OF,
+        reference_mode="live",
+        evidence_search=search,
+    )
+    second = service.prepare(
+        "600519",
+        "A",
+        AS_OF,
+        reference_mode="live",
+        evidence_search=search,
+    )
+
+    assert first is not None and second is not None
+    assert first.as_of == observed_at
+    assert second.as_of == observed_at
+    assert first.evidence_enabled is True
+    assert first.evidence_snapshot is not None
+    assert first.evidence_context["evidence_hash"] == first.evidence_snapshot.evidence_hash
+    assert "DSA_UNTRUSTED_EXTERNAL_DATA_BEGIN" in first.evidence_prompt_context
+    assert len(first.evidence_prompt_context) <= 12_000
+    assert first.datasets_payload["news_search"]["content_hash"]
+    assert len(first.rows_by_dataset["news_search"]) == 1
+    assert len(search_calls) == 1
+    assert search_calls[0] == {
+        "stock_code": "600519",
+        "stock_name": "贵州茅台",
+        "max_results": 5,
+    }
+    assert len(repository.dataset_calls) == 1
+    assert len(repository.evidence_calls) == 1
+    assert second.evidence_snapshot.evidence_hash == first.evidence_snapshot.evidence_hash
+
+    frozen = _freeze(service, second)
+    assert frozen.snapshot.snapshot_version == "research-snapshot-v2"
+    assert frozen.snapshot.field_dictionary_version == "research-fields-v2"
+    assert frozen.snapshot.evidence_snapshot_hash == second.evidence_snapshot.evidence_hash
+    assert repository.research_calls[-1][0].evidence_snapshot_hash == (
+        second.evidence_snapshot.evidence_hash
+    )
+
+
+def test_evidence_search_stop_signal_preserves_durable_cancellation(tmp_path):
+    context = _Context()
+    repository = _Repository()
+
+    def cancel_during_search(**_kwargs):
+        context.cancel_requested.set()
+        return {"success": True, "provider": "fixture-search", "results": []}
+
+    service = ResearchRuntimeService(
+        _config(tmp_path, evidence=True),
+        collector=_Collector(_collection()),
+        repository=repository,
+        evidence_collector=EvidenceCollector(clock=lambda: AS_OF + timedelta(minutes=1)),
+        durable_context_getter=lambda: context,
+    )
+
+    with pytest.raises(_Cancelled, match="cancelled"):
+        service.prepare(
+            "600519",
+            "A",
+            AS_OF,
+            reference_mode="live",
+            evidence_search=cancel_during_search,
+        )
+
+    assert repository.dataset_calls == []
+    assert repository.evidence_calls == []
+
+
+def test_evidence_flag_requires_factors_before_any_collection(tmp_path):
+    context = _Context()
+    collector = _Collector(_collection())
+    service = ResearchRuntimeService(
+        _config(tmp_path, factors=False, evidence=True),
+        collector=collector,
+        repository=_Repository(),
+        durable_context_getter=lambda: context,
+    )
+
+    with pytest.raises(RuntimeError, match="RESEARCH_FACTORS_ENABLED"):
+        service.prepare("600519", "A", AS_OF, reference_mode="live")
+    assert collector.calls == []
 
 
 def test_checkpoint_validates_persisted_lease_before_analysis(tmp_path):

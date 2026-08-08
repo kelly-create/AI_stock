@@ -19,9 +19,9 @@ Finite retention uses the latest of `observed_at`, `created_at`, and the newest 
 
 A crash or stale lease can leave a content-addressed raw file after publication but before its database binding commits. The maintenance plan therefore enumerates the canonical raw root while holding the same Worker-owner and database locks used for apply. A valid gzip file with no snapshot reference becomes an orphan candidate only when its filesystem modification time is strictly more than 24 hours old. Newer files remain protected; malformed gzip or a filename/content hash mismatch blocks the entire apply before any move.
 
-PR2 的 Job Event 按 30 天保留，因此该延展只覆盖当前 Tushare 行情数据的 30 天策略。PR4 接入 90 天搜索/新闻原文前，必须增加独立的 raw reference occurrence 或 `last_observed` 元数据，不能用已经清理的 30 天事件推导 90 天边界。
+Job Event 按 30 天保留，因此该延展只覆盖当前 Tushare 行情数据的 30 天策略。PR3 Evidence 仅将 bounded normalized 搜索 snippet 写入 SQLite Dataset，`raw_ref=None`，不创建 result-page/raw sidecar。未来若引入 90 天搜索/新闻 raw sidecar，必须增加独立的 raw reference occurrence 或 `last_observed` 元数据，不能用已经清理的 30 天事件推导 90 天边界。
 
-Job Events are retained for 30 days in PR2, so this extension is deliberately limited to the current 30-day Tushare market policy. Before PR4 ingests 90-day search/news raw content, it must add a dedicated raw-reference occurrence or `last_observed` record rather than infer a 90-day boundary from 30-day events.
+Job Events are retained for 30 days, so this extension is deliberately limited to the current 30-day Tushare market policy. PR3 Evidence stores only bounded normalized search snippets in a SQLite Dataset with `raw_ref=None` and creates no result-page/raw sidecar. If a future release adds a 90-day search/news raw sidecar, it must add a dedicated raw-reference occurrence or `last_observed` record rather than infer a 90-day boundary from 30-day events.
 
 ## 执行 / Operation
 

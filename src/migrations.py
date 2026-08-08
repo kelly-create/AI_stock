@@ -40,6 +40,7 @@ BASELINE_SCHEMA_VERSION = "2026-06-05-create-all-baseline"
 PR0_CONVERGENCE_SCHEMA_VERSION = "2026-08-07-pr0-schema-convergence"
 PR1_DURABLE_JOBS_SCHEMA_VERSION = "2026-08-08-pr1-durable-jobs"
 PR2_RESEARCH_DATA_SCHEMA_VERSION = "2026-08-08-pr2-research-data"
+PR3_RESEARCH_EVIDENCE_SCHEMA_VERSION = "2026-08-08-pr3-research-evidence"
 
 
 class MigrationError(RuntimeError):
@@ -106,6 +107,14 @@ def _upgrade_pr2_research_data_schema(engine: Engine) -> None:
     run_pr2_research_schema_upgrade(engine)
 
 
+def _upgrade_pr3_research_evidence_schema(engine: Engine) -> None:
+    """Install immutable evidence snapshots and research-pack references."""
+
+    from src.storage import run_pr3_research_evidence_schema_upgrade
+
+    run_pr3_research_evidence_schema_upgrade(engine)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=BASELINE_SCHEMA_VERSION,
@@ -135,6 +144,14 @@ MIGRATIONS: tuple[Migration, ...] = (
             "versioned research pack snapshots"
         ),
         apply=_upgrade_pr2_research_data_schema,
+    ),
+    Migration(
+        version=PR3_RESEARCH_EVIDENCE_SCHEMA_VERSION,
+        description=(
+            "Add immutable research evidence snapshots and bind them to "
+            "versioned research packs"
+        ),
+        apply=_upgrade_pr3_research_evidence_schema,
     ),
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version

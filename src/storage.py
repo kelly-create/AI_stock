@@ -1073,6 +1073,15 @@ _RESEARCH_DATA_STATUS_VALUES = (
 _RESEARCH_DATA_STATUS_SQL = ', '.join(
     f"'{status}'" for status in _RESEARCH_DATA_STATUS_VALUES
 )
+_RESEARCH_EVIDENCE_STATUS_VALUES = (
+    'available',
+    'empty',
+    'partial',
+    'fetch_failed',
+)
+_RESEARCH_EVIDENCE_STATUS_SQL = ', '.join(
+    f"'{status}'" for status in _RESEARCH_EVIDENCE_STATUS_VALUES
+)
 
 
 class ResearchDatasetSnapshotRecord(Base):
@@ -1231,6 +1240,71 @@ class ResearchFactorSnapshotRecord(Base):
     )
 
 
+class ResearchEvidenceSnapshotRecord(Base):
+    """Immutable, content-addressed research evidence and citation snapshot."""
+
+    __tablename__ = 'research_evidence_snapshots'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    stock_code = Column(String(16), nullable=False)
+    market = Column(String(16), nullable=False)
+    evidence_engine_version = Column(String(64), nullable=False)
+    claim_policy_version = Column(String(64), nullable=False)
+    as_of = Column(DateTime, nullable=False)
+    available_at = Column(DateTime, nullable=False)
+    status = Column(String(32), nullable=False)
+    coverage = Column(Float, nullable=False)
+    claim_count = Column(Integer, nullable=False)
+    citation_count = Column(Integer, nullable=False)
+    canonical_json = Column(Text, nullable=False)
+    input_dataset_hashes_json = Column(Text, nullable=False)
+    factor_snapshot_hash = Column(String(64), nullable=False)
+    evidence_hash = Column(CHAR(64), nullable=False)
+    origin_job_id = Column(
+        String(64),
+        ForeignKey('analysis_jobs.task_id', ondelete='SET NULL'),
+        nullable=True,
+    )
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=text('CURRENT_TIMESTAMP'),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            f'status IN ({_RESEARCH_EVIDENCE_STATUS_SQL})',
+            name='ck_research_evidence_snapshots_status',
+        ),
+        CheckConstraint(
+            'coverage >= 0 AND coverage <= 1',
+            name='ck_research_evidence_snapshots_coverage',
+        ),
+        CheckConstraint(
+            'claim_count >= 0 AND citation_count >= 0',
+            name='ck_research_evidence_snapshots_counts',
+        ),
+        CheckConstraint(
+            'length(evidence_hash) = 64',
+            name='ck_research_evidence_snapshots_hash_length',
+        ),
+        Index(
+            'uix_research_evidence_snapshots_evidence_hash',
+            'evidence_hash',
+            unique=True,
+        ),
+        Index(
+            'ix_research_evidence_snapshots_stock_asof',
+            'stock_code',
+            'as_of',
+        ),
+        Index(
+            'ix_research_evidence_snapshots_factor_hash',
+            'factor_snapshot_hash',
+        ),
+    )
+
+
 class ResearchSnapshotRecord(Base):
     """Immutable, versioned AnalysisContextPack research snapshot."""
 
@@ -1252,6 +1326,7 @@ class ResearchSnapshotRecord(Base):
     canonical_json = Column(Text, nullable=False)
     snapshot_hash = Column(CHAR(64), nullable=False)
     factor_snapshot_hash = Column(String(64), nullable=True)
+    evidence_snapshot_hash = Column(String(64), nullable=True)
     origin_job_id = Column(
         String(64),
         ForeignKey('analysis_jobs.task_id', ondelete='SET NULL'),
@@ -1281,6 +1356,10 @@ class ResearchSnapshotRecord(Base):
             'ix_research_snapshots_stock_asof',
             'stock_code',
             'as_of',
+        ),
+        Index(
+            'ix_research_snapshots_evidence_hash',
+            'evidence_snapshot_hash',
         ),
     )
 
@@ -4673,6 +4752,9 @@ _PR2_RESEARCH_TABLES = (
     ResearchFactorSnapshotRecord.__table__,
     ResearchSnapshotRecord.__table__,
 )
+_PR3_RESEARCH_EVIDENCE_TABLES = (
+    ResearchEvidenceSnapshotRecord.__table__,
+)
 _PR1_EXTENSION_INDEX_NAMES = {
     'ix_llm_usage_job_stage_called_at',
     'ix_llm_usage_trace_called_at',
@@ -4951,8 +5033,13 @@ def _normalize_sql_default(value: Any) -> Optional[str]:
     return normalized
 
 
-def _verify_pr2_research_schema_contract(connection) -> None:
-    """Fail closed when an immutable research table drifts from its contract."""
+def _verify_research_schema_tables_contract(
+    connection,
+    tables,
+    *,
+    contract_name: str,
+) -> None:
+    """Fail closed when immutable research tables drift from ORM contracts."""
 
     existing_tables = {
         row[0]
@@ -4961,15 +5048,15 @@ def _verify_pr2_research_schema_contract(connection) -> None:
         ).all()
     }
     missing_tables = sorted(
-        {table.name for table in _PR2_RESEARCH_TABLES}.difference(existing_tables)
+        {table.name for table in tables}.difference(existing_tables)
     )
     if missing_tables:
         raise RuntimeError(
-            'PR2 research schema is incomplete: missing tables='
+            f'{contract_name} research schema is incomplete: missing tables='
             + ','.join(missing_tables)
         )
 
-    for table in _PR2_RESEARCH_TABLES:
+    for table in tables:
         pragma_rows = connection.exec_driver_sql(
             f"PRAGMA table_info('{table.name}')"
         ).all()
@@ -4979,7 +5066,7 @@ def _verify_pr2_research_schema_contract(connection) -> None:
         unexpected_columns = sorted(set(actual_columns).difference(expected_columns))
         if missing_columns or unexpected_columns:
             raise RuntimeError(
-                f'PR2 research schema table {table.name} has incompatible columns: '
+                f'{contract_name} research schema table {table.name} has incompatible columns: '
                 f'missing={missing_columns}, unexpected={unexpected_columns}'
             )
 
@@ -4991,12 +5078,12 @@ def _verify_pr2_research_schema_contract(connection) -> None:
             )
             if actual_type != expected_type:
                 raise RuntimeError(
-                    f'PR2 research schema column {table.name}.{column_name} '
+                    f'{contract_name} research schema column {table.name}.{column_name} '
                     f'has type {actual[2]!r}; expected {expected_type!r}'
                 )
             if not column.primary_key and bool(actual[3]) != (not column.nullable):
                 raise RuntimeError(
-                    f'PR2 research schema column {table.name}.{column_name} '
+                    f'{contract_name} research schema column {table.name}.{column_name} '
                     'has incompatible nullability'
                 )
             actual_default = _normalize_sql_default(actual[4])
@@ -5005,7 +5092,7 @@ def _verify_pr2_research_schema_contract(connection) -> None:
             )
             if actual_default != expected_default:
                 raise RuntimeError(
-                    f'PR2 research schema column {table.name}.{column_name} '
+                    f'{contract_name} research schema column {table.name}.{column_name} '
                     f'has default {actual_default!r}; expected {expected_default!r}'
                 )
 
@@ -5019,7 +5106,7 @@ def _verify_pr2_research_schema_contract(connection) -> None:
         }
         if set(index_rows) != set(expected_indexes):
             raise RuntimeError(
-                f'PR2 research schema table {table.name} has incompatible indexes: '
+                f'{contract_name} research schema table {table.name} has incompatible indexes: '
                 f'actual={sorted(index_rows)}, expected={sorted(expected_indexes)}'
             )
         for index_name, index in expected_indexes.items():
@@ -5039,7 +5126,7 @@ def _verify_pr2_research_schema_contract(connection) -> None:
                 or bool(actual[4])
             ):
                 raise RuntimeError(
-                    f'PR2 research schema index {index_name} is incompatible: '
+                    f'{contract_name} research schema index {index_name} is incompatible: '
                     f'columns={actual_columns_for_index}, unique={bool(actual[2])}, '
                     f'partial={bool(actual[4])}'
                 )
@@ -5059,7 +5146,7 @@ def _verify_pr2_research_schema_contract(connection) -> None:
                 or predicate not in table_sql
             ):
                 raise RuntimeError(
-                    f'PR2 research schema table {table.name} is missing check '
+                    f'{contract_name} research schema table {table.name} is missing check '
                     f'{constraint.name}'
                 )
 
@@ -5080,10 +5167,20 @@ def _verify_pr2_research_schema_contract(connection) -> None:
         }
         if actual_foreign_keys != expected_foreign_keys:
             raise RuntimeError(
-                f'PR2 research schema table {table.name} has incompatible foreign keys: '
+                f'{contract_name} research schema table {table.name} has incompatible foreign keys: '
                 f'actual={sorted(actual_foreign_keys)}, '
                 f'expected={sorted(expected_foreign_keys)}'
             )
+
+
+def _verify_pr2_research_schema_contract(connection) -> None:
+    """Fail closed when a PR2 immutable research table drifts."""
+
+    _verify_research_schema_tables_contract(
+        connection,
+        _PR2_RESEARCH_TABLES,
+        contract_name='PR2',
+    )
 
 
 def run_pr2_research_schema_upgrade(engine) -> None:
@@ -5118,6 +5215,70 @@ def _apply_pr2_research_schema(connection) -> None:
         table.create(bind=connection, checkfirst=True)
 
     _verify_pr2_research_schema_contract(connection)
+
+
+def _verify_pr3_research_evidence_schema_contract(connection) -> None:
+    """Verify the PR3 evidence table and its research snapshot reference."""
+
+    _verify_pr2_research_schema_contract(connection)
+    _verify_research_schema_tables_contract(
+        connection,
+        _PR3_RESEARCH_EVIDENCE_TABLES,
+        contract_name='PR3',
+    )
+
+
+def run_pr3_research_evidence_schema_upgrade(engine) -> None:
+    """Create and verify PR3 immutable research evidence storage atomically."""
+
+    if engine.url.get_backend_name() != 'sqlite':
+        raise RuntimeError('PR3 research evidence migration only supports SQLite')
+
+    with engine.connect() as connection:
+        connection.exec_driver_sql('BEGIN IMMEDIATE')
+        try:
+            _apply_pr3_research_evidence_schema(connection)
+        except BaseException:
+            connection.rollback()
+            raise
+        else:
+            connection.commit()
+
+
+def _apply_pr3_research_evidence_schema(connection) -> None:
+    """Apply PR3 DDL on a caller-owned explicit SQLite transaction."""
+
+    research_snapshots_exists = connection.exec_driver_sql(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+        "AND name = 'research_snapshots'"
+    ).first()
+    if research_snapshots_exists is None:
+        raise RuntimeError(
+            'PR3 research evidence migration requires the PR2 research_snapshots table'
+        )
+
+    research_snapshot_columns = {
+        row[1]
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info('research_snapshots')"
+        ).all()
+    }
+    if 'evidence_snapshot_hash' not in research_snapshot_columns:
+        connection.exec_driver_sql(
+            'ALTER TABLE research_snapshots '
+            'ADD COLUMN evidence_snapshot_hash VARCHAR(64)'
+        )
+
+    evidence_index = next(
+        index
+        for index in ResearchSnapshotRecord.__table__.indexes
+        if index.name == 'ix_research_snapshots_evidence_hash'
+    )
+    evidence_index.create(bind=connection, checkfirst=True)
+    for table in _PR3_RESEARCH_EVIDENCE_TABLES:
+        table.create(bind=connection, checkfirst=True)
+
+    _verify_pr3_research_evidence_schema_contract(connection)
 
 
 class _StorageSchemaConvergence(DatabaseManager):

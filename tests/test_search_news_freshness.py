@@ -16,7 +16,12 @@ if "newspaper" not in sys.modules:
     mock_np.Config = MagicMock()
     sys.modules["newspaper"] = mock_np
 
-from src.search_service import SearchResponse, SearchResult, SearchService
+from src.search_service import (
+    SearchResponse,
+    SearchResult,
+    SearchService,
+    SerpAPISearchProvider,
+)
 from src.services.run_diagnostics import (
     activate_run_diagnostic_context,
     current_diagnostic_snapshot,
@@ -82,6 +87,46 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         service.search_stock_news("600519", "贵州茅台", max_results=5)
         kwargs = mock_search.call_args[1]
         self.assertEqual(kwargs["days"], 3)
+
+    def test_snippet_only_reaches_serpapi_and_uses_separate_cache(self) -> None:
+        today = datetime.now().date().isoformat()
+        service = SearchService(
+            serpapi_keys=["dummy_key"],
+            searxng_public_instances_enabled=False,
+            news_max_age_days=3,
+            news_strategy_profile="short",
+        )
+        provider = service._providers[0]
+        self.assertIsInstance(provider, SerpAPISearchProvider)
+        provider.search = MagicMock(
+            return_value=_response(
+                [
+                    _result(
+                        "贵州茅台 600519 最新公告",
+                        today,
+                        snippet="贵州茅台发布最新公告。",
+                    )
+                ]
+            )
+        )
+
+        snippet_response = service.search_stock_news(
+            "600519",
+            "贵州茅台",
+            max_results=1,
+            snippet_only=True,
+        )
+        legacy_response = service.search_stock_news(
+            "600519",
+            "贵州茅台",
+            max_results=1,
+        )
+
+        self.assertTrue(snippet_response.success)
+        self.assertTrue(legacy_response.success)
+        self.assertEqual(provider.search.call_count, 2)
+        self.assertTrue(provider.search.call_args_list[0].kwargs["snippet_only"])
+        self.assertNotIn("snippet_only", provider.search.call_args_list[1].kwargs)
 
     def test_search_topic_news_reuses_provider_and_freshness_without_stock_identity_filter(self) -> None:
         today = datetime.now().date().isoformat()

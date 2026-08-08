@@ -24,9 +24,11 @@ BLOCK_LABELS_EN = {
     "fundamentals": "fundamentals",
     "news": "news",
     "research_factors": "research factors",
+    "research_evidence": "research evidence",
 }
 
 BLOCK_LABELS_ZH["research_factors"] = "研究因子"
+BLOCK_LABELS_ZH["research_evidence"] = "研究证据"
 
 STATUS_LABELS_ZH = {
     "available": "可用",

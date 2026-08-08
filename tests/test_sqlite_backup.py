@@ -7,8 +7,10 @@ from contextlib import closing
 from pathlib import Path
 
 import pytest
+from sqlalchemy import create_engine
 
 from scripts import sqlite_backup
+from src.storage import Base
 
 
 CORE_TABLES = ("schema_migrations", "parents", "children", "items")
@@ -22,8 +24,60 @@ def test_default_backup_contract_includes_durable_and_research_tables() -> None:
         "provider_health",
         "research_dataset_snapshots",
         "research_factor_snapshots",
+        "research_evidence_snapshots",
         "research_snapshots",
     }.issubset(sqlite_backup.DEFAULT_BACKUP_CORE_TABLES)
+
+
+def test_default_backup_round_trip_preserves_evidence_rows(tmp_path: Path) -> None:
+    database = tmp_path / "evidence-source.sqlite"
+    backup = tmp_path / "evidence-backup.sqlite"
+    restored = tmp_path / "evidence-restored.sqlite"
+    engine = create_engine(f"sqlite:///{database.as_posix()}")
+    try:
+        Base.metadata.create_all(engine)
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "INSERT INTO research_evidence_snapshots ("
+                "stock_code, market, evidence_engine_version, claim_policy_version, "
+                "as_of, available_at, status, coverage, claim_count, citation_count, "
+                "canonical_json, input_dataset_hashes_json, factor_snapshot_hash, "
+                "evidence_hash, origin_job_id"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "600519",
+                    "A",
+                    "evidence-v1",
+                    "claim-policy-v1",
+                    "2026-08-08 08:00:00",
+                    "2026-08-08 07:59:00",
+                    "available",
+                    1.0,
+                    0,
+                    0,
+                    "{}",
+                    "[]",
+                    "f" * 64,
+                    "e" * 64,
+                    None,
+                ),
+            )
+    finally:
+        engine.dispose()
+
+    manifest = sqlite_backup.create_backup(database, backup)
+    result = sqlite_backup.restore_backup(backup, restored)
+
+    assert manifest["database"]["core_table_counts"][
+        "research_evidence_snapshots"
+    ] == 1
+    assert result["sha256"] == manifest["backup"]["sha256"]
+    with closing(sqlite3.connect(restored)) as connection:
+        row = connection.execute(
+            "SELECT evidence_hash, factor_snapshot_hash "
+            "FROM research_evidence_snapshots"
+        ).fetchone()
+    assert row == ("e" * 64, "f" * 64)
 
 
 def _create_database(path: Path, *, item_prefix: str = "seed", item_count: int = 8) -> None:

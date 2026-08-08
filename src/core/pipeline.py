@@ -410,11 +410,33 @@ class StockAnalysisPipeline:
         if reference_mode not in {"live", "historical"}:
             raise ValueError("reference_mode must be 'live' or 'historical'")
         self._emit_progress(14, f"{code}：正在冻结研究数据集")
-        return self._get_research_runtime().prepare(
-            code,
-            market,
-            as_of,
-            reference_mode=reference_mode,
+        prepare_kwargs: Dict[str, Any] = {"reference_mode": reference_mode}
+        if bool(getattr(self.config, "research_evidence_enabled", False)):
+            prepare_kwargs["evidence_search"] = self._search_research_evidence
+        return self._get_research_runtime().prepare(code, market, as_of, **prepare_kwargs)
+
+    def _search_research_evidence(
+        self,
+        *,
+        stock_code: str,
+        stock_name: str,
+        max_results: int,
+    ) -> Any:
+        """Search provider snippets without ever fetching a result page."""
+
+        search_service = getattr(self, "search_service", None)
+        if search_service is None or not bool(getattr(search_service, "is_available", False)):
+            return {
+                "success": False,
+                "provider": "None",
+                "results": [],
+                "error_message": "research evidence search is unavailable",
+            }
+        return search_service.search_stock_news(
+            stock_code,
+            stock_name,
+            max_results=max_results,
+            snippet_only=True,
         )
 
     @staticmethod
@@ -455,6 +477,25 @@ class StockAnalysisPipeline:
             if name:
                 return name
         return None
+
+    @staticmethod
+    def _research_evidence_context(
+        prepared_research: Any,
+    ) -> Optional[Mapping[str, Any]]:
+        context = getattr(prepared_research, "evidence_context", None)
+        return dict(context) if isinstance(context, Mapping) else None
+
+    @staticmethod
+    def _append_research_evidence_prompt(
+        summary: str,
+        prepared_research: Any,
+    ) -> str:
+        evidence_prompt = str(
+            getattr(prepared_research, "evidence_prompt_context", "") or ""
+        ).strip()
+        if not evidence_prompt:
+            return summary
+        return f"{summary}\n\n{evidence_prompt}" if summary else evidence_prompt
 
     @staticmethod
     def _research_preloaded_errors(prepared_research: Any) -> Tuple[str, ...]:
@@ -1129,6 +1170,9 @@ class StockAnalysisPipeline:
             
             # Step 7: 调用 AI 分析（传入增强的上下文和新闻）
             research_context = getattr(prepared_research, "research_context", None)
+            research_evidence_context = self._research_evidence_context(
+                prepared_research
+            )
             (
                 analysis_context_pack,
                 analysis_context_pack_summary,
@@ -1150,10 +1194,15 @@ class StockAnalysisPipeline:
                     query_id=query_id,
                     portfolio_context=portfolio_context,
                     research_context=research_context,
+                    research_evidence_context=research_evidence_context,
                 ),
                 report_language=report_language,
                 code=code,
                 query_id=query_id,
+            )
+            analysis_context_pack_summary = self._append_research_evidence_prompt(
+                analysis_context_pack_summary,
+                prepared_research,
             )
             if prepared_research is not None:
                 exact_user_prompt = self.analyzer._format_prompt(
@@ -1924,6 +1973,9 @@ class StockAnalysisPipeline:
             )
             market = get_market_for_stock(normalize_stock_code(code))
             research_context = getattr(prepared_research, "research_context", None)
+            research_evidence_context = self._research_evidence_context(
+                prepared_research
+            )
             (
                 analysis_context_pack,
                 analysis_context_pack_summary,
@@ -1940,10 +1992,15 @@ class StockAnalysisPipeline:
                     base_context=analysis_context,
                     portfolio_context=portfolio_context,
                     research_context=research_context,
+                    research_evidence_context=research_evidence_context,
                 ),
                 report_language=report_language,
                 code=code,
                 query_id=query_id,
+            )
+            analysis_context_pack_summary = self._append_research_evidence_prompt(
+                analysis_context_pack_summary,
+                prepared_research,
             )
             if analysis_context_pack_summary:
                 initial_context["analysis_context_pack_summary"] = analysis_context_pack_summary
@@ -3439,6 +3496,7 @@ class StockAnalysisPipeline:
         query_id: str,
         portfolio_context: Optional[Dict[str, Any]] = None,
         research_context: Optional[Mapping[str, Any]] = None,
+        research_evidence_context: Optional[Mapping[str, Any]] = None,
     ) -> PipelineAnalysisArtifacts:
         return PipelineAnalysisArtifacts(
             code=code,
@@ -3461,6 +3519,11 @@ class StockAnalysisPipeline:
             research_context=(
                 dict(research_context) if isinstance(research_context, Mapping) else None
             ),
+            research_evidence_context=(
+                dict(research_evidence_context)
+                if isinstance(research_evidence_context, Mapping)
+                else None
+            ),
         )
 
     def _build_agent_analysis_artifacts(
@@ -3476,6 +3539,7 @@ class StockAnalysisPipeline:
         base_context: Optional[Dict[str, Any]] = None,
         portfolio_context: Optional[Dict[str, Any]] = None,
         research_context: Optional[Mapping[str, Any]] = None,
+        research_evidence_context: Optional[Mapping[str, Any]] = None,
     ) -> PipelineAnalysisArtifacts:
         context_candidate = base_context
         if not isinstance(context_candidate, dict):
@@ -3514,6 +3578,11 @@ class StockAnalysisPipeline:
             portfolio_context=dict(portfolio_context) if isinstance(portfolio_context, dict) else None,
             research_context=(
                 dict(research_context) if isinstance(research_context, Mapping) else None
+            ),
+            research_evidence_context=(
+                dict(research_evidence_context)
+                if isinstance(research_evidence_context, Mapping)
+                else None
             ),
         )
 

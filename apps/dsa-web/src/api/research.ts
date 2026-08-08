@@ -5,6 +5,9 @@ import type {
   ResearchDatasetItem,
   ResearchDatasetListResponse,
   ResearchDatasetParams,
+  ResearchEvidenceDetailResponse,
+  ResearchEvidenceListParams,
+  ResearchEvidenceListResponse,
   ResearchFactorParams,
   ResearchFactorResponse,
   ResearchSnapshotResponse,
@@ -75,6 +78,41 @@ function toResearchDatasetListResponse<TDetail extends boolean>(
   return response;
 }
 
+function toResearchEvidenceListResponse(
+  data: Record<string, unknown>,
+): ResearchEvidenceListResponse {
+  if (!Array.isArray(data.items)) {
+    throw new Error('Research evidence list response items must be an array');
+  }
+  const response = toCamelCase<ResearchEvidenceListResponse>(data);
+  response.items = data.items.map((item) => (
+    toCamelCase(item as Record<string, unknown>)
+  ));
+  return response;
+}
+
+function toResearchEvidenceDetailResponse(
+  data: Record<string, unknown>,
+): ResearchEvidenceDetailResponse {
+  const response = toCamelCase<ResearchEvidenceDetailResponse>(data);
+  if (!response.evidence || !Array.isArray(response.evidence.claims)
+    || !Array.isArray(response.evidence.citations)) {
+    throw new Error('Research evidence detail response is malformed');
+  }
+  return response;
+}
+
+function toEvidenceParams(params: ResearchEvidenceListParams): Record<string, unknown> {
+  return omitUndefined({
+    job_id: params.jobId,
+    research_snapshot_hash: params.researchSnapshotHash,
+    stock_code: params.stockCode,
+    as_of: params.asOf,
+    cursor: params.cursor,
+    limit: params.limit,
+  });
+}
+
 async function listDatasets(
   stockCode: string,
   params: ResearchDatasetParams<true>,
@@ -115,6 +153,25 @@ export const researchApi = {
       `/api/v1/research/snapshots/${encodePathSegment(snapshotHash)}`,
     );
     return toResearchSnapshotResponse(response.data);
+  },
+
+  async listEvidence(
+    params: ResearchEvidenceListParams,
+  ): Promise<ResearchEvidenceListResponse> {
+    const response = await apiClient.get<Record<string, unknown>>(
+      '/api/v1/research/evidence',
+      { params: toEvidenceParams(params) },
+    );
+    return toResearchEvidenceListResponse(response.data);
+  },
+
+  async getEvidence(
+    evidenceHash: string,
+  ): Promise<ResearchEvidenceDetailResponse> {
+    const response = await apiClient.get<Record<string, unknown>>(
+      `/api/v1/research/evidence/${encodePathSegment(evidenceHash)}`,
+    );
+    return toResearchEvidenceDetailResponse(response.data);
   },
 
   listDatasets,

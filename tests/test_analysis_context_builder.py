@@ -173,6 +173,42 @@ def test_research_factors_block_is_additive_and_not_quality_weighted() -> None:
     assert enriched.data_quality == legacy.data_quality
 
 
+def test_research_evidence_block_is_additive_and_not_quality_weighted() -> None:
+    legacy = AnalysisContextBuilder.build(_artifacts())
+    enriched = AnalysisContextBuilder.build(
+        _artifacts(
+            research_evidence_context={
+                "status": "partial",
+                "available_at": "2026-05-24T15:00:00Z",
+                "evidence_hash": "e" * 64,
+                "claims": [
+                    {
+                        "id": "claim-1",
+                        "statement": "Revenue growth is supported.",
+                        "status": "supported",
+                    }
+                ],
+                "citations": [
+                    {
+                        "id": "citation-1",
+                        "artifact_hash": "d" * 64,
+                        "json_pointer": "/rows/0/revenue",
+                    }
+                ],
+                "limitations": ["news_search_empty"],
+            }
+        )
+    )
+
+    block = enriched.blocks["research_evidence"]
+    assert block.status == ContextFieldStatus.PARTIAL
+    assert block.items["evidence_hash"].value == "e" * 64
+    assert block.items["claims"].value[0]["id"] == "claim-1"
+    assert block.items["citations"].value[0]["id"] == "citation-1"
+    assert block.metadata == {"auxiliary": True, "quality_weighted": False}
+    assert enriched.data_quality == legacy.data_quality
+
+
 @pytest.mark.parametrize(
     ("research_status", "pack_status", "missing_reason"),
     [

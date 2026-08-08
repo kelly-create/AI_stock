@@ -613,7 +613,14 @@ class SerpAPISearchProvider(BaseSearchProvider):
     def __init__(self, api_keys: List[str]):
         super().__init__(api_keys, "SerpAPI")
     
-    def _do_search(self, query: str, api_key: str, max_results: int, days: int = 7) -> SearchResponse:
+    def _do_search(
+        self,
+        query: str,
+        api_key: str,
+        max_results: int,
+        days: int = 7,
+        snippet_only: bool = False,
+    ) -> SearchResponse:
         """执行 SerpAPI 搜索"""
         try:
             from serpapi import GoogleSearch
@@ -750,7 +757,7 @@ class SerpAPISearchProvider(BaseSearchProvider):
                 rich_extensions = self._extract_rich_snippet_extensions(item)
                 snippet = self._build_organic_snippet(item, rich_extensions=rich_extensions)
 
-                if self._should_fetch_organic_content(
+                if not snippet_only and self._should_fetch_organic_content(
                     link=link,
                     snippet=snippet,
                     rank=rank,
@@ -795,6 +802,24 @@ class SerpAPISearchProvider(BaseSearchProvider):
                 success=False,
                 error_message=error_msg
             )
+
+    def search(
+        self,
+        query: str,
+        max_results: int = 5,
+        days: int = 7,
+        *,
+        snippet_only: bool = False,
+    ) -> SearchResponse:
+        """Execute SerpAPI search, optionally forbidding result-page fetches."""
+        if not snippet_only:
+            return super().search(query, max_results=max_results, days=days)
+        return self._execute_search(
+            query,
+            max_results=max_results,
+            days=days,
+            snippet_only=True,
+        )
     
     @staticmethod
     def _extract_domain(url: str) -> str:
@@ -3995,7 +4020,9 @@ class SearchService:
         stock_code: str,
         stock_name: str,
         max_results: int = 5,
-        focus_keywords: Optional[List[str]] = None
+        focus_keywords: Optional[List[str]] = None,
+        *,
+        snippet_only: bool = False,
     ) -> SearchResponse:
         """
         搜索股票相关新闻
@@ -4005,6 +4032,7 @@ class SearchService:
             stock_name: 股票名称
             max_results: 最大返回结果数
             focus_keywords: 重点关注的关键词列表
+            snippet_only: 仅消费搜索提供商返回的摘要，禁止二次抓取结果页
             
         Returns:
             SearchResponse 对象
@@ -4067,11 +4095,14 @@ class SearchService:
             provider_max_results,
         )
 
+        cache_identity = (
+            f"{query}|target={stock_code}:{stock_name}|"
+            f"news_pref={'zh' if prefer_chinese else 'default'}"
+        )
+        if snippet_only:
+            cache_identity = f"{cache_identity}|snippet_only=1"
         cache_key = self._cache_key(
-            (
-                f"{query}|target={stock_code}:{stock_name}|"
-                f"news_pref={'zh' if prefer_chinese else 'default'}"
-            ),
+            cache_identity,
             max_results,
             search_days,
         )
@@ -4106,6 +4137,8 @@ class SearchService:
                 search_kwargs: Dict[str, Any] = {}
                 if isinstance(provider, TavilySearchProvider):
                     search_kwargs["topic"] = "news"
+                elif isinstance(provider, SerpAPISearchProvider) and snippet_only:
+                    search_kwargs["snippet_only"] = True
                 elif isinstance(provider, BraveSearchProvider):
                     search_kwargs.update(
                         self._brave_search_locale(

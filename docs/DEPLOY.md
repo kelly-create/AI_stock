@@ -82,6 +82,39 @@ Worker 健康检查只读 `provider_health` 中的组件心跳，要求 `DURABLE
 
 Research 运行以本轮 `prepared.as_of` 为严格知识边界；冻结路径不会补入当前实时报价、未版本化外部资讯、当前组合状态或 AkShare 辅助数据。缺失数据保持缺失，日线日期晚于边界会直接拒绝冻结。`scripts/fetch_tushare_stock_list.py` 仅是离线管理员工具，不受 Worker 账号桶保护，生产使用时必须先停止研究 Worker且不得与在线采集并行。
 
+### 3.4 PR3 Research Evidence（按需启用）
+
+先应用追加式迁移，再按依赖顺序开启完整链路：
+
+```bash
+python -m src.migrations --apply
+# .env
+PERSONAL_RESEARCH_ENABLED=true
+DURABLE_JOBS_ENABLED=true
+TUSHARE_RESEARCH_ENABLED=true
+RESEARCH_FACTORS_ENABLED=true
+RESEARCH_EVIDENCE_ENABLED=true
+
+docker compose -f ./docker/docker-compose.yml --profile durable up -d --force-recreate worker
+docker compose -f ./docker/docker-compose.yml up -d --force-recreate analyzer server
+```
+
+Evidence 由 Worker 在已冻结 dataset / factor 之上构造，持久化到 `research_evidence_snapshots`，并通过 JobEvent 绑定到实际消费它的 task；Research Snapshot 通过 `evidence_snapshot_hash` 固定引用。在线阶段最多调用一次注入的 SearchService 结果列表入口；该高层调用保留既有 provider fallback，因此不等同于最多一次底层 provider 请求，但任何候选 provider 都不得跟随结果 URL 抓正文。历史恢复只重放已绑定数据，不重新搜索。搜索结果只以 bounded normalized snippet 写入 SQLite Dataset，`raw_ref=None`，本版不创建 result-page/raw sidecar；未来若引入该 sidecar，才适用搜索/新闻 90 天保留分类。SQLite 核心备份覆盖 Dataset 与 Evidence 表，现有其它研究 raw 文件仍需按[研究原始数据归档与取证恢复](operations/research-raw-backup.md)单独成对归档。
+
+只读列表至少需要 `job_id`、`research_snapshot_hash`、`stock_code` 之一，按 `as_of DESC, id DESC` 使用 opaque cursor 分页；详情 hash 必须是 64 位小写 SHA-256。功能开关关闭后历史仍可读。Web Run Flow 中的研究证据默认折叠，展开时才按当前 Task 加载摘要与 claim/citation；来源链接只允许 `http` / `https`。
+
+可用一个已完成的 durable task 做只读验证；启用管理员认证时给 `curl` 补充有效的 session Cookie：
+
+```bash
+API_BASE="${API_BASE:-http://127.0.0.1:8000}"
+TASK_ID="replace-with-completed-task-id"
+curl -fsS --get "$API_BASE/api/v1/research/evidence" \
+  --data-urlencode "job_id=$TASK_ID" \
+  --data-urlencode "limit=20"
+```
+
+回滚只需先设置 `RESEARCH_EVIDENCE_ENABLED=false`，再重建 Worker、Analyzer 与 Server；不要删除或降级 Evidence 表，也不要清理已有 JobEvent / hash 绑定。关闭开关后用同一只读请求确认历史仍可查询，再按相反顺序关闭其它个人投研开关。
+
 ### 4. 常用管理命令
 
 ```bash

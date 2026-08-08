@@ -88,6 +88,7 @@ describe('researchApi', () => {
         snapshot: { source_payload: { original_key: true } },
         snapshot_hash: 'c'.repeat(64),
         factor_snapshot_hash: 'd'.repeat(64),
+        evidence_snapshot_hash: 'e'.repeat(64),
         origin_job_id: 'job-1',
         created_at: '2026-08-08T15:05:00+08:00',
       },
@@ -100,6 +101,7 @@ describe('researchApi', () => {
     );
     expect(result.fieldDictionaryVersion).toBe('field-v1');
     expect(result.factorSnapshotHash).toBe('d'.repeat(64));
+    expect(result.evidenceSnapshotHash).toBe('e'.repeat(64));
     expect(result.snapshot).toEqual({
       source_payload: { original_key: true },
     });
@@ -248,6 +250,129 @@ describe('researchApi', () => {
 
     await expect(researchApi.listDatasets('600519')).rejects.toThrow(
       'Research dataset list response items must be an array',
+    );
+  });
+
+  it('lists evidence by durable job with opaque cursor pagination', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        items: [{
+          id: 31,
+          stock_code: '600519',
+          market: 'cn',
+          evidence_engine_version: 'evidence-v1',
+          claim_policy_version: 'claim-policy-v1',
+          as_of: '2026-08-08T08:00:00Z',
+          available_at: '2026-08-08T08:00:00Z',
+          status: 'partial',
+          coverage: 0.5,
+          claim_count: 1,
+          citation_count: 1,
+          input_dataset_hashes: ['a'.repeat(64)],
+          factor_snapshot_hash: 'b'.repeat(64),
+          evidence_hash: 'c'.repeat(64),
+          origin_job_id: 'job-1',
+          created_at: '2026-08-08T08:00:00Z',
+        }],
+        count: 1,
+        next_cursor: 'opaque-next-page',
+      },
+    });
+
+    const result = await researchApi.listEvidence({
+      jobId: 'job / 1',
+      asOf: '2026-08-08T16:00:00+08:00',
+      cursor: 'opaque-current-page',
+      limit: 20,
+    });
+
+    expect(get).toHaveBeenCalledWith('/api/v1/research/evidence', {
+      params: {
+        job_id: 'job / 1',
+        as_of: '2026-08-08T16:00:00+08:00',
+        cursor: 'opaque-current-page',
+        limit: 20,
+      },
+    });
+    expect(result.nextCursor).toBe('opaque-next-page');
+    expect(result.items[0]).toMatchObject({
+      evidenceHash: 'c'.repeat(64),
+      claimCount: 1,
+      citationCount: 1,
+    });
+  });
+
+  it('gets typed evidence detail and rejects malformed nested payloads', async () => {
+    const detail = {
+      id: 31,
+      stock_code: '600519',
+      market: 'cn',
+      evidence_engine_version: 'evidence-v1',
+      claim_policy_version: 'claim-policy-v1',
+      as_of: '2026-08-08T08:00:00Z',
+      available_at: '2026-08-08T08:00:00Z',
+      status: 'partial',
+      coverage: 0.5,
+      claim_count: 1,
+      citation_count: 1,
+      input_dataset_hashes: ['a'.repeat(64)],
+      factor_snapshot_hash: 'b'.repeat(64),
+      evidence_hash: 'c'.repeat(64),
+      origin_job_id: 'job-1',
+      created_at: '2026-08-08T08:00:00Z',
+      evidence: {
+        evidence_engine_version: 'evidence-v1',
+        claim_policy_version: 'claim-policy-v1',
+        stock_code: '600519',
+        market: 'cn',
+        as_of: '2026-08-08T08:00:00Z',
+        available_at: '2026-08-08T08:00:00Z',
+        status: 'partial',
+        coverage: 0.5,
+        input_dataset_hashes: ['a'.repeat(64)],
+        factor_snapshot_hash: 'b'.repeat(64),
+        limitations: [],
+        claims: [{
+          id: 'claim-1',
+          kind: 'factor_metric',
+          statement: 'Value is supported.',
+          status: 'supported',
+          citation_ids: ['citation-1'],
+          limitations: [],
+          available_at: '2026-08-08T08:00:00Z',
+        }],
+        citations: [{
+          id: 'citation-1',
+          relation: 'supports',
+          artifact_type: 'factor',
+          artifact_hash: 'b'.repeat(64),
+          json_pointer: '/factors/value/score',
+          value_hash: 'd'.repeat(64),
+          available_at: '2026-08-08T08:00:00Z',
+          source_name: 'factor_snapshot',
+          title: 'Value score',
+          excerpt: '72',
+          canonical_url: 'https://example.com/value',
+        }],
+      },
+    };
+    get
+      .mockResolvedValueOnce({ data: detail })
+      .mockResolvedValueOnce({ data: { ...detail, evidence: { claims: {} } } });
+
+    const response = await researchApi.getEvidence('hash / evidence');
+
+    expect(get).toHaveBeenNthCalledWith(
+      1,
+      '/api/v1/research/evidence/hash%20%2F%20evidence',
+    );
+    expect(response.evidence.claims[0].citationIds).toEqual(['citation-1']);
+    expect(response.evidence.citations[0].canonicalUrl).toBe(
+      'https://example.com/value',
+    );
+
+    await expect(researchApi.getEvidence('malformed')).rejects.toThrow(
+      'Research evidence detail response is malformed',
     );
   });
 });

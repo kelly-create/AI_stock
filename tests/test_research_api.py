@@ -8,17 +8,85 @@ import json
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from api.app import create_app
+from api.middlewares import auth as auth_middleware
 from api.v1.endpoints import research
+from src.auth import COOKIE_NAME
 from src.config import Config
 from src.services.research.repositories import ResearchSnapshotRepository
 from src.storage import DatabaseManager, ResearchDatasetSnapshotRecord
 
 
 HASH = "a" * 64
+EVIDENCE_HASH = "b" * 64
+SNAPSHOT_HASH = "c" * 64
+VALUE_HASH = "d" * 64
 NOW = "2026-08-08T08:00:00Z"
 
 
+def _evidence_item() -> dict:
+    return {
+        "id": 4,
+        "stock_code": "600519",
+        "market": "cn",
+        "evidence_engine_version": "evidence-v1",
+        "claim_policy_version": "claim-policy-v1",
+        "as_of": NOW,
+        "available_at": NOW,
+        "status": "partial",
+        "coverage": 0.5,
+        "claim_count": 1,
+        "citation_count": 1,
+        "evidence": {
+            "evidence_engine_version": "evidence-v1",
+            "claim_policy_version": "claim-policy-v1",
+            "stock_code": "600519",
+            "market": "cn",
+            "as_of": NOW,
+            "available_at": NOW,
+            "status": "partial",
+            "coverage": 0.5,
+            "input_dataset_hashes": [HASH],
+            "factor_snapshot_hash": HASH,
+            "limitations": ["financial history is incomplete"],
+            "claims": [
+                {
+                    "id": "claim-value-score",
+                    "kind": "factor_metric",
+                    "statement": "The value factor is supported.",
+                    "status": "supported",
+                    "citation_ids": ["citation-value-score"],
+                    "limitations": [],
+                    "available_at": NOW,
+                }
+            ],
+            "citations": [
+                {
+                    "id": "citation-value-score",
+                    "relation": "supports",
+                    "artifact_type": "factor",
+                    "artifact_hash": HASH,
+                    "json_pointer": "/factors/value/score",
+                    "value_hash": VALUE_HASH,
+                    "available_at": NOW,
+                    "source_name": "factor_snapshot",
+                    "title": "Value factor score",
+                    "excerpt": "72.0",
+                    "canonical_url": "https://example.com/research/value",
+                }
+            ],
+        },
+        "input_dataset_hashes": [HASH],
+        "factor_snapshot_hash": HASH,
+        "evidence_hash": EVIDENCE_HASH,
+        "origin_job_id": "job-1",
+        "created_at": NOW,
+    }
+
+
 class _Repo:
+    last_evidence_query = None
+
     def get_latest_factors(self, **kwargs):
         if kwargs["stock_code"] == "missing":
             return None
@@ -68,6 +136,7 @@ class _Repo:
             "snapshot": {"subject": {"code": "600519"}},
             "snapshot_hash": HASH,
             "factor_snapshot_hash": HASH,
+            "evidence_snapshot_hash": EVIDENCE_HASH,
             "origin_job_id": "job-1",
             "created_at": NOW,
         }
@@ -102,6 +171,15 @@ class _Repo:
                 "created_at": NOW,
             }
         ]
+
+    def get_evidence(self, evidence_hash):
+        if evidence_hash != EVIDENCE_HASH:
+            return None
+        return _evidence_item()
+
+    def list_evidence(self, **kwargs):
+        type(self).last_evidence_query = kwargs
+        return {"items": [_evidence_item()], "next_cursor": "opaque-page-2"}
 
 
 def _client(monkeypatch) -> TestClient:
@@ -173,6 +251,8 @@ def test_research_openapi_contains_only_read_paths(monkeypatch) -> None:
         "/research/factors/{stock_code}",
         "/research/snapshots/{snapshot_hash}",
         "/research/datasets/{stock_code}",
+        "/research/evidence",
+        "/research/evidence/{evidence_hash}",
     }
     assert all(set(operations) == {"get"} for operations in paths.values())
 
@@ -228,3 +308,196 @@ def test_dataset_api_hides_stock_basic_observed_after_historical_cutoff(
     finally:
         DatabaseManager.reset_instance()
         Config.reset_instance()
+
+
+def test_evidence_list_requires_selector_and_forwards_stable_page_inputs(
+    monkeypatch,
+) -> None:
+    client = _client(monkeypatch)
+
+    missing_selector = client.get("/research/evidence")
+    assert missing_selector.status_code == 400
+    assert "job_id" in missing_selector.json()["detail"]["message"]
+
+    response = client.get(
+        "/research/evidence",
+        params={
+            "job_id": "job-1",
+            "research_snapshot_hash": SNAPSHOT_HASH,
+            "stock_code": "600519",
+            "as_of": "2026-08-08T16:00:00+08:00",
+            "cursor": "opaque-page-1",
+            "limit": 20,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    assert payload["next_cursor"] == "opaque-page-2"
+    assert payload["items"][0]["evidence_hash"] == EVIDENCE_HASH
+    assert "evidence" not in payload["items"][0]
+    assert _Repo.last_evidence_query == {
+        "job_id": "job-1",
+        "research_snapshot_hash": SNAPSHOT_HASH,
+        "stock_code": "600519",
+        "as_of": datetime(2026, 8, 8, 8, 0, tzinfo=timezone.utc),
+        "cursor": "opaque-page-1",
+        "limit": 20,
+    }
+
+    naive_as_of = client.get(
+        "/research/evidence",
+        params={"job_id": "job-1", "as_of": "2026-08-08T08:00:00"},
+    )
+    assert naive_as_of.status_code == 400
+    assert naive_as_of.json()["detail"]["message"] == (
+        "as_of must include a UTC offset."
+    )
+
+    assert client.get(
+        "/research/evidence",
+        params={"job_id": "job-1", "limit": 101},
+    ).status_code == 422
+
+
+def test_evidence_detail_is_hash_addressed_and_returns_typed_claims(
+    monkeypatch,
+) -> None:
+    client = _client(monkeypatch)
+
+    response = client.get(f"/research/evidence/{EVIDENCE_HASH}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["evidence_hash"] == EVIDENCE_HASH
+    assert payload["evidence"]["claims"][0]["status"] == "supported"
+    assert payload["evidence"]["citations"][0]["canonical_url"].startswith(
+        "https://"
+    )
+    assert client.get(f"/research/evidence/{'F' * 64}").status_code == 422
+    assert client.get(f"/research/evidence/{'e' * 64}").status_code == 404
+
+
+def test_evidence_api_accepts_large_immutable_dataset_lineage(monkeypatch) -> None:
+    input_dataset_hashes = [f"{index:064x}" for index in range(130)]
+
+    class _LargeLineageRepo(_Repo):
+        @staticmethod
+        def _item() -> dict:
+            item = _evidence_item()
+            item["input_dataset_hashes"] = input_dataset_hashes
+            item["evidence"]["input_dataset_hashes"] = input_dataset_hashes
+            return item
+
+        def get_evidence(self, evidence_hash):
+            if evidence_hash != EVIDENCE_HASH:
+                return None
+            return self._item()
+
+        def list_evidence(self, **kwargs):
+            return {"items": [self._item()], "next_cursor": None}
+
+    client = _client(monkeypatch)
+    monkeypatch.setattr(research, "_repo", lambda: _LargeLineageRepo())
+
+    list_response = client.get(
+        "/research/evidence",
+        params={"job_id": "job-cyq-lineage"},
+    )
+    detail_response = client.get(f"/research/evidence/{EVIDENCE_HASH}")
+
+    assert list_response.status_code == 200
+    assert detail_response.status_code == 200
+    assert len(list_response.json()["items"][0]["input_dataset_hashes"]) == 130
+    assert len(detail_response.json()["evidence"]["input_dataset_hashes"]) == 130
+
+
+def test_evidence_history_read_does_not_depend_on_write_feature_flag(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("RESEARCH_EVIDENCE_ENABLED", "false")
+    Config.reset_instance()
+    try:
+        client = _client(monkeypatch)
+        response = client.get(
+            "/research/evidence",
+            params={"job_id": "job-1"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["items"][0]["evidence_hash"] == EVIDENCE_HASH
+    finally:
+        Config.reset_instance()
+
+
+def test_evidence_create_app_auth_and_error_responses_do_not_expose_payload(
+    monkeypatch,
+    tmp_path,
+    caplog,
+) -> None:
+    class _ExplodingRepo(_Repo):
+        def list_evidence(self, **kwargs):
+            if kwargs.get("cursor") == "invalid-cursor":
+                raise ValueError(
+                    "private evidence payload: guaranteed buy; token=secret"
+                )
+            raise RuntimeError("private evidence payload: guaranteed buy; token=secret")
+
+    monkeypatch.setattr(research, "_repo", lambda: _ExplodingRepo())
+    monkeypatch.setattr(auth_middleware, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(auth_middleware, "verify_session", lambda value: value == "valid")
+    app = create_app(static_dir=tmp_path / "missing-static")
+    client = TestClient(app, raise_server_exceptions=False)
+
+    unauthorized = client.get(
+        "/api/v1/research/evidence",
+        params={"job_id": "job-1"},
+    )
+    assert unauthorized.status_code == 401
+
+    client.cookies.set(COOKIE_NAME, "valid")
+    missing_selector = client.get("/api/v1/research/evidence")
+    bad_request = client.get(
+        "/api/v1/research/evidence",
+        params={"job_id": "job-1", "cursor": "invalid-cursor"},
+    )
+    not_found = client.get(f"/api/v1/research/evidence/{'e' * 64}")
+    invalid = client.get(f"/api/v1/research/evidence/{'F' * 64}")
+    invalid_query = client.get(
+        "/api/v1/research/evidence",
+        params={"research_snapshot_hash": "private-payload-token=secret"},
+    )
+    invalid_limit = client.get(
+        "/api/v1/research/evidence",
+        params={"job_id": "job-1", "limit": "private-payload-token=secret"},
+    )
+    internal_error = client.get(
+        "/api/v1/research/evidence",
+        params={"job_id": "job-1"},
+    )
+
+    assert missing_selector.status_code == 400
+    assert bad_request.status_code == 400
+    assert not_found.status_code == 404
+    assert invalid.status_code == 422
+    assert invalid_query.status_code == 422
+    assert invalid_limit.status_code == 422
+    assert internal_error.status_code == 500
+    for response in (
+        missing_selector,
+        bad_request,
+        not_found,
+        invalid,
+        invalid_query,
+        invalid_limit,
+        internal_error,
+    ):
+        assert "guaranteed buy" not in response.text
+        assert "token=secret" not in response.text
+    assert internal_error.json() == {
+        "error": "internal_error",
+        "message": "Research evidence query failed",
+    }
+    assert "guaranteed buy" not in caplog.text
+    assert "token=secret" not in caplog.text

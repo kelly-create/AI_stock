@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { analysisApi } from '../../../api/analysis';
 import { historyApi } from '../../../api/history';
+import { researchApi } from '../../../api/research';
 import type { RunFlowSnapshot } from '../../../types/runFlow';
 import { RunFlowPanel } from '../RunFlowPanel';
 
@@ -15,6 +16,13 @@ vi.mock('../../../api/analysis', () => ({
 vi.mock('../../../api/history', () => ({
   historyApi: {
     getRecordFlow: vi.fn(),
+  },
+}));
+
+vi.mock('../../../api/research', () => ({
+  researchApi: {
+    listEvidence: vi.fn(),
+    getEvidence: vi.fn(),
   },
 }));
 
@@ -238,6 +246,11 @@ const contextBlockSnapshot: RunFlowSnapshot = {
 describe('RunFlowPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(researchApi.listEvidence).mockResolvedValue({
+      items: [],
+      count: 0,
+      nextCursor: null,
+    });
   });
 
   it('renders loading state while the snapshot request is pending', () => {

@@ -74,6 +74,33 @@ class TestSerpAPISearchProvider(unittest.TestCase):
         mock_fetch.assert_not_called()
         self.assertEqual(_FakeGoogleSearch.init_params[0]["num"], 3)
 
+    def test_provider_snippet_only_never_fetches_result_page(self) -> None:
+        provider = SerpAPISearchProvider(["dummy_key"])
+
+        with self._patch_serpapi(
+            {
+                "organic_results": [
+                    {
+                        "title": "Short provider summary",
+                        "link": "https://example.com/private-target",
+                        "snippet": "摘要很短",
+                        "source": "Example",
+                        "date": "2026-08-08",
+                    }
+                ]
+            }
+        ), patch("src.search_service.fetch_url_content") as mock_fetch:
+            resp = provider.search(
+                "贵州茅台 最新消息",
+                max_results=1,
+                snippet_only=True,
+            )
+
+        self.assertTrue(resp.success)
+        self.assertEqual(len(resp.results), 1)
+        self.assertEqual(resp.results[0].snippet, "摘要很短")
+        mock_fetch.assert_not_called()
+
     def test_provider_uses_rich_snippet_extensions_without_fetching(self) -> None:
         provider = SerpAPISearchProvider(["dummy_key"])
 

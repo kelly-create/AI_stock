@@ -14,6 +14,7 @@ from src.migrations import (
     PR0_CONVERGENCE_SCHEMA_VERSION,
     PR1_DURABLE_JOBS_SCHEMA_VERSION,
     PR2_RESEARCH_DATA_SCHEMA_VERSION,
+    PR3_RESEARCH_EVIDENCE_SCHEMA_VERSION,
     Migration,
     MigrationError,
     _sqlite_database_path,
@@ -333,6 +334,7 @@ def test_existing_baseline_is_converged_by_ordered_pr0_migration(
         PR0_CONVERGENCE_SCHEMA_VERSION,
         PR1_DURABLE_JOBS_SCHEMA_VERSION,
         PR2_RESEARCH_DATA_SCHEMA_VERSION,
+        PR3_RESEARCH_EVIDENCE_SCHEMA_VERSION,
     )
     with sqlite3.connect(database_path) as connection:
         llm_columns = {
@@ -503,6 +505,7 @@ def test_pr1_migrates_pr0_shaped_schema_preserves_rows_and_is_idempotent(
     assert before.pending_versions == (
         PR1_DURABLE_JOBS_SCHEMA_VERSION,
         PR2_RESEARCH_DATA_SCHEMA_VERSION,
+        PR3_RESEARCH_EVIDENCE_SCHEMA_VERSION,
     )
     assert first.is_current is True
     assert second.is_current is True
@@ -534,6 +537,7 @@ def test_pr1_rejects_ambiguous_generic_llm_audit_columns(tmp_path: Path) -> None
     assert state.pending_versions == (
         PR1_DURABLE_JOBS_SCHEMA_VERSION,
         PR2_RESEARCH_DATA_SCHEMA_VERSION,
+        PR3_RESEARCH_EVIDENCE_SCHEMA_VERSION,
     )
     with sqlite3.connect(database_path) as connection:
         columns = {
@@ -605,7 +609,7 @@ def test_pr1_schema_failure_rolls_back_ddl_and_does_not_record_version(
 def _create_pr1_shaped_schema(database_path: Path) -> str:
     database_url = _sqlite_url(database_path)
     _create_pr0_shaped_schema(database_path)
-    state = apply_migrations(database_url, migrations=MIGRATIONS[:-1])
+    state = apply_migrations(database_url, migrations=MIGRATIONS[:-2])
     assert state.current_version == PR1_DURABLE_JOBS_SCHEMA_VERSION
     return database_url
 
@@ -616,7 +620,7 @@ def test_pr2_research_schema_contract_and_second_apply_are_stable(
     database_path = tmp_path / "pr1-to-pr2.db"
     database_url = _create_pr1_shaped_schema(database_path)
 
-    first = apply_migrations(database_url)
+    first = apply_migrations(database_url, migrations=MIGRATIONS[:-1])
     with sqlite3.connect(database_path) as connection:
         first_schema = connection.execute(
             "SELECT type, name, sql FROM sqlite_master "
@@ -680,7 +684,7 @@ def test_pr2_research_schema_contract_and_second_apply_are_stable(
             )
         }
 
-    second = apply_migrations(database_url)
+    second = apply_migrations(database_url, migrations=MIGRATIONS[:-1])
     with sqlite3.connect(database_path) as connection:
         second_schema = connection.execute(
             "SELECT type, name, sql FROM sqlite_master "
@@ -703,6 +707,11 @@ def test_pr2_research_schema_contract_and_second_apply_are_stable(
     assert factor_columns["content_hash"] == ("CHAR(64)", True, None)
     assert research_columns["canonical_json"] == ("TEXT", True, None)
     assert research_columns["snapshot_hash"] == ("CHAR(64)", True, None)
+    assert research_columns["evidence_snapshot_hash"] == (
+        "VARCHAR(64)",
+        False,
+        None,
+    )
     assert index_contract["research_dataset_snapshots"] == {
         "ix_research_dataset_snapshots_dataset_scope_asof": (
             False,
@@ -732,6 +741,10 @@ def test_pr2_research_schema_contract_and_second_apply_are_stable(
         ),
     }
     assert index_contract["research_snapshots"] == {
+        "ix_research_snapshots_evidence_hash": (
+            False,
+            ("evidence_snapshot_hash",),
+        ),
         "ix_research_snapshots_stock_asof": (
             False,
             ("stock_code", "as_of"),
@@ -764,7 +777,7 @@ def test_pr2_schema_failure_rolls_back_all_ddl_and_version(
 
     monkeypatch.setattr(storage, "_verify_pr2_research_schema_contract", fail_contract)
     with pytest.raises(RuntimeError, match="injected PR2"):
-        apply_migrations(database_url)
+        apply_migrations(database_url, migrations=MIGRATIONS[:-1])
 
     with sqlite3.connect(database_path) as connection:
         after_schema = connection.execute(
@@ -780,6 +793,240 @@ def test_pr2_schema_failure_rolls_back_all_ddl_and_version(
 
     assert after_schema == before_schema
     assert PR2_RESEARCH_DATA_SCHEMA_VERSION not in migration_versions
+
+
+def _create_historical_pr2_shaped_schema(database_path: Path) -> str:
+    """Create the exact pre-PR3 shape, independent of current ORM metadata."""
+
+    database_url = _create_pr1_shaped_schema(database_path)
+    state = apply_migrations(database_url, migrations=MIGRATIONS[:-1])
+    assert state.current_version == PR2_RESEARCH_DATA_SCHEMA_VERSION
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP INDEX ix_research_snapshots_evidence_hash")
+        connection.execute(
+            "ALTER TABLE research_snapshots DROP COLUMN evidence_snapshot_hash"
+        )
+        connection.execute(
+            "INSERT INTO research_snapshots ("
+            "stock_code, market, snapshot_version, field_dictionary_version, "
+            "factor_engine_version, pack_version, prompt_version, policy_version, "
+            "model_route_fingerprint, as_of, available_at, status, canonical_json, "
+            "snapshot_hash, factor_snapshot_hash, origin_job_id"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "600519",
+                "A",
+                "research-v1",
+                "fields-v1",
+                "factor-v1",
+                "pack-v1",
+                "prompt-v1",
+                "policy-v1",
+                "route-v1",
+                "2026-08-08 08:00:00",
+                "2026-08-08 07:59:00",
+                "available",
+                "{}",
+                "a" * 64,
+                None,
+                None,
+            ),
+        )
+    return database_url
+
+
+def test_pr3_evidence_schema_upgrades_historical_pr2_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "pr2-to-pr3.db"
+    database_url = _create_historical_pr2_shaped_schema(database_path)
+
+    first = apply_migrations(database_url)
+    with sqlite3.connect(database_path) as connection:
+        first_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+        evidence_columns = {
+            row[1]: (row[2], bool(row[3]), row[4])
+            for row in connection.execute(
+                "PRAGMA table_info('research_evidence_snapshots')"
+            )
+        }
+        evidence_indexes = {
+            row[1]: (
+                bool(row[2]),
+                tuple(
+                    item[2]
+                    for item in connection.execute(
+                        f"PRAGMA index_info('{row[1]}')"
+                    )
+                ),
+            )
+            for row in connection.execute(
+                "PRAGMA index_list('research_evidence_snapshots')"
+            )
+            if not row[1].startswith("sqlite_autoindex_")
+        }
+        research_columns = {
+            row[1]: (row[2], bool(row[3]), row[4])
+            for row in connection.execute(
+                "PRAGMA table_info('research_snapshots')"
+            )
+        }
+        research_indexes = {
+            row[1]: tuple(
+                item[2]
+                for item in connection.execute(
+                    f"PRAGMA index_info('{row[1]}')"
+                )
+            )
+            for row in connection.execute(
+                "PRAGMA index_list('research_snapshots')"
+            )
+        }
+        evidence_foreign_keys = {
+            (row[2], row[3], row[4], row[6].upper())
+            for row in connection.execute(
+                "PRAGMA foreign_key_list('research_evidence_snapshots')"
+            )
+        }
+        preserved_research_row = connection.execute(
+            "SELECT snapshot_hash, evidence_snapshot_hash "
+            "FROM research_snapshots WHERE snapshot_hash = ?",
+            ("a" * 64,),
+        ).fetchone()
+
+    second = apply_migrations(database_url)
+    with sqlite3.connect(database_path) as connection:
+        second_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+
+    assert first.current_version == PR3_RESEARCH_EVIDENCE_SCHEMA_VERSION
+    assert second.is_current is True
+    assert first_schema == second_schema
+    assert evidence_columns == {
+        "id": ("INTEGER", True, None),
+        "stock_code": ("VARCHAR(16)", True, None),
+        "market": ("VARCHAR(16)", True, None),
+        "evidence_engine_version": ("VARCHAR(64)", True, None),
+        "claim_policy_version": ("VARCHAR(64)", True, None),
+        "as_of": ("DATETIME", True, None),
+        "available_at": ("DATETIME", True, None),
+        "status": ("VARCHAR(32)", True, None),
+        "coverage": ("FLOAT", True, None),
+        "claim_count": ("INTEGER", True, None),
+        "citation_count": ("INTEGER", True, None),
+        "canonical_json": ("TEXT", True, None),
+        "input_dataset_hashes_json": ("TEXT", True, None),
+        "factor_snapshot_hash": ("VARCHAR(64)", True, None),
+        "evidence_hash": ("CHAR(64)", True, None),
+        "origin_job_id": ("VARCHAR(64)", False, None),
+        "created_at": ("DATETIME", True, "CURRENT_TIMESTAMP"),
+    }
+    assert evidence_indexes == {
+        "ix_research_evidence_snapshots_factor_hash": (
+            False,
+            ("factor_snapshot_hash",),
+        ),
+        "ix_research_evidence_snapshots_stock_asof": (
+            False,
+            ("stock_code", "as_of"),
+        ),
+        "uix_research_evidence_snapshots_evidence_hash": (
+            True,
+            ("evidence_hash",),
+        ),
+    }
+    assert research_columns["evidence_snapshot_hash"] == (
+        "VARCHAR(64)",
+        False,
+        None,
+    )
+    assert research_indexes["ix_research_snapshots_evidence_hash"] == (
+        "evidence_snapshot_hash",
+    )
+    assert evidence_foreign_keys == {
+        ("analysis_jobs", "origin_job_id", "task_id", "SET NULL")
+    }
+    assert preserved_research_row == ("a" * 64, None)
+
+
+def test_pr3_strict_verifier_rolls_back_wrong_index_and_version(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "pr3-wrong-index.db"
+    database_url = _create_historical_pr2_shaped_schema(database_path)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "CREATE INDEX ix_research_snapshots_evidence_hash "
+            "ON research_snapshots (snapshot_hash)"
+        )
+
+    with pytest.raises(RuntimeError, match="index .* is incompatible"):
+        apply_migrations(database_url)
+
+    with sqlite3.connect(database_path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info('research_snapshots')"
+            )
+        }
+        versions = {
+            row[0]
+            for row in connection.execute("SELECT version FROM schema_migrations")
+        }
+    assert "research_evidence_snapshots" not in tables
+    assert "evidence_snapshot_hash" not in columns
+    assert PR3_RESEARCH_EVIDENCE_SCHEMA_VERSION not in versions
+
+
+def test_pr3_schema_failure_rolls_back_all_ddl_and_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src import storage
+
+    database_path = tmp_path / "pr3-rollback.db"
+    database_url = _create_historical_pr2_shaped_schema(database_path)
+    with sqlite3.connect(database_path) as connection:
+        before_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+
+    def fail_contract(_connection) -> None:
+        raise RuntimeError("injected PR3 schema verification failure")
+
+    monkeypatch.setattr(
+        storage,
+        "_verify_pr3_research_evidence_schema_contract",
+        fail_contract,
+    )
+    with pytest.raises(RuntimeError, match="injected PR3"):
+        apply_migrations(database_url)
+
+    with sqlite3.connect(database_path) as connection:
+        after_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+        versions = {
+            row[0]
+            for row in connection.execute("SELECT version FROM schema_migrations")
+        }
+
+    assert after_schema == before_schema
+    assert PR3_RESEARCH_EVIDENCE_SCHEMA_VERSION not in versions
 
 
 def test_apply_serializes_concurrent_writers(tmp_path: Path) -> None:

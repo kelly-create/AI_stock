@@ -3153,6 +3153,223 @@
           }
         }
       }
+    },
+    "/api/v1/research/evidence": {
+      "get": {
+        "tags": [
+          "Research"
+        ],
+        "summary": "List Research Evidence",
+        "description": "List immutable evidence summaries with stable keyset pagination.",
+        "operationId": "listResearchEvidence",
+        "security": [
+          {
+            "AdminSessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "title": "Job Id"
+            }
+          },
+          {
+            "name": "research_snapshot_hash",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 64,
+              "maxLength": 64,
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Research Snapshot Hash"
+            }
+          },
+          {
+            "name": "stock_code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Stock Code"
+            }
+          },
+          {
+            "name": "as_of",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "title": "As Of"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048,
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResearchEvidenceListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required when admin auth is enabled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid evidence query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid query parameter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Evidence query failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/research/evidence/{evidence_hash}": {
+      "get": {
+        "tags": [
+          "Research"
+        ],
+        "summary": "Get Research Evidence",
+        "description": "Read one immutable evidence artifact by its content hash.",
+        "operationId": "getResearchEvidence",
+        "security": [
+          {
+            "AdminSessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "evidence_hash",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 64,
+              "maxLength": 64,
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Evidence Hash"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResearchEvidenceDetailResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required when admin auth is enabled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Evidence not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid evidence hash",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Evidence query failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -3671,6 +3888,18 @@
               }
             ],
             "title": "Factor Snapshot Hash"
+          },
+          "evidence_snapshot_hash": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Snapshot Hash"
           },
           "origin_job_id": {
             "anyOf": [
@@ -8588,6 +8817,558 @@
           "metadata"
         ],
         "title": "DecisionSignalPreview"
+      },
+      "ResearchEvidenceCitation": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Id"
+          },
+          "relation": {
+            "type": "string",
+            "enum": [
+              "supports",
+              "contradicts",
+              "context"
+            ],
+            "title": "Relation"
+          },
+          "artifact_type": {
+            "type": "string",
+            "enum": [
+              "dataset",
+              "factor"
+            ],
+            "title": "Artifact Type"
+          },
+          "artifact_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Artifact Hash"
+          },
+          "json_pointer": {
+            "type": "string",
+            "maxLength": 1024,
+            "title": "Json Pointer"
+          },
+          "value_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Value Hash"
+          },
+          "available_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Available At"
+          },
+          "source_name": {
+            "type": "string",
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Source Name"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "excerpt": {
+            "type": "string",
+            "maxLength": 800,
+            "minLength": 1,
+            "title": "Excerpt"
+          },
+          "canonical_url": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2048
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Canonical Url"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "relation",
+          "artifact_type",
+          "artifact_hash",
+          "json_pointer",
+          "value_hash",
+          "available_at",
+          "source_name",
+          "title",
+          "excerpt"
+        ],
+        "title": "ResearchEvidenceCitation"
+      },
+      "ResearchEvidenceClaim": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Id"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "factor_metric",
+              "reported_event"
+            ],
+            "title": "Kind"
+          },
+          "statement": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Statement"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "supported",
+              "partial",
+              "contradicted",
+              "insufficient"
+            ],
+            "title": "Status"
+          },
+          "citation_ids": {
+            "items": {
+              "type": "string",
+              "maxLength": 128,
+              "minLength": 1
+            },
+            "type": "array",
+            "maxItems": 16,
+            "title": "Citation Ids"
+          },
+          "limitations": {
+            "items": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "type": "array",
+            "maxItems": 16,
+            "title": "Limitations"
+          },
+          "available_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Available At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "statement",
+          "status",
+          "available_at"
+        ],
+        "title": "ResearchEvidenceClaim"
+      },
+      "ResearchEvidenceDetailResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "stock_code": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Stock Code"
+          },
+          "market": {
+            "type": "string",
+            "maxLength": 16,
+            "minLength": 1,
+            "title": "Market"
+          },
+          "evidence_engine_version": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Evidence Engine Version"
+          },
+          "claim_policy_version": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Claim Policy Version"
+          },
+          "as_of": {
+            "type": "string",
+            "format": "date-time",
+            "title": "As Of"
+          },
+          "available_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Available At"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "available",
+              "partial",
+              "empty",
+              "fetch_failed"
+            ],
+            "title": "Status"
+          },
+          "coverage": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Coverage"
+          },
+          "claim_count": {
+            "type": "integer",
+            "maximum": 32.0,
+            "minimum": 0.0,
+            "title": "Claim Count"
+          },
+          "citation_count": {
+            "type": "integer",
+            "maximum": 16.0,
+            "minimum": 0.0,
+            "title": "Citation Count"
+          },
+          "input_dataset_hashes": {
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "type": "array",
+            "title": "Input Dataset Hashes"
+          },
+          "factor_snapshot_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Factor Snapshot Hash"
+          },
+          "evidence_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Evidence Hash"
+          },
+          "origin_job_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Origin Job Id"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "evidence": {
+            "$ref": "#/components/schemas/ResearchEvidencePayload"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "stock_code",
+          "market",
+          "evidence_engine_version",
+          "claim_policy_version",
+          "as_of",
+          "available_at",
+          "status",
+          "coverage",
+          "claim_count",
+          "citation_count",
+          "factor_snapshot_hash",
+          "evidence_hash",
+          "created_at",
+          "evidence"
+        ],
+        "title": "ResearchEvidenceDetailResponse"
+      },
+      "ResearchEvidenceListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ResearchEvidenceSummary"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Count"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2048
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "count"
+        ],
+        "title": "ResearchEvidenceListResponse"
+      },
+      "ResearchEvidencePayload": {
+        "properties": {
+          "evidence_engine_version": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Evidence Engine Version"
+          },
+          "claim_policy_version": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Claim Policy Version"
+          },
+          "stock_code": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Stock Code"
+          },
+          "market": {
+            "type": "string",
+            "maxLength": 16,
+            "minLength": 1,
+            "title": "Market"
+          },
+          "as_of": {
+            "type": "string",
+            "format": "date-time",
+            "title": "As Of"
+          },
+          "available_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Available At"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "available",
+              "partial",
+              "empty",
+              "fetch_failed"
+            ],
+            "title": "Status"
+          },
+          "coverage": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Coverage"
+          },
+          "input_dataset_hashes": {
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "type": "array",
+            "title": "Input Dataset Hashes"
+          },
+          "factor_snapshot_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Factor Snapshot Hash"
+          },
+          "limitations": {
+            "items": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "type": "array",
+            "maxItems": 32,
+            "title": "Limitations"
+          },
+          "claims": {
+            "items": {
+              "$ref": "#/components/schemas/ResearchEvidenceClaim"
+            },
+            "type": "array",
+            "maxItems": 32,
+            "title": "Claims"
+          },
+          "citations": {
+            "items": {
+              "$ref": "#/components/schemas/ResearchEvidenceCitation"
+            },
+            "type": "array",
+            "maxItems": 16,
+            "title": "Citations"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "evidence_engine_version",
+          "claim_policy_version",
+          "stock_code",
+          "market",
+          "as_of",
+          "available_at",
+          "status",
+          "coverage",
+          "factor_snapshot_hash"
+        ],
+        "title": "ResearchEvidencePayload"
+      },
+      "ResearchEvidenceSummary": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "stock_code": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Stock Code"
+          },
+          "market": {
+            "type": "string",
+            "maxLength": 16,
+            "minLength": 1,
+            "title": "Market"
+          },
+          "evidence_engine_version": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Evidence Engine Version"
+          },
+          "claim_policy_version": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Claim Policy Version"
+          },
+          "as_of": {
+            "type": "string",
+            "format": "date-time",
+            "title": "As Of"
+          },
+          "available_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Available At"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "available",
+              "partial",
+              "empty",
+              "fetch_failed"
+            ],
+            "title": "Status"
+          },
+          "coverage": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Coverage"
+          },
+          "claim_count": {
+            "type": "integer",
+            "maximum": 32.0,
+            "minimum": 0.0,
+            "title": "Claim Count"
+          },
+          "citation_count": {
+            "type": "integer",
+            "maximum": 16.0,
+            "minimum": 0.0,
+            "title": "Citation Count"
+          },
+          "input_dataset_hashes": {
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "type": "array",
+            "title": "Input Dataset Hashes"
+          },
+          "factor_snapshot_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Factor Snapshot Hash"
+          },
+          "evidence_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Evidence Hash"
+          },
+          "origin_job_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Origin Job Id"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "stock_code",
+          "market",
+          "evidence_engine_version",
+          "claim_policy_version",
+          "as_of",
+          "available_at",
+          "status",
+          "coverage",
+          "claim_count",
+          "citation_count",
+          "factor_snapshot_hash",
+          "evidence_hash",
+          "created_at"
+        ],
+        "title": "ResearchEvidenceSummary"
       }
     },
     "securitySchemes": {
