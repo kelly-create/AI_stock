@@ -74,13 +74,14 @@ def _claim(
     *,
     worker_id: str = "evidence-worker",
     now: datetime = NOW,
+    stock_code: str = "600519",
 ) -> LeaseFence:
     store.enqueue(
         JobEnqueueRequest(
             job_type="research",
-            payload={"stock_code": "600519"},
+            payload={"stock_code": stock_code},
             task_id=task_id,
-            stock_code="600519",
+            stock_code=stock_code,
         ),
         now=now,
     )
@@ -142,6 +143,25 @@ def _factor_input(
         available_at=available_at,
         quality_score=80,
     )
+
+
+def _dataset_projection(dataset_hashes: list[str]) -> dict[str, object]:
+    if not dataset_hashes:
+        return {}
+    hashes = sorted(set(dataset_hashes))
+    return {
+        "daily_basic": {
+            "dataset": "daily_basic",
+            "status": "available",
+            "row_count": 1,
+            "available_at": NOW - timedelta(hours=1),
+            "data_as_of": NOW - timedelta(hours=2),
+            "content_hash": hashes[-1],
+            "content_hashes": hashes,
+            "raw_ref": None,
+            "rows": [{"stock_code": "600519", "value": "daily_basic"}],
+        }
+    }
 
 
 def _utc_text(value: datetime) -> str:
@@ -236,8 +256,13 @@ def _research_input(
     stock_code: str = "600519",
     as_of: datetime = NOW,
     evidence_payload: dict | None = None,
+    dataset_hashes: list[str] | None = None,
 ) -> ResearchSnapshotInput:
-    canonical_payload = {"factor": factor_hash}
+    canonical_payload = {
+        "factor": factor_hash,
+        "factors": {"quality": {"status": "available", "score": 80}},
+        "datasets": _dataset_projection(dataset_hashes or []),
+    }
     if evidence_hash is not None:
         canonical_payload["evidence"] = evidence_payload or {"status": "available"}
     return ResearchSnapshotInput(
@@ -279,6 +304,9 @@ def test_evidence_is_hash_idempotent_and_dedupe_binds_each_job_event(
         now=NOW + timedelta(seconds=4),
     )
     second_lease = _claim(store, "evidence-job-two", worker_id="worker-two")
+    second_dataset, second_factor = _sources(repository, second_lease)
+    assert second_dataset.content_hash == dataset.content_hash
+    assert second_factor.content_hash == factor.content_hash
     consumed_again = repository.write_evidence(
         snapshot,
         lease=second_lease,
@@ -313,6 +341,213 @@ def test_evidence_is_hash_idempotent_and_dedupe_binds_each_job_event(
     }
 
 
+def test_factor_and_evidence_require_current_job_upstream_bindings(
+    evidence_db,
+) -> None:
+    db, store = evidence_db
+    repository = ResearchSnapshotRepository(db)
+    first_lease = _claim(store, "lineage-source-job", worker_id="worker-one")
+    dataset, factor = _sources(repository, first_lease)
+    evidence_input = _evidence_input([dataset.content_hash], factor.content_hash)
+    evidence = repository.write_evidence(
+        evidence_input,
+        lease=first_lease,
+        now=NOW + timedelta(seconds=3),
+    )
+
+    second_lease = _claim(store, "lineage-consumer-job", worker_id="worker-two")
+    with pytest.raises(ValueError, match="does not bind .*required Dataset"):
+        repository.write_factors(
+            _factor_input([dataset.content_hash]),
+            lease=second_lease,
+            now=NOW + timedelta(seconds=4),
+        )
+    with pytest.raises(ValueError, match="stored datasets"):
+        repository.write_factors(
+            _factor_input(["d" * 64], version="missing-dataset-factor"),
+            lease=second_lease,
+            now=NOW + timedelta(seconds=5),
+        )
+
+    rebound_dataset = repository.write_dataset(
+        _dataset_input(),
+        lease=second_lease,
+        now=NOW + timedelta(seconds=6),
+    )
+    assert rebound_dataset.content_hash == dataset.content_hash
+    with pytest.raises(ValueError, match="does not bind the Factor"):
+        repository.write_evidence(
+            evidence_input,
+            lease=second_lease,
+            now=NOW + timedelta(seconds=7),
+        )
+    rebound_factor = repository.write_factors(
+        _factor_input([dataset.content_hash]),
+        lease=second_lease,
+        now=NOW + timedelta(seconds=8),
+    )
+    assert rebound_factor.content_hash == factor.content_hash
+    rebound_evidence = repository.write_evidence(
+        evidence_input,
+        lease=second_lease,
+        now=NOW + timedelta(seconds=9),
+    )
+    assert rebound_evidence.content_hash == evidence.content_hash
+
+
+def test_research_snapshot_requires_current_job_factor_and_evidence_graph(
+    evidence_db,
+) -> None:
+    db, store = evidence_db
+    repository = ResearchSnapshotRepository(db)
+    first_lease = _claim(store, "research-graph-source", worker_id="worker-one")
+    dataset, factor = _sources(repository, first_lease)
+    evidence = repository.write_evidence(
+        _evidence_input([dataset.content_hash], factor.content_hash),
+        lease=first_lease,
+        now=NOW + timedelta(seconds=3),
+    )
+    evidence_record = repository.get_evidence(evidence.content_hash)
+    assert evidence_record is not None
+    evidence_projection = project_evidence(
+        evidence_record["evidence"],
+        as_of=NOW,
+    )
+    research_input = _research_input(
+        factor.content_hash,
+        evidence.content_hash,
+        evidence_payload=evidence_projection,
+        dataset_hashes=[dataset.content_hash],
+    )
+
+    second_lease = _claim(store, "research-graph-consumer", worker_id="worker-two")
+    rebound_dataset = repository.write_dataset(
+        _dataset_input(),
+        lease=second_lease,
+        now=NOW + timedelta(seconds=3, microseconds=1),
+    )
+    assert rebound_dataset.content_hash == dataset.content_hash
+    with pytest.raises(ValueError, match="does not bind the Factor"):
+        repository.write_research_snapshot(
+            research_input,
+            lease=second_lease,
+            now=NOW + timedelta(seconds=4),
+        )
+    with pytest.raises(ValueError, match="stored factors"):
+        repository.write_research_snapshot(
+            _research_input("f" * 64, None),
+            lease=second_lease,
+            now=NOW + timedelta(seconds=5),
+        )
+
+    rebound_dataset, rebound_factor = _sources(repository, second_lease)
+    assert rebound_dataset.content_hash == dataset.content_hash
+    assert rebound_factor.content_hash == factor.content_hash
+    with pytest.raises(ValueError, match="does not bind the Evidence"):
+        repository.write_research_snapshot(
+            research_input,
+            lease=second_lease,
+            now=NOW + timedelta(seconds=8),
+        )
+    rebound_evidence = repository.write_evidence(
+        _evidence_input([dataset.content_hash], factor.content_hash),
+        lease=second_lease,
+        now=NOW + timedelta(seconds=9),
+    )
+    assert rebound_evidence.content_hash == evidence.content_hash
+    written = repository.write_research_snapshot(
+        research_input,
+        lease=second_lease,
+        now=NOW + timedelta(seconds=10),
+    )
+    assert written.content_hash
+
+
+def test_factor_binding_recursively_requires_dataset_events(evidence_db) -> None:
+    db, store = evidence_db
+    lease = _claim(store, "factor-without-dataset-event")
+    repository = ResearchSnapshotRepository(db)
+    dataset, factor = _sources(repository, lease)
+    with db.get_session() as session:
+        rows = session.execute(
+            select(JobEventRecord).where(
+                JobEventRecord.job_id == lease.job_id,
+                JobEventRecord.event_type == "research_dataset_snapshot",
+            )
+        ).scalars().all()
+        assert rows
+        for row in rows:
+            session.delete(row)
+        session.commit()
+
+    with pytest.raises(ValueError, match="does not bind .*required Dataset"):
+        repository.write_evidence(
+            _evidence_input([dataset.content_hash], factor.content_hash),
+            lease=lease,
+            now=NOW + timedelta(seconds=4),
+        )
+    with pytest.raises(ValueError, match="does not bind .*required Dataset"):
+        repository.write_research_snapshot(
+            _research_input(
+                factor.content_hash,
+                None,
+                dataset_hashes=[dataset.content_hash],
+            ),
+            lease=lease,
+            now=NOW + timedelta(seconds=5),
+        )
+
+
+def test_dataset_binding_cannot_claim_knowledge_before_snapshot_availability(
+    evidence_db,
+) -> None:
+    db, store = evidence_db
+    lease = _claim(store, "dataset-boundary-tamper")
+    repository = ResearchSnapshotRepository(db)
+    dataset, factor = _sources(repository, lease)
+    with db.get_session() as session:
+        event = session.execute(
+            select(JobEventRecord).where(
+                JobEventRecord.job_id == lease.job_id,
+                JobEventRecord.event_type == "research_dataset_snapshot",
+            )
+        ).scalar_one()
+        payload = json.loads(event.payload_json)
+        payload["knowledge_as_of"] = _utc_text(NOW - timedelta(minutes=90))
+        event.payload_json = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        session.commit()
+
+    with pytest.raises(ValueError, match="predates its stored snapshot"):
+        repository.write_factors(
+            _factor_input(
+                [dataset.content_hash],
+                version="tampered-boundary-factor",
+            ),
+            lease=lease,
+            now=NOW + timedelta(seconds=4),
+        )
+    with pytest.raises(ValueError, match="predates its stored snapshot"):
+        repository.write_evidence(
+            _evidence_input([dataset.content_hash], factor.content_hash),
+            lease=lease,
+            now=NOW + timedelta(seconds=5),
+        )
+    with pytest.raises(ValueError, match="predates its stored snapshot"):
+        repository.write_research_snapshot(
+            _research_input(
+                factor.content_hash,
+                None,
+                dataset_hashes=[dataset.content_hash],
+            ),
+            lease=lease,
+            now=NOW + timedelta(seconds=6),
+        )
+
+
 def test_historical_evidence_accepts_late_observation_but_rejects_current_state(
     evidence_db,
 ) -> None:
@@ -322,11 +557,14 @@ def test_historical_evidence_accepts_late_observation_but_rejects_current_state(
     cutoff = NOW - timedelta(days=30)
 
     historical_dataset = repository.write_dataset(
-        _dataset_input(
-            dataset="daily_basic",
-            data_as_of=cutoff - timedelta(hours=2),
-            available_at=cutoff - timedelta(hours=1),
-            observed_at=NOW - timedelta(minutes=5),
+        replace(
+            _dataset_input(
+                dataset="daily_basic",
+                data_as_of=cutoff - timedelta(hours=2),
+                available_at=cutoff - timedelta(hours=1),
+                observed_at=NOW - timedelta(minutes=5),
+            ),
+            knowledge_as_of=cutoff,
         ),
         lease=lease,
         now=NOW + timedelta(seconds=1),
@@ -364,27 +602,19 @@ def test_historical_evidence_accepts_late_observation_but_rejects_current_state(
         lease=lease,
         now=NOW + timedelta(seconds=4),
     )
-    current_factor = repository.write_factors(
-        _factor_input(
-            [current_state.content_hash],
-            as_of=cutoff,
-            available_at=cutoff - timedelta(minutes=20),
-            version="current-state-factor",
-        ),
-        lease=lease,
-        now=NOW + timedelta(seconds=5),
-    )
-    with pytest.raises(ValueError, match="after evidence as_of"):
-        repository.write_evidence(
-            _evidence_input(
+    with pytest.raises(
+        ValueError,
+        match="after consumer as_of|after the consumer boundary",
+    ):
+        repository.write_factors(
+            _factor_input(
                 [current_state.content_hash],
-                current_factor.content_hash,
                 as_of=cutoff,
                 available_at=cutoff - timedelta(minutes=20),
-                engine_version="current-state-evidence",
+                version="current-state-factor",
             ),
             lease=lease,
-            now=NOW + timedelta(seconds=6),
+            now=NOW + timedelta(seconds=5),
         )
 
 
@@ -417,25 +647,15 @@ def test_evidence_lineage_accepts_pipeline_cn_and_tushare_a_market_alias(
 
     assert accepted.content_hash
 
-    foreign_factor = repository.write_factors(
-        _factor_input(
-            [dataset.content_hash],
-            market="hk",
-            version="foreign-market-factor",
-        ),
-        lease=lease,
-        now=NOW + timedelta(seconds=4),
-    )
     with pytest.raises(ValueError, match="different stock or market"):
-        repository.write_evidence(
-            _evidence_input(
+        repository.write_factors(
+            _factor_input(
                 [dataset.content_hash],
-                foreign_factor.content_hash,
                 market="hk",
-                engine_version="foreign-market-evidence",
+                version="foreign-market-factor",
             ),
             lease=lease,
-            now=NOW + timedelta(seconds=5),
+            now=NOW + timedelta(seconds=4),
         )
 
 
@@ -585,9 +805,15 @@ def test_evidence_source_references_must_exist_match_stock_and_precede_as_of(
             now=NOW + timedelta(seconds=5),
         )
 
+    other_lease = _claim(
+        store,
+        "evidence-other-stock-source",
+        worker_id="other-stock-worker",
+        stock_code="000001",
+    )
     other_dataset = repository.write_dataset(
         _dataset_input(stock_code="000001", dataset="other-stock"),
-        lease=lease,
+        lease=other_lease,
         now=NOW + timedelta(seconds=6),
     )
     other_stock = _evidence_input([other_dataset.content_hash], factor.content_hash)
@@ -630,7 +856,10 @@ def test_evidence_source_references_must_exist_match_stock_and_precede_as_of(
         now=NOW + timedelta(seconds=10),
     )
     future_evidence = _evidence_input([dataset.content_hash], future_factor.content_hash)
-    with pytest.raises(ValueError, match="after evidence as_of"):
+    with pytest.raises(
+        ValueError,
+        match="after consumer as_of|after the consumer boundary",
+    ):
         repository.write_evidence(
             future_evidence,
             lease=lease,
@@ -711,6 +940,7 @@ def test_research_snapshot_requires_real_compatible_evidence_reference(
             factor.content_hash,
             evidence.content_hash,
             evidence_payload=evidence_projection,
+            dataset_hashes=[dataset.content_hash],
         ),
         lease=lease,
         now=NOW + timedelta(seconds=4),
@@ -731,8 +961,8 @@ def test_research_snapshot_requires_real_compatible_evidence_reference(
             "pack_version": "1.0",
             "blocks": {},
         },
-        datasets={},
-        factors={},
+        datasets=_dataset_projection([dataset.content_hash]),
+        factors={"quality": {"status": "available", "score": 80}},
         prompt_version="prompt-v1",
         prompt={"system": "frozen prompt"},
         model_route={
@@ -743,6 +973,7 @@ def test_research_snapshot_requires_real_compatible_evidence_reference(
         policy_version="policy-v1",
         policy={"risk_max": 45},
         pack_version="1.0",
+        factor_engine_version="factor-v1",
         factor_snapshot_hash=factor.content_hash,
         evidence=evidence_record["evidence"],
         evidence_snapshot_hash=evidence.content_hash,
@@ -755,23 +986,34 @@ def test_research_snapshot_requires_real_compatible_evidence_reference(
     )
     assert frozen_result.content_hash == frozen.snapshot_hash
 
+    missing_evidence_projection = _research_input(
+        factor.content_hash,
+        evidence.content_hash,
+        dataset_hashes=[dataset.content_hash],
+    )
+    missing_evidence_payload = dict(missing_evidence_projection.canonical_payload)
+    missing_evidence_payload.pop("evidence", None)
     with pytest.raises(ValueError, match="requires a frozen evidence projection"):
         repository.write_research_snapshot(
             replace(
-                _research_input(factor.content_hash, evidence.content_hash),
-                canonical_payload={"factor": factor.content_hash},
+                missing_evidence_projection,
+                canonical_payload=missing_evidence_payload,
             ),
             lease=lease,
             now=NOW + timedelta(seconds=6),
         )
+    unlinked_evidence = _research_input(
+        factor.content_hash,
+        None,
+        dataset_hashes=[dataset.content_hash],
+    )
+    unlinked_evidence_payload = dict(unlinked_evidence.canonical_payload)
+    unlinked_evidence_payload["evidence"] = evidence_record["evidence"]
     with pytest.raises(ValueError, match="cannot carry evidence"):
         repository.write_research_snapshot(
             replace(
-                _research_input(factor.content_hash, None),
-                canonical_payload={
-                    "factor": factor.content_hash,
-                    "evidence": evidence_record["evidence"],
-                },
+                unlinked_evidence,
+                canonical_payload=unlinked_evidence_payload,
             ),
             lease=lease,
             now=NOW + timedelta(seconds=7),
@@ -785,6 +1027,7 @@ def test_research_snapshot_requires_real_compatible_evidence_reference(
                     **evidence_record["evidence"],
                     "evidence_engine_version": "different-engine",
                 },
+                dataset_hashes=[dataset.content_hash],
             ),
             lease=lease,
             now=NOW + timedelta(seconds=8),
@@ -805,6 +1048,7 @@ def test_research_snapshot_requires_real_compatible_evidence_reference(
                     factor.content_hash,
                     evidence.content_hash,
                     evidence_payload=projection,
+                    dataset_hashes=[dataset.content_hash],
                 ),
                 lease=lease,
                 now=NOW + timedelta(seconds=index),
@@ -812,10 +1056,20 @@ def test_research_snapshot_requires_real_compatible_evidence_reference(
 
     with pytest.raises(ValueError, match="stored evidence"):
         repository.write_research_snapshot(
-            _research_input(factor.content_hash, "e" * 64),
+            _research_input(
+                factor.content_hash,
+                "e" * 64,
+                dataset_hashes=[dataset.content_hash],
+            ),
             lease=lease,
             now=NOW + timedelta(seconds=12),
         )
+    other_stock_lease = _claim(
+        store,
+        "research-evidence-other-stock",
+        worker_id="other-stock-research-worker",
+        stock_code="000001",
+    )
     with pytest.raises(ValueError, match="different stock"):
         repository.write_research_snapshot(
             _research_input(
@@ -823,17 +1077,22 @@ def test_research_snapshot_requires_real_compatible_evidence_reference(
                 evidence.content_hash,
                 stock_code="000001",
                 evidence_payload=evidence_record["evidence"],
+                dataset_hashes=[dataset.content_hash],
             ),
-            lease=lease,
+            lease=other_stock_lease,
             now=NOW + timedelta(seconds=13),
         )
-    with pytest.raises(ValueError, match="after research snapshot as_of"):
+    with pytest.raises(
+        ValueError,
+        match="after consumer as_of|after the consumer boundary",
+    ):
         repository.write_research_snapshot(
             _research_input(
                 factor.content_hash,
                 evidence.content_hash,
                 as_of=NOW - timedelta(hours=1),
                 evidence_payload=evidence_record["evidence"],
+                dataset_hashes=[dataset.content_hash],
             ),
             lease=lease,
             now=NOW + timedelta(seconds=14),
@@ -844,9 +1103,9 @@ def test_evidence_list_uses_dual_cutoff_and_stable_asof_id_cursor(
     evidence_db,
 ) -> None:
     db, store = evidence_db
-    lease = _claim(store, "evidence-list-job")
     repository = ResearchSnapshotRepository(db)
-    dataset, factor = _sources(repository, lease)
+    first_lease = _claim(store, "evidence-list-job-one")
+    dataset, factor = _sources(repository, first_lease)
     first = repository.write_evidence(
         _evidence_input(
             [dataset.content_hash],
@@ -854,9 +1113,11 @@ def test_evidence_list_uses_dual_cutoff_and_stable_asof_id_cursor(
             as_of=NOW - timedelta(minutes=5),
             engine_version="evidence-page-one",
         ),
-        lease=lease,
+        lease=first_lease,
         now=NOW + timedelta(seconds=3),
     )
+    second_lease = _claim(store, "evidence-list-job-two")
+    dataset, factor = _sources(repository, second_lease)
     second = repository.write_evidence(
         _evidence_input(
             [dataset.content_hash],
@@ -864,9 +1125,11 @@ def test_evidence_list_uses_dual_cutoff_and_stable_asof_id_cursor(
             as_of=NOW - timedelta(minutes=5),
             engine_version="evidence-page-two",
         ),
-        lease=lease,
+        lease=second_lease,
         now=NOW + timedelta(seconds=4),
     )
+    future_lease = _claim(store, "evidence-list-job-future")
+    dataset, factor = _sources(repository, future_lease)
     repository.write_evidence(
         _evidence_input(
             [dataset.content_hash],
@@ -874,7 +1137,7 @@ def test_evidence_list_uses_dual_cutoff_and_stable_asof_id_cursor(
             as_of=NOW + timedelta(hours=1),
             engine_version="future-asof",
         ),
-        lease=lease,
+        lease=future_lease,
         now=NOW + timedelta(seconds=5),
     )
     with db.get_session() as session:
@@ -894,13 +1157,12 @@ def test_evidence_list_uses_dual_cutoff_and_stable_asof_id_cursor(
                 input_dataset_hashes_json="[]",
                 factor_snapshot_hash=factor.content_hash,
                 evidence_hash="9" * 64,
-                origin_job_id=lease.job_id,
+                origin_job_id=first_lease.job_id,
             )
         )
         session.commit()
 
     page_one = repository.list_evidence(
-        job_id=lease.job_id,
         stock_code="600519",
         as_of=NOW,
         limit=1,
@@ -910,7 +1172,6 @@ def test_evidence_list_uses_dual_cutoff_and_stable_asof_id_cursor(
     ]
     assert page_one["next_cursor"] is not None
     page_two = repository.list_evidence(
-        job_id=lease.job_id,
         stock_code="600519",
         as_of=NOW,
         cursor=page_one["next_cursor"],
@@ -986,3 +1247,152 @@ def test_flag_off_frozen_v1_hash_matches_persisted_repository_identity(
             select(func.count(ResearchEvidenceSnapshotRecord.id))
         ),
     ) == 0
+
+
+def test_evidence_writer_and_readback_reject_unsafe_public_contracts(
+    evidence_db,
+) -> None:
+    db, store = evidence_db
+    lease = _claim(store, "evidence-public-contract")
+    repository = ResearchSnapshotRepository(db)
+    dataset, factor = _sources(repository, lease)
+    evidence_input = _evidence_input(
+        [dataset.content_hash],
+        factor.content_hash,
+    )
+    for field_name in ("evidence_engine_version", "claim_policy_version"):
+        payload = dict(evidence_input.canonical_payload)
+        payload[field_name] = "password:supersecret"
+        with pytest.raises(ValueError, match="secret-like|safe identifier"):
+            repository.write_evidence(
+                replace(
+                    evidence_input,
+                    canonical_payload=payload,
+                    **{field_name: "password:supersecret"},
+                ),
+                lease=lease,
+                now=NOW + timedelta(seconds=3),
+            )
+
+    payload = json.loads(json.dumps(evidence_input.canonical_payload))
+    payload["claims"][0]["id"] = "sk-abcdefghijklmnopqrstuvwxyz123456"
+    with pytest.raises(ValueError, match="secret-like"):
+        repository.write_evidence(
+            replace(evidence_input, canonical_payload=payload),
+            lease=lease,
+            now=NOW + timedelta(seconds=4),
+        )
+
+    result = repository.write_evidence(
+        evidence_input,
+        lease=lease,
+        now=NOW + timedelta(seconds=5),
+    )
+    with db.get_session() as session:
+        row = session.get(ResearchEvidenceSnapshotRecord, result.record_id)
+        assert row is not None
+        tampered = json.loads(row.canonical_json)
+        tampered["claims"][0]["statement"] = "tampered claim"
+        row.canonical_json = json.dumps(tampered)
+        session.commit()
+
+    with pytest.raises(ValueError, match="evidence_hash|canonical_payload"):
+        repository.get_evidence(result.content_hash)
+    with pytest.raises(ValueError, match="evidence_hash|canonical_payload"):
+        repository.list_evidence(stock_code="600519")
+
+    second_lease = _claim(store, "evidence-public-contract-second")
+    second_dataset, second_factor = _sources(repository, second_lease)
+    assert second_dataset.content_hash == dataset.content_hash
+    assert second_factor.content_hash == factor.content_hash
+    with pytest.raises(ValueError, match="evidence_hash|canonical_payload"):
+        repository.write_evidence(
+            evidence_input,
+            lease=second_lease,
+            now=NOW + timedelta(seconds=6),
+        )
+    with db.get_session() as session:
+        assert session.scalar(
+            select(func.count(JobEventRecord.id)).where(
+                JobEventRecord.job_id == second_lease.job_id,
+                JobEventRecord.event_type == "research_evidence_snapshot",
+            )
+        ) == 0
+
+
+def test_job_evidence_list_requires_complete_graph_and_existing_rows(
+    evidence_db,
+) -> None:
+    db, store = evidence_db
+    first_lease = _claim(store, "evidence-graph-first")
+    repository = ResearchSnapshotRepository(db)
+    dataset, factor = _sources(repository, first_lease)
+    evidence_input = _evidence_input(
+        [dataset.content_hash],
+        factor.content_hash,
+    )
+    evidence = repository.write_evidence(
+        evidence_input,
+        lease=first_lease,
+        now=NOW + timedelta(seconds=3),
+    )
+    with db.get_session() as session:
+        source_event = session.execute(
+            select(JobEventRecord).where(
+                JobEventRecord.job_id == first_lease.job_id,
+                JobEventRecord.event_type == "research_evidence_snapshot",
+            )
+        ).scalar_one()
+        source_payload = source_event.payload_json
+
+    second_lease = _claim(store, "evidence-graph-second")
+    with db.get_session() as session:
+        session.add(
+            JobEventRecord(
+                job_id=second_lease.job_id,
+                event_type="research_evidence_snapshot",
+                stage="research_evidence",
+                payload_json=source_payload,
+                created_at=NOW.replace(tzinfo=None),
+            )
+        )
+        session.commit()
+    with pytest.raises(ValueError, match="Factor snapshot"):
+        repository.list_evidence(job_id=second_lease.job_id)
+
+    second_dataset, second_factor = _sources(repository, second_lease)
+    assert second_dataset.content_hash == dataset.content_hash
+    assert second_factor.content_hash == factor.content_hash
+    reused = repository.write_evidence(
+        evidence_input,
+        lease=second_lease,
+        now=NOW + timedelta(seconds=4),
+    )
+    assert reused.created is False
+    assert reused.content_hash == evidence.content_hash
+    assert [
+        item["evidence_hash"]
+        for item in repository.list_evidence(job_id=second_lease.job_id)["items"]
+    ] == [evidence.content_hash]
+
+    dangling_lease = _claim(store, "evidence-graph-dangling")
+    with db.get_session() as session:
+        session.add(
+            JobEventRecord(
+                job_id=dangling_lease.job_id,
+                event_type="research_evidence_snapshot",
+                stage="research_evidence",
+                payload_json=json.dumps(
+                    {
+                        "stock_code": "600519",
+                        "as_of": _utc_text(NOW),
+                        "evidence_hash": "d" * 64,
+                        "status": "available",
+                    }
+                ),
+                created_at=NOW.replace(tzinfo=None),
+            )
+        )
+        session.commit()
+    with pytest.raises(ValueError, match="missing row"):
+        repository.list_evidence(job_id=dangling_lease.job_id)

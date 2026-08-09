@@ -1359,6 +1359,16 @@ class AgentOrchestrator:
             analysis_context_pack_summary = context.get("analysis_context_pack_summary")
             if isinstance(analysis_context_pack_summary, str) and analysis_context_pack_summary:
                 ctx.meta["analysis_context_pack_summary"] = analysis_context_pack_summary
+            research_debate_prompt_context = context.get(
+                "research_debate_prompt_context"
+            )
+            if (
+                isinstance(research_debate_prompt_context, str)
+                and research_debate_prompt_context
+            ):
+                ctx.meta["research_debate_prompt_context"] = (
+                    research_debate_prompt_context
+                )
 
             # Pre-populate data fields that the caller already has
             for data_key in ("realtime_quote", "daily_history", "chip_distribution",

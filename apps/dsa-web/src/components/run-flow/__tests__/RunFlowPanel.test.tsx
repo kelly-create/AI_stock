@@ -23,6 +23,8 @@ vi.mock('../../../api/research', () => ({
   researchApi: {
     listEvidence: vi.fn(),
     getEvidence: vi.fn(),
+    listDebates: vi.fn(),
+    getDebate: vi.fn(),
   },
 }));
 
@@ -251,6 +253,11 @@ describe('RunFlowPanel', () => {
       count: 0,
       nextCursor: null,
     });
+    vi.mocked(researchApi.listDebates).mockResolvedValue({
+      items: [],
+      count: 0,
+      nextCursor: null,
+    });
   });
 
   it('renders loading state while the snapshot request is pending', () => {
@@ -302,6 +309,12 @@ describe('RunFlowPanel', () => {
     expect(screen.getByTestId('run-flow-events-column')).toHaveClass('xl:max-h-[calc(100vh-18rem)]');
     expect(screen.getByTestId('run-flow-graph')).toBeInTheDocument();
     expect(screen.getByTestId('run-flow-events')).toBeInTheDocument();
+    const evidencePanel = screen.getByTestId('research-evidence-panel');
+    const debatePanel = screen.getByTestId('research-debate-panel');
+    expect(
+      evidencePanel.compareDocumentPosition(debatePanel)
+      & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     expect(await screen.findByTestId('run-flow-node-details')).toHaveTextContent('新闻舆情');
 
     fireEvent.click(screen.getByRole('button', { name: 'LLM 生成 节点，状态 成功' }));

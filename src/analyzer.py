@@ -291,11 +291,15 @@ class _AllModelsFailedError(Exception):
         last_response_text: Optional[str] = None,
         last_model: Optional[str] = None,
         last_usage: Optional[Dict[str, Any]] = None,
+        retryable: bool = False,
+        error_code: str = "all_models_failed",
     ):
         super().__init__(message)
         self.last_response_text = last_response_text
         self.last_model = last_model
         self.last_usage = last_usage or {}
+        self.retryable = bool(retryable)
+        self.error_code = str(error_code or "all_models_failed")
 
 
 _USAGE_CALL_TYPE_CONTEXT_KEY = "_usage_call_type"
@@ -325,6 +329,14 @@ def _persist_usage_once(
     lost. Other generation backends still use the outer caller path. The
     private marker prevents double counting and is not written to telemetry.
     """
+    normalized_model = str(model or "unknown")
+    if call_type == "research_debate":
+        from src.services.research.debate_security import strict_model_identifier
+
+        normalized_model = strict_model_identifier(
+            normalized_model,
+            field="research_debate usage model",
+        )
     payload = usage or {}
     result = dict(payload)
     if result.get(_USAGE_PERSISTED_MARKER):
@@ -349,7 +361,7 @@ def _persist_usage_once(
             persistence_payload["status"] = status
         persist_llm_usage(
             persistence_payload,
-            str(model or "unknown"),
+            normalized_model,
             call_type=call_type,
             stock_code=stock_code,
         )
@@ -3319,6 +3331,14 @@ class GeminiAnalyzer:
 
         models_to_try = [config.litellm_model] + (config.litellm_fallback_models or [])
         models_to_try = [m for m in models_to_try if m]
+        if usage_call_type == "research_debate":
+            from src.services.research.debate_security import strict_model_identifier
+
+            for index, configured_model in enumerate(models_to_try):
+                strict_model_identifier(
+                    configured_model,
+                    field=f"research_debate route model[{index}]",
+                )
 
         use_channel_router = self._has_channel_config(config)
 
@@ -3326,6 +3346,8 @@ class GeminiAnalyzer:
         last_response_text: Optional[str] = None
         last_model: Optional[str] = None
         last_usage: Dict[str, Any] = {}
+        retryable_failure_seen = False
+        failure_error_code = "all_models_failed"
         effective_system_prompt = system_prompt or self.TEXT_SYSTEM_PROMPT
         router_model_names = set(get_configured_llm_models(config.llm_model_list))
         for model in models_to_try:
@@ -3549,6 +3571,19 @@ class GeminiAnalyzer:
                 safe_error = self._sanitize_litellm_exception_text(e, config=config, model=model)
                 logger.warning("[LiteLLM] %s failed: %s", model, safe_error)
                 last_error = RuntimeError(f"{type(e).__name__}: {safe_error}")
+                try:
+                    from src.services.durable_worker import classify_job_exception
+
+                    disposition = classify_job_exception(e)
+                    if disposition.retryable or not retryable_failure_seen:
+                        failure_error_code = disposition.error_code
+                    retryable_failure_seen = (
+                        retryable_failure_seen or disposition.retryable
+                    )
+                except Exception:
+                    # Classification is diagnostic metadata only; never mask
+                    # the generation failure or expose the provider message.
+                    pass
                 continue
 
         raise _AllModelsFailedError(
@@ -3556,6 +3591,8 @@ class GeminiAnalyzer:
             last_response_text=last_response_text,
             last_model=last_model,
             last_usage=last_usage,
+            retryable=retryable_failure_seen,
+            error_code=failure_error_code,
         )
 
     def generate_text(
@@ -3598,6 +3635,71 @@ class GeminiAnalyzer:
         except Exception as exc:
             logger.error("[generate_text] LLM call failed: %s", exc)
             return None
+
+    def generate_structured_text(
+        self,
+        messages: List[Dict[str, str]],
+        *,
+        response_validator: Callable[[str], None],
+        max_tokens: int = 2048,
+        temperature: float = 0.2,
+        timeout: Optional[float] = None,
+        call_type: str = "structured_text",
+        stock_code: Optional[str] = None,
+    ) -> Tuple[str, str, Dict[str, Any]]:
+        """Generate one validated text response from exact system/user messages.
+
+        This is the narrow public boundary used by durable research stages that
+        must freeze the exact prompt before dispatch.  It deliberately exposes
+        no tools, chat history, or ambient context and lets the configured
+        generation backend try its normal model/backend fallbacks while the
+        caller still makes one logical completion call.
+        """
+
+        if not isinstance(messages, list) or len(messages) != 2:
+            raise ValueError("messages must contain exactly system and user entries")
+        normalized: List[Dict[str, str]] = []
+        for index, message in enumerate(messages):
+            if not isinstance(message, dict) or set(message) != {"role", "content"}:
+                raise ValueError("each message must contain only role and content")
+            expected_role = "system" if index == 0 else "user"
+            role = str(message.get("role") or "").strip().lower()
+            content = str(message.get("content") or "")
+            if role != expected_role or not content.strip():
+                raise ValueError(
+                    f"messages[{index}] must be a non-empty {expected_role} message"
+                )
+            normalized.append({"role": role, "content": content})
+        if not callable(response_validator):
+            raise TypeError("response_validator must be callable")
+        normalized_call_type = str(call_type or "").strip()
+        if not normalized_call_type:
+            raise ValueError("call_type is required")
+        generation_config: Dict[str, Any] = {
+            "max_tokens": int(max_tokens),
+            "temperature": float(temperature),
+        }
+        if timeout is not None:
+            generation_config["timeout"] = float(timeout)
+        audit_context: Dict[str, Any] = {
+            _USAGE_CALL_TYPE_CONTEXT_KEY: normalized_call_type,
+        }
+        if stock_code:
+            audit_context[_USAGE_STOCK_CODE_CONTEXT_KEY] = str(stock_code).strip()
+        text, model_used, usage = self._call_litellm(
+            normalized[1]["content"],
+            generation_config=generation_config,
+            system_prompt=normalized[0]["content"],
+            response_validator=response_validator,
+            audit_context=audit_context,
+        )
+        persisted_usage = _persist_usage_once(
+            usage,
+            model_used,
+            call_type=normalized_call_type,
+            stock_code=str(stock_code).strip() if stock_code else None,
+        )
+        return text, model_used, persisted_usage
 
     def analyze(
         self, 

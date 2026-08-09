@@ -279,6 +279,22 @@ def test_llm_tool_adapter_does_not_direct_call_dropped_bare_hermes_fallback() ->
     assert [call.args[2] for call in call_model.call_args_list] == ["openai/gpt-4o-mini"]
 
 
+def test_text_completion_can_propagate_last_failure_for_durable_retries() -> None:
+    config = _config(litellm_model="openai/test-model")
+    adapter = LLMToolAdapter.__new__(LLMToolAdapter)
+    adapter._config = config
+    adapter._backend_error = None
+    adapter._route_resolution = resolve_agent_litellm_route(config)
+    failure = TimeoutError("provider timed out")
+
+    with patch.object(adapter, "_call_litellm_model", side_effect=failure):
+        with pytest.raises(TimeoutError, match="provider timed out"):
+            adapter.call_text(
+                [{"role": "user", "content": "hello"}],
+                raise_on_failure=True,
+            )
+
+
 def test_call_completion_does_not_overwrite_adapter_route_resolution() -> None:
     config = _config(litellm_model="openai/test-model")
     adapter = LLMToolAdapter.__new__(LLMToolAdapter)

@@ -9,6 +9,8 @@ import pytest
 from src.services.research.canonical import CanonicalJSONError, canonical_hash
 from src.services.research.repositories import LeaseFence, ResearchSnapshotInput
 from src.services.research.snapshot_service import (
+    DEBATE_FIELD_DICTIONARY_VERSION,
+    DEBATE_SNAPSHOT_VERSION,
     EVIDENCE_FIELD_DICTIONARY_VERSION,
     EVIDENCE_SNAPSHOT_VERSION,
     FrozenResearchSnapshot,
@@ -132,6 +134,40 @@ def _evidence_payload() -> dict:
     }
 
 
+def _debate_payload() -> dict:
+    return {
+        "debate_engine_version": "research-debate-v1",
+        "output_schema_version": "research-debate-output-v1",
+        "prompt_version": "research-debate-prompt-v1",
+        "stock_code": "600519",
+        "market": "A",
+        "as_of": "2025-06-30T10:00:00Z",
+        "available_at": "2025-06-30T09:55:00Z",
+        "status": "available",
+        "evidence_snapshot_hash": "e" * 64,
+        "request_hash": "r" * 64,
+        "model_route_fingerprint": "m" * 64,
+        "bull_turn_hash": "b" * 64,
+        "bear_turn_hash": "c" * 64,
+        "turns": [
+            {
+                "stance": "bull",
+                "summary": "Bounded upside interpretation.",
+                "arguments": [],
+                "open_questions": [],
+            },
+            {
+                "stance": "bear",
+                "summary": "Bounded downside interpretation.",
+                "arguments": [],
+                "open_questions": [],
+            },
+        ],
+        "failed_stances": [],
+        "limitations": [],
+    }
+
+
 def test_evidence_is_strictly_additive_and_v1_identity_remains_unchanged():
     legacy = _build()
     explicit_none = _build(evidence=None, evidence_snapshot_hash=None)
@@ -140,6 +176,24 @@ def test_evidence_is_strictly_additive_and_v1_identity_remains_unchanged():
     assert explicit_none.canonical_json == legacy.canonical_json
     assert explicit_none.evidence_snapshot_hash is None
     assert "evidence" not in json.loads(legacy.canonical_json)
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    (
+        "snapshot_version",
+        "field_dictionary_version",
+        "factor_engine_version",
+        "pack_version",
+        "prompt_version",
+        "policy_version",
+    ),
+)
+def test_public_snapshot_versions_reject_secret_like_identifiers(
+    field_name: str,
+) -> None:
+    with pytest.raises(ValueError, match="secret-like"):
+        _build(**{field_name: "password:supersecret"})
 
 
 def test_evidence_v2_is_linked_into_payload_hash_and_repository_input():
@@ -164,6 +218,64 @@ def test_evidence_payload_and_hash_must_be_supplied_together():
         _build(evidence=_evidence_payload())
     with pytest.raises(ValueError, match="both be set"):
         _build(evidence_snapshot_hash="e" * 64)
+
+
+def test_debate_v3_is_strictly_additive_and_linked_to_evidence():
+    evidence_hash = "e" * 64
+    evidence_v2 = _build(
+        evidence=_evidence_payload(),
+        evidence_snapshot_hash=evidence_hash,
+        snapshot_version=EVIDENCE_SNAPSHOT_VERSION,
+        field_dictionary_version=EVIDENCE_FIELD_DICTIONARY_VERSION,
+    )
+    explicit_none = _build(
+        evidence=_evidence_payload(),
+        evidence_snapshot_hash=evidence_hash,
+        debate=None,
+        debate_snapshot_hash=None,
+        snapshot_version=EVIDENCE_SNAPSHOT_VERSION,
+        field_dictionary_version=EVIDENCE_FIELD_DICTIONARY_VERSION,
+    )
+    assert explicit_none.snapshot_hash == evidence_v2.snapshot_hash
+    assert explicit_none.canonical_json == evidence_v2.canonical_json
+
+    debate_hash = "f" * 64
+    frozen = _build(
+        evidence=_evidence_payload(),
+        evidence_snapshot_hash=evidence_hash,
+        debate=_debate_payload(),
+        debate_snapshot_hash=debate_hash,
+        snapshot_version=DEBATE_SNAPSHOT_VERSION,
+        field_dictionary_version=DEBATE_FIELD_DICTIONARY_VERSION,
+    )
+    rendered = json.loads(frozen.canonical_json)
+    assert frozen.snapshot_version == DEBATE_SNAPSHOT_VERSION
+    assert frozen.field_dictionary_version == DEBATE_FIELD_DICTIONARY_VERSION
+    assert frozen.debate_snapshot_hash == debate_hash
+    assert rendered["debate"]["status"] == "available"
+    assert frozen.snapshot_hash != evidence_v2.snapshot_hash
+    assert frozen.to_repository_input().debate_snapshot_hash == debate_hash
+
+
+def test_debate_payload_hash_pair_and_evidence_lineage_are_required():
+    with pytest.raises(ValueError, match="both be set"):
+        _build(debate=_debate_payload())
+    with pytest.raises(ValueError, match="both be set"):
+        _build(debate_snapshot_hash="f" * 64)
+    with pytest.raises(ValueError, match="requires a frozen evidence"):
+        _build(
+            debate=_debate_payload(),
+            debate_snapshot_hash="f" * 64,
+        )
+    conflicting = _debate_payload()
+    conflicting["evidence_snapshot_hash"] = "d" * 64
+    with pytest.raises(ValueError, match="conflicts with frozen evidence"):
+        _build(
+            evidence=_evidence_payload(),
+            evidence_snapshot_hash="e" * 64,
+            debate=conflicting,
+            debate_snapshot_hash="f" * 64,
+        )
 
 
 def test_snapshot_is_canonical_utf8_stable_and_ignores_execution_metadata():
@@ -545,6 +657,26 @@ def test_safe_projection_drops_sensitive_fields_and_sanitizes_urls_at_any_depth(
     ):
         assert host in rendered
     assert "_path_sha256" in rendered
+
+
+@pytest.mark.parametrize(
+    "secret",
+    (
+        "sk-abcdefghijklmnopqrstuvwxyz123456",
+        "ghp_abcdefghijklmnopqrstuvwxyz123456",
+    ),
+)
+def test_safe_projection_redacts_standalone_token_like_values(secret):
+    frozen = _build(
+        context_pack={"subject": {"code": "600519", "note": secret}},
+        datasets={"daily_basic": {"rows": [{"note": secret}]}},
+        factors={"quality": {"note": secret}},
+        factor_snapshot_hash="a" * 64,
+    )
+
+    rendered = frozen.canonical_json
+    assert secret not in rendered
+    assert rendered.count("[REDACTED_TOKEN]") == 3
 
 
 def test_structured_dataset_url_paths_and_opaque_refs_are_fingerprinted():

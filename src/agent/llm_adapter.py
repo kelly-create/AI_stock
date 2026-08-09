@@ -572,6 +572,7 @@ class LLMToolAdapter:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
+        raise_on_failure: bool = False,
     ) -> LLMResponse:
         """Send a text-only completion through the shared routing stack."""
         return self.call_completion(
@@ -581,6 +582,7 @@ class LLMToolAdapter:
             temperature=temperature,
             max_tokens=max_tokens,
             timeout=timeout,
+            raise_on_failure=raise_on_failure,
         )
 
     def call_completion(
@@ -592,6 +594,7 @@ class LLMToolAdapter:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
+        raise_on_failure: bool = False,
     ) -> LLMResponse:
         """Shared completion path for both tool and text-only calls."""
         config = self._config
@@ -663,6 +666,8 @@ class LLMToolAdapter:
                 last_error = e
                 continue
 
+        if raise_on_failure and last_error is not None:
+            raise last_error
         suffix = " (rate-limit encountered during fallback)" if hit_rate_limit else ""
         error_msg = f"All LLM models failed{suffix}. Last error: {last_error}"
         logger.error(error_msg)

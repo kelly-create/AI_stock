@@ -232,6 +232,57 @@ class TestAnalyzerGenerateText:
         persisted_filtered = filtered_persist.call_args.args[0]
         assert getattr(persisted_filtered, PROMPT_CACHE_TELEMETRY_DISABLED_ATTR) is True
 
+    @pytest.mark.parametrize(
+        "unsafe_model",
+        (
+            "https://alice:password@llm.example/v1",
+            "file://local/model",
+            "sk-abcdefghijklmnopqrstuvwxyz123456",
+        ),
+    )
+    def test_research_debate_usage_rejects_unsafe_model_before_storage(
+        self,
+        unsafe_model,
+    ):
+        from src.analyzer import _persist_usage_once
+
+        with patch("src.analyzer.persist_llm_usage") as mock_persist:
+            with pytest.raises(ValueError):
+                _persist_usage_once(
+                    {"total_tokens": 3},
+                    unsafe_model,
+                    call_type="research_debate",
+                    stock_code="600519",
+                    force=True,
+                )
+
+        mock_persist.assert_not_called()
+
+    def test_structured_research_debate_rejects_unsafe_returned_model_before_usage(self):
+        analyzer = self._make_analyzer()
+        messages = [
+            {"role": "system", "content": "Return strict JSON."},
+            {"role": "user", "content": "Analyze frozen Evidence."},
+        ]
+        with patch.object(
+            analyzer,
+            "_call_litellm",
+            return_value=(
+                "{}",
+                "https://alice:password@llm.example/v1",
+                {"total_tokens": 3},
+            ),
+        ), patch("src.analyzer.persist_llm_usage") as mock_persist:
+            with pytest.raises(ValueError):
+                analyzer.generate_structured_text(
+                    messages,
+                    response_validator=lambda value: value,
+                    call_type="research_debate",
+                    stock_code="600519",
+                )
+
+        mock_persist.assert_not_called()
+
     def test_generate_text_does_not_persist_unavailable_usage(self):
         analyzer = self._make_analyzer()
         usage = {
@@ -2605,6 +2656,30 @@ class TestAnalyzerGenerateText:
         assert persist_usage.call_args_list[0].args[0]["error_code"]
         assert persist_usage.call_args_list[1].args[0]["status"] == "success"
 
+    def test_research_debate_rejects_unsafe_configured_model_before_dispatch(self):
+        analyzer = self._make_analyzer()
+        analyzer._config_override = SimpleNamespace(
+            litellm_model="https://alice:password@llm.example/v1",
+            litellm_fallback_models=["provider/safe-model"],
+            llm_model_list=[],
+        )
+        with patch.object(analyzer, "_dispatch_litellm_completion") as dispatch, patch(
+            "src.analyzer.persist_llm_usage"
+        ) as persist_usage:
+            with pytest.raises(ValueError, match="safe model identifier"):
+                analyzer._call_litellm(
+                    "test prompt",
+                    {"max_tokens": 128, "temperature": 0.2},
+                    response_validator=analyzer._validate_json_response,
+                    audit_context={
+                        "_usage_call_type": "research_debate",
+                        "_usage_stock_code": "600519",
+                    },
+                )
+
+        dispatch.assert_not_called()
+        persist_usage.assert_not_called()
+
     def test_transport_failures_and_recovery_each_persist_one_attempt(self):
         analyzer = self._make_analyzer()
         analyzer._config_override = SimpleNamespace(
@@ -2644,6 +2719,36 @@ class TestAnalyzerGenerateText:
         assert succeeded["status"] == "success"
         assert succeeded["attempt_no"] == 2
 
+    def test_all_model_timeouts_preserve_safe_retry_disposition_for_debate(self):
+        analyzer = self._make_analyzer()
+        analyzer._config_override = SimpleNamespace(
+            litellm_model="provider/primary-model",
+            litellm_fallback_models=["provider/fallback-model"],
+            llm_model_list=[],
+        )
+
+        from src.analyzer import _AllModelsFailedError
+        from src.core.pipeline import StockAnalysisPipeline
+        from src.services.research.debate_runner import DebateTransientError
+
+        with patch.object(
+            analyzer,
+            "_dispatch_litellm_completion",
+            side_effect=TimeoutError("api_key=secret-value provider timeout"),
+        ):
+            with pytest.raises(_AllModelsFailedError) as exc_info:
+                analyzer._call_litellm(
+                    "test prompt",
+                    {"max_tokens": 128, "temperature": 0.2},
+                    response_validator=analyzer._validate_json_response,
+                )
+
+        assert exc_info.value.retryable is True
+        assert exc_info.value.error_code == "timeout"
+        assert "secret-value" not in str(exc_info.value)
+        with pytest.raises(DebateTransientError, match="timeout"):
+            StockAnalysisPipeline._raise_debate_completion_error(exc_info.value)
+
     def test_all_models_invalid_json_raises_all_models_failed_error(self):
         """When all models return non-JSON, _AllModelsFailedError is raised with last_response_text."""
         analyzer = self._make_analyzer()
@@ -2670,6 +2775,12 @@ class TestAnalyzerGenerateText:
                 )
 
         assert exc_info.value.last_response_text == "这不是 JSON 格式的响应"
+        assert exc_info.value.retryable is False
+        from src.core.pipeline import StockAnalysisPipeline
+        from src.services.research.debate_runner import DebateTerminalError
+
+        with pytest.raises(DebateTerminalError):
+            StockAnalysisPipeline._raise_debate_completion_error(exc_info.value)
 
     def test_analyze_all_models_invalid_json_goes_through_post_processing(self):
         """When all models return non-JSON, analyze() must still run integrity

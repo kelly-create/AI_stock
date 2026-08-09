@@ -5,6 +5,9 @@ import type {
   ResearchDatasetItem,
   ResearchDatasetListResponse,
   ResearchDatasetParams,
+  ResearchDebateDetailResponse,
+  ResearchDebateListParams,
+  ResearchDebateListResponse,
   ResearchEvidenceDetailResponse,
   ResearchEvidenceListParams,
   ResearchEvidenceListResponse,
@@ -102,11 +105,63 @@ function toResearchEvidenceDetailResponse(
   return response;
 }
 
+function toResearchDebateListResponse(
+  data: Record<string, unknown>,
+): ResearchDebateListResponse {
+  if (!Array.isArray(data.items)) {
+    throw new Error('Research debate list response items must be an array');
+  }
+  const response = toCamelCase<ResearchDebateListResponse>(data);
+  response.items = data.items.map((item) => (
+    toCamelCase(item as Record<string, unknown>)
+  ));
+  return response;
+}
+
+function toResearchDebateDetailResponse(
+  data: Record<string, unknown>,
+): ResearchDebateDetailResponse {
+  const response = toCamelCase<ResearchDebateDetailResponse>(data);
+  if (!response.debate || !Array.isArray(response.debate.failedStances)
+    || response.debate.failedStances.some((failure) => (
+      !failure
+      || typeof failure !== 'object'
+      || (failure.stance !== 'bull' && failure.stance !== 'bear')
+      || typeof failure.errorCode !== 'string'
+    ))
+    || !Array.isArray(response.debate.limitations)
+    || !Array.isArray(response.debate.turns)
+    || response.debate.turns.some((turn) => (
+      !Array.isArray(turn.arguments)
+      || !Array.isArray(turn.openQuestions)
+      || turn.arguments.some((argument) => (
+        !Array.isArray(argument.claimIds)
+        || !Array.isArray(argument.citationIds)
+        || !Array.isArray(argument.limitations)
+      ))
+    ))) {
+    throw new Error('Research debate detail response is malformed');
+  }
+  return response;
+}
+
 function toEvidenceParams(params: ResearchEvidenceListParams): Record<string, unknown> {
   return omitUndefined({
     job_id: params.jobId,
     research_snapshot_hash: params.researchSnapshotHash,
     stock_code: params.stockCode,
+    as_of: params.asOf,
+    cursor: params.cursor,
+    limit: params.limit,
+  });
+}
+
+function toDebateParams(params: ResearchDebateListParams): Record<string, unknown> {
+  return omitUndefined({
+    job_id: params.jobId,
+    research_snapshot_hash: params.researchSnapshotHash,
+    stock_code: params.stockCode,
+    evidence_snapshot_hash: params.evidenceSnapshotHash,
     as_of: params.asOf,
     cursor: params.cursor,
     limit: params.limit,
@@ -172,6 +227,25 @@ export const researchApi = {
       `/api/v1/research/evidence/${encodePathSegment(evidenceHash)}`,
     );
     return toResearchEvidenceDetailResponse(response.data);
+  },
+
+  async listDebates(
+    params: ResearchDebateListParams,
+  ): Promise<ResearchDebateListResponse> {
+    const response = await apiClient.get<Record<string, unknown>>(
+      '/api/v1/research/debates',
+      { params: toDebateParams(params) },
+    );
+    return toResearchDebateListResponse(response.data);
+  },
+
+  async getDebate(
+    debateHash: string,
+  ): Promise<ResearchDebateDetailResponse> {
+    const response = await apiClient.get<Record<string, unknown>>(
+      `/api/v1/research/debates/${encodePathSegment(debateHash)}`,
+    );
+    return toResearchDebateDetailResponse(response.data);
   },
 
   listDatasets,

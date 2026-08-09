@@ -3198,7 +3198,7 @@
             "schema": {
               "type": "string",
               "minLength": 1,
-              "maxLength": 128,
+              "maxLength": 16,
               "title": "Stock Code"
             }
           },
@@ -3219,7 +3219,7 @@
             "schema": {
               "type": "string",
               "minLength": 1,
-              "maxLength": 2048,
+              "maxLength": 256,
               "title": "Cursor"
             }
           },
@@ -3370,6 +3370,235 @@
           }
         }
       }
+    },
+    "/api/v1/research/debates": {
+      "get": {
+        "tags": [
+          "Research"
+        ],
+        "summary": "List Research Debates",
+        "description": "List immutable debate summaries with stable keyset pagination.",
+        "operationId": "listResearchDebates",
+        "security": [
+          {
+            "AdminSessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "title": "Job Id"
+            }
+          },
+          {
+            "name": "research_snapshot_hash",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 64,
+              "maxLength": 64,
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Research Snapshot Hash"
+            }
+          },
+          {
+            "name": "stock_code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16,
+              "title": "Stock Code"
+            }
+          },
+          {
+            "name": "evidence_snapshot_hash",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 64,
+              "maxLength": 64,
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Evidence Snapshot Hash"
+            }
+          },
+          {
+            "name": "as_of",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "title": "As Of"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResearchDebateListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required when admin auth is enabled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid debate query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid query parameter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Debate query failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/research/debates/{debate_hash}": {
+      "get": {
+        "tags": [
+          "Research"
+        ],
+        "summary": "Get Research Debate",
+        "description": "Read one immutable bounded debate by its content hash.",
+        "operationId": "getResearchDebate",
+        "security": [
+          {
+            "AdminSessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "debate_hash",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 64,
+              "maxLength": 64,
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Debate Hash"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResearchDebateDetailResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required when admin auth is enabled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Debate not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid debate hash",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Debate query failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -3402,6 +3631,8 @@
           },
           "schema_version": {
             "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
             "title": "Schema Version"
           },
           "trade_date": {
@@ -3493,8 +3724,7 @@
           },
           "content_hash": {
             "type": "string",
-            "maxLength": 64,
-            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
             "title": "Content Hash"
           },
           "raw_ref": {
@@ -3512,7 +3742,9 @@
           "error_code": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 1
               },
               {
                 "type": "null"
@@ -3523,7 +3755,8 @@
           "error_message": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "maxLength": 500
               },
               {
                 "type": "null"
@@ -3534,7 +3767,8 @@
           "supersedes_hash": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
               },
               {
                 "type": "null"
@@ -3545,7 +3779,9 @@
           "origin_job_id": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 1
               },
               {
                 "type": "null"
@@ -3604,6 +3840,7 @@
             "title": "Row Limit"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "count",
@@ -3619,18 +3856,25 @@
           },
           "stock_code": {
             "type": "string",
+            "maxLength": 16,
+            "minLength": 1,
             "title": "Stock Code"
           },
           "market": {
             "type": "string",
+            "maxLength": 16,
+            "minLength": 1,
             "title": "Market"
           },
           "company_profile": {
             "type": "string",
+            "maxLength": 32,
+            "minLength": 1,
             "title": "Company Profile"
           },
           "primary_horizon": {
             "type": "integer",
+            "exclusiveMinimum": 0.0,
             "title": "Primary Horizon"
           },
           "requested_horizon": {
@@ -3656,6 +3900,8 @@
           },
           "engine_bundle_version": {
             "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
             "title": "Engine Bundle Version"
           },
           "value_score": {
@@ -3720,9 +3966,11 @@
           },
           "input_dataset_hashes": {
             "items": {
-              "type": "string"
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
             },
             "type": "array",
+            "maxItems": 512,
             "title": "Input Dataset Hashes"
           },
           "status": {
@@ -3745,6 +3993,14 @@
             "title": "Coverage"
           },
           "unknowns": {
+            "items": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "type": "array",
+            "maxItems": 512,
             "title": "Unknowns"
           },
           "as_of": {
@@ -3759,14 +4015,15 @@
           },
           "content_hash": {
             "type": "string",
-            "maxLength": 64,
-            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
             "title": "Content Hash"
           },
           "origin_job_id": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 1
               },
               {
                 "type": "null"
@@ -3794,7 +4051,6 @@
           "input_dataset_hashes",
           "status",
           "coverage",
-          "unknowns",
           "as_of",
           "available_at",
           "content_hash",
@@ -3810,38 +4066,56 @@
           },
           "stock_code": {
             "type": "string",
+            "maxLength": 16,
+            "minLength": 1,
             "title": "Stock Code"
           },
           "market": {
             "type": "string",
+            "maxLength": 16,
+            "minLength": 1,
             "title": "Market"
           },
           "snapshot_version": {
             "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
             "title": "Snapshot Version"
           },
           "field_dictionary_version": {
             "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
             "title": "Field Dictionary Version"
           },
           "factor_engine_version": {
             "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
             "title": "Factor Engine Version"
           },
           "pack_version": {
             "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
             "title": "Pack Version"
           },
           "prompt_version": {
             "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
             "title": "Prompt Version"
           },
           "policy_version": {
             "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
             "title": "Policy Version"
           },
           "model_route_fingerprint": {
             "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
             "title": "Model Route Fingerprint"
           },
           "as_of": {
@@ -3874,14 +4148,14 @@
           },
           "snapshot_hash": {
             "type": "string",
-            "maxLength": 64,
-            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
             "title": "Snapshot Hash"
           },
           "factor_snapshot_hash": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
               },
               {
                 "type": "null"
@@ -3901,10 +4175,24 @@
             ],
             "title": "Evidence Snapshot Hash"
           },
+          "debate_snapshot_hash": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Debate Snapshot Hash"
+          },
           "origin_job_id": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 1
               },
               {
                 "type": "null"
@@ -8955,7 +9243,8 @@
           "limitations": {
             "items": {
               "type": "string",
-              "maxLength": 500
+              "maxLength": 500,
+              "minLength": 1
             },
             "type": "array",
             "maxItems": 16,
@@ -8986,7 +9275,7 @@
           },
           "stock_code": {
             "type": "string",
-            "maxLength": 128,
+            "maxLength": 16,
             "minLength": 1,
             "title": "Stock Code"
           },
@@ -9052,6 +9341,8 @@
               "pattern": "^[0-9a-f]{64}$"
             },
             "type": "array",
+            "maxItems": 512,
+            "minItems": 1,
             "title": "Input Dataset Hashes"
           },
           "factor_snapshot_hash": {
@@ -9068,7 +9359,8 @@
             "anyOf": [
               {
                 "type": "string",
-                "maxLength": 64
+                "maxLength": 64,
+                "minLength": 1
               },
               {
                 "type": "null"
@@ -9099,6 +9391,7 @@
           "coverage",
           "claim_count",
           "citation_count",
+          "input_dataset_hashes",
           "factor_snapshot_hash",
           "evidence_hash",
           "created_at",
@@ -9124,7 +9417,7 @@
             "anyOf": [
               {
                 "type": "string",
-                "maxLength": 2048
+                "maxLength": 256
               },
               {
                 "type": "null"
@@ -9156,7 +9449,7 @@
           },
           "stock_code": {
             "type": "string",
-            "maxLength": 128,
+            "maxLength": 16,
             "minLength": 1,
             "title": "Stock Code"
           },
@@ -9198,6 +9491,8 @@
               "pattern": "^[0-9a-f]{64}$"
             },
             "type": "array",
+            "maxItems": 512,
+            "minItems": 1,
             "title": "Input Dataset Hashes"
           },
           "factor_snapshot_hash": {
@@ -9208,7 +9503,8 @@
           "limitations": {
             "items": {
               "type": "string",
-              "maxLength": 500
+              "maxLength": 500,
+              "minLength": 1
             },
             "type": "array",
             "maxItems": 32,
@@ -9242,6 +9538,7 @@
           "available_at",
           "status",
           "coverage",
+          "input_dataset_hashes",
           "factor_snapshot_hash"
         ],
         "title": "ResearchEvidencePayload"
@@ -9254,7 +9551,7 @@
           },
           "stock_code": {
             "type": "string",
-            "maxLength": 128,
+            "maxLength": 16,
             "minLength": 1,
             "title": "Stock Code"
           },
@@ -9320,6 +9617,8 @@
               "pattern": "^[0-9a-f]{64}$"
             },
             "type": "array",
+            "maxItems": 512,
+            "minItems": 1,
             "title": "Input Dataset Hashes"
           },
           "factor_snapshot_hash": {
@@ -9336,7 +9635,8 @@
             "anyOf": [
               {
                 "type": "string",
-                "maxLength": 64
+                "maxLength": 64,
+                "minLength": 1
               },
               {
                 "type": "null"
@@ -9364,11 +9664,659 @@
           "coverage",
           "claim_count",
           "citation_count",
+          "input_dataset_hashes",
           "factor_snapshot_hash",
           "evidence_hash",
           "created_at"
         ],
         "title": "ResearchEvidenceSummary"
+      },
+      "ResearchDebateArgument": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Id"
+          },
+          "statement": {
+            "type": "string",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Statement"
+          },
+          "claim_ids": {
+            "items": {
+              "type": "string",
+              "maxLength": 128,
+              "minLength": 1
+            },
+            "type": "array",
+            "maxItems": 8,
+            "minItems": 1,
+            "title": "Claim Ids"
+          },
+          "citation_ids": {
+            "items": {
+              "type": "string",
+              "maxLength": 128,
+              "minLength": 1
+            },
+            "type": "array",
+            "maxItems": 8,
+            "minItems": 1,
+            "title": "Citation Ids"
+          },
+          "confidence": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence"
+          },
+          "limitations": {
+            "items": {
+              "type": "string",
+              "maxLength": 300,
+              "minLength": 1
+            },
+            "type": "array",
+            "maxItems": 4,
+            "title": "Limitations"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "statement",
+          "claim_ids",
+          "citation_ids",
+          "confidence"
+        ],
+        "title": "ResearchDebateArgument"
+      },
+      "ResearchDebateDetailResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "stock_code": {
+            "type": "string",
+            "maxLength": 16,
+            "minLength": 1,
+            "title": "Stock Code"
+          },
+          "market": {
+            "type": "string",
+            "maxLength": 16,
+            "minLength": 1,
+            "title": "Market"
+          },
+          "debate_engine_version": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Debate Engine Version"
+          },
+          "output_schema_version": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Output Schema Version"
+          },
+          "prompt_version": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Prompt Version"
+          },
+          "evidence_snapshot_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Evidence Snapshot Hash"
+          },
+          "request_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Request Hash"
+          },
+          "model_route_fingerprint": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Model Route Fingerprint"
+          },
+          "as_of": {
+            "type": "string",
+            "format": "date-time",
+            "title": "As Of"
+          },
+          "available_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Available At"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "available",
+              "partial",
+              "empty",
+              "generation_failed"
+            ],
+            "title": "Status"
+          },
+          "bull_turn_hash": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bull Turn Hash"
+          },
+          "bear_turn_hash": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bear Turn Hash"
+          },
+          "bull_argument_count": {
+            "type": "integer",
+            "maximum": 6.0,
+            "minimum": 0.0,
+            "title": "Bull Argument Count"
+          },
+          "bear_argument_count": {
+            "type": "integer",
+            "maximum": 6.0,
+            "minimum": 0.0,
+            "title": "Bear Argument Count"
+          },
+          "open_question_count": {
+            "type": "integer",
+            "maximum": 12.0,
+            "minimum": 0.0,
+            "title": "Open Question Count"
+          },
+          "debate_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Debate Hash"
+          },
+          "origin_job_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Origin Job Id"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "debate": {
+            "$ref": "#/components/schemas/ResearchDebatePayload"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "stock_code",
+          "market",
+          "debate_engine_version",
+          "output_schema_version",
+          "prompt_version",
+          "evidence_snapshot_hash",
+          "request_hash",
+          "model_route_fingerprint",
+          "as_of",
+          "available_at",
+          "status",
+          "bull_argument_count",
+          "bear_argument_count",
+          "open_question_count",
+          "debate_hash",
+          "created_at",
+          "debate"
+        ],
+        "title": "ResearchDebateDetailResponse"
+      },
+      "ResearchDebateFailure": {
+        "properties": {
+          "stance": {
+            "type": "string",
+            "enum": [
+              "bull",
+              "bear"
+            ],
+            "title": "Stance"
+          },
+          "error_code": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Error Code"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "stance",
+          "error_code"
+        ],
+        "title": "ResearchDebateFailure"
+      },
+      "ResearchDebateListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ResearchDebateSummary"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Count"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 256
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "count"
+        ],
+        "title": "ResearchDebateListResponse"
+      },
+      "ResearchDebatePayload": {
+        "properties": {
+          "debate_engine_version": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Debate Engine Version"
+          },
+          "output_schema_version": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Output Schema Version"
+          },
+          "prompt_version": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Prompt Version"
+          },
+          "stock_code": {
+            "type": "string",
+            "maxLength": 16,
+            "minLength": 1,
+            "title": "Stock Code"
+          },
+          "market": {
+            "type": "string",
+            "maxLength": 16,
+            "minLength": 1,
+            "title": "Market"
+          },
+          "as_of": {
+            "type": "string",
+            "format": "date-time",
+            "title": "As Of"
+          },
+          "available_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Available At"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "available",
+              "partial",
+              "empty",
+              "generation_failed"
+            ],
+            "title": "Status"
+          },
+          "evidence_snapshot_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Evidence Snapshot Hash"
+          },
+          "request_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Request Hash"
+          },
+          "model_route_fingerprint": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Model Route Fingerprint"
+          },
+          "bull_turn_hash": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bull Turn Hash"
+          },
+          "bear_turn_hash": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bear Turn Hash"
+          },
+          "failed_stances": {
+            "items": {
+              "$ref": "#/components/schemas/ResearchDebateFailure"
+            },
+            "type": "array",
+            "maxItems": 2,
+            "title": "Failed Stances"
+          },
+          "limitations": {
+            "items": {
+              "type": "string",
+              "maxLength": 500,
+              "minLength": 1
+            },
+            "type": "array",
+            "maxItems": 8,
+            "title": "Limitations"
+          },
+          "turns": {
+            "items": {
+              "$ref": "#/components/schemas/ResearchDebateTurn"
+            },
+            "type": "array",
+            "maxItems": 2,
+            "title": "Turns"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "debate_engine_version",
+          "output_schema_version",
+          "prompt_version",
+          "stock_code",
+          "market",
+          "as_of",
+          "available_at",
+          "status",
+          "evidence_snapshot_hash",
+          "request_hash",
+          "model_route_fingerprint"
+        ],
+        "title": "ResearchDebatePayload",
+        "description": "Strict, display-safe projection of one bounded debate artifact."
+      },
+      "ResearchDebateSummary": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "stock_code": {
+            "type": "string",
+            "maxLength": 16,
+            "minLength": 1,
+            "title": "Stock Code"
+          },
+          "market": {
+            "type": "string",
+            "maxLength": 16,
+            "minLength": 1,
+            "title": "Market"
+          },
+          "debate_engine_version": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Debate Engine Version"
+          },
+          "output_schema_version": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Output Schema Version"
+          },
+          "prompt_version": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Prompt Version"
+          },
+          "evidence_snapshot_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Evidence Snapshot Hash"
+          },
+          "request_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Request Hash"
+          },
+          "model_route_fingerprint": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Model Route Fingerprint"
+          },
+          "as_of": {
+            "type": "string",
+            "format": "date-time",
+            "title": "As Of"
+          },
+          "available_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Available At"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "available",
+              "partial",
+              "empty",
+              "generation_failed"
+            ],
+            "title": "Status"
+          },
+          "bull_turn_hash": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bull Turn Hash"
+          },
+          "bear_turn_hash": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bear Turn Hash"
+          },
+          "bull_argument_count": {
+            "type": "integer",
+            "maximum": 6.0,
+            "minimum": 0.0,
+            "title": "Bull Argument Count"
+          },
+          "bear_argument_count": {
+            "type": "integer",
+            "maximum": 6.0,
+            "minimum": 0.0,
+            "title": "Bear Argument Count"
+          },
+          "open_question_count": {
+            "type": "integer",
+            "maximum": 12.0,
+            "minimum": 0.0,
+            "title": "Open Question Count"
+          },
+          "debate_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Debate Hash"
+          },
+          "origin_job_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Origin Job Id"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "stock_code",
+          "market",
+          "debate_engine_version",
+          "output_schema_version",
+          "prompt_version",
+          "evidence_snapshot_hash",
+          "request_hash",
+          "model_route_fingerprint",
+          "as_of",
+          "available_at",
+          "status",
+          "bull_argument_count",
+          "bear_argument_count",
+          "open_question_count",
+          "debate_hash",
+          "created_at"
+        ],
+        "title": "ResearchDebateSummary"
+      },
+      "ResearchDebateTurn": {
+        "properties": {
+          "turn_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Turn Hash"
+          },
+          "prompt_fingerprint": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Prompt Fingerprint"
+          },
+          "model_used": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Model Used"
+          },
+          "stance": {
+            "type": "string",
+            "enum": [
+              "bull",
+              "bear"
+            ],
+            "title": "Stance"
+          },
+          "summary": {
+            "type": "string",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Summary"
+          },
+          "arguments": {
+            "items": {
+              "$ref": "#/components/schemas/ResearchDebateArgument"
+            },
+            "type": "array",
+            "maxItems": 6,
+            "minItems": 1,
+            "title": "Arguments"
+          },
+          "open_questions": {
+            "items": {
+              "type": "string",
+              "maxLength": 500,
+              "minLength": 1
+            },
+            "type": "array",
+            "maxItems": 6,
+            "title": "Open Questions"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "turn_hash",
+          "prompt_fingerprint",
+          "model_used",
+          "stance",
+          "summary",
+          "arguments"
+        ],
+        "title": "ResearchDebateTurn"
       }
     },
     "securitySchemes": {

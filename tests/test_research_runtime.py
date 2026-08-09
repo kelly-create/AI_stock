@@ -17,6 +17,11 @@ from src.services.research.collector import (
 )
 from src.services.research.factor_policy_v1 import factor_policy_payload
 from src.services.research.evidence_collector import EvidenceCollector
+from src.services.research.debate_runner import (
+    DebateCompletionResult,
+    DebateTerminalError,
+    DebateTransientError,
+)
 from src.services.research.repositories import (
     LeaseFence,
     SnapshotWriteResult,
@@ -89,6 +94,11 @@ class _Repository:
         self.evidence_calls = []
         self.job_dataset = None
         self.evidence_records = []
+        self.debate_request_records = []
+        self.debate_turn_records = {}
+        self.debate_failure_records = {}
+        self.debate_records = []
+        self.debate_events = []
 
     def assert_live_lease(self, lease, *, now=None):
         self.lease_checks.append((lease, now))
@@ -124,6 +134,8 @@ class _Repository:
         }
         if snapshot.evidence_snapshot_hash is not None:
             payload["evidence_snapshot_hash"] = snapshot.evidence_snapshot_hash
+        if snapshot.debate_snapshot_hash is not None:
+            payload["debate_snapshot_hash"] = snapshot.debate_snapshot_hash
         content_hash = canonical_hash(payload)
         created = content_hash not in self._research_hashes
         self._research_hashes.add(content_hash)
@@ -203,6 +215,97 @@ class _Repository:
     def list_evidence(self, **_kwargs):
         return {"items": list(self.evidence_records), "next_cursor": None}
 
+    def write_debate_request(self, snapshot, *, lease, now=None):
+        request_hash = canonical_hash(
+            snapshot.canonical_payload,
+            exclude_volatile=False,
+        )
+        record = {
+            **snapshot.__dict__,
+            "debate_request": snapshot.canonical_payload,
+            "request_hash": request_hash,
+        }
+        if not self.debate_request_records:
+            self.debate_request_records.append(record)
+        self.debate_events.append(("request", request_hash, lease, now))
+        return SnapshotWriteResult(
+            50,
+            request_hash,
+            len(self.debate_request_records) == 1,
+        )
+
+    def get_job_debate_request(self, **_kwargs):
+        return (
+            self.debate_request_records[0]
+            if self.debate_request_records
+            else None
+        )
+
+    def get_debate_request(self, request_hash):
+        for record in self.debate_request_records:
+            if record["request_hash"] == request_hash:
+                return record
+        return None
+
+    def write_debate_turn(self, snapshot, *, lease, now=None):
+        turn_hash = canonical_hash(
+            snapshot.canonical_payload,
+            exclude_volatile=False,
+        )
+        record = {
+            **snapshot.__dict__,
+            "debate_turn": snapshot.canonical_payload,
+            "turn_hash": turn_hash,
+        }
+        self.debate_turn_records.setdefault(snapshot.stance, record)
+        self.debate_events.append((snapshot.stance, turn_hash, lease, now))
+        return SnapshotWriteResult(
+            60 + len(self.debate_turn_records),
+            turn_hash,
+            True,
+        )
+
+    def get_job_debate_turns(self, **_kwargs):
+        return dict(self.debate_turn_records)
+
+    def write_debate_failure(self, snapshot, *, lease, now=None):
+        record = {
+            **snapshot.__dict__,
+            "stance": snapshot.stance,
+            "error_code": snapshot.error_code,
+        }
+        self.debate_failure_records.setdefault(snapshot.stance, record)
+        self.debate_events.append(
+            (f"{snapshot.stance}_failure", snapshot.error_code, lease, now)
+        )
+
+    def get_job_debate_failures(self, **_kwargs):
+        return dict(self.debate_failure_records)
+
+    def write_debate_snapshot(self, snapshot, *, lease, now=None):
+        debate_hash = canonical_hash(
+            snapshot.canonical_payload,
+            exclude_volatile=False,
+        )
+        record = {
+            **snapshot.__dict__,
+            "debate": snapshot.canonical_payload,
+            "debate_hash": debate_hash,
+        }
+        if not self.debate_records:
+            self.debate_records.append(record)
+        self.debate_events.append(("snapshot", debate_hash, lease, now))
+        return SnapshotWriteResult(70, debate_hash, len(self.debate_records) == 1)
+
+    def list_debate_snapshots(self, **_kwargs):
+        return {"items": list(self.debate_records), "next_cursor": None}
+
+    def get_debate_snapshot(self, debate_hash):
+        for record in self.debate_records:
+            if record["debate_hash"] == debate_hash:
+                return record
+        return None
+
 
 class _HealthStore:
     def __init__(self, *, fail=False) -> None:
@@ -250,12 +353,14 @@ def _config(
     tushare=True,
     factors=True,
     evidence=False,
+    debate=False,
 ):
     return SimpleNamespace(
         personal_research_enabled=personal,
         tushare_research_enabled=tushare,
         research_factors_enabled=factors,
         research_evidence_enabled=evidence,
+        research_debate_enabled=debate,
         database_path=str(tmp_path / "data" / "stock_analysis.db"),
         tushare_token="test-token",
         tushare_global_calls_per_minute=450,
@@ -607,6 +712,239 @@ def test_live_evidence_advances_boundary_persists_once_and_retry_reuses(
     assert repository.research_calls[-1][0].evidence_snapshot_hash == (
         second.evidence_snapshot.evidence_hash
     )
+
+
+def _debate_output(prepared, stance):
+    claim = next(
+        item for item in prepared.evidence_snapshot.claims if item.citation_ids
+    )
+    return {
+        "stance": stance,
+        "summary": f"bounded {stance} summary",
+        "arguments": [
+            {
+                "id": f"{stance}-1",
+                "statement": f"bounded {stance} argument",
+                "claim_ids": [claim.id],
+                "citation_ids": [claim.citation_ids[0]],
+                "confidence": 0.6,
+                "limitations": ["Evidence remains bounded."],
+            }
+        ],
+        "open_questions": ["What would invalidate this interpretation?"],
+    }
+
+
+def _prepare_debate_fixture(tmp_path):
+    context = _Context()
+    repository = _Repository()
+    observed_at = AS_OF + timedelta(minutes=5)
+
+    def search(**_kwargs):
+        return {
+            "success": True,
+            "provider": "fixture-search",
+            "results": [
+                {
+                    "title": "Company publishes an operating update",
+                    "snippet": "The company reported bounded operating data.",
+                    "url": "https://example.com/news/600519?token=secret",
+                    "source": "example.com",
+                    "published_date": "2025-06-29",
+                }
+            ],
+        }
+
+    service = ResearchRuntimeService(
+        _config(tmp_path, evidence=True, debate=True),
+        collector=_Collector(_collection()),
+        repository=repository,
+        evidence_collector=EvidenceCollector(clock=lambda: observed_at),
+        durable_context_getter=lambda: context,
+    )
+    prepared = service.prepare(
+        "600519",
+        "A",
+        AS_OF,
+        reference_mode="live",
+        evidence_search=search,
+    )
+    assert prepared is not None
+    return service, prepared, repository
+
+
+def test_debate_freezes_request_before_two_calls_and_reuses_final_snapshot(
+    tmp_path,
+):
+    service, prepared, repository = _prepare_debate_fixture(tmp_path)
+    calls = []
+
+    def completion(request):
+        calls.append(
+            (
+                request.stance,
+                tuple(item[0] for item in repository.debate_events),
+                request.messages,
+            )
+        )
+        return DebateCompletionResult(
+            output=_debate_output(prepared, request.stance),
+            model_used="fixture-model",
+        )
+
+    debated = service.prepare_debate(
+        prepared,
+        completion=completion,
+        model_route=_route(channel="research-debate"),
+    )
+
+    assert [item[0] for item in calls] == ["bull", "bear"]
+    assert calls[0][1] == ("request",)
+    assert calls[1][1] == ("request", "bull")
+    assert all(len(item[2]) == 2 for item in calls)
+    assert [item[0] for item in repository.debate_events] == [
+        "request",
+        "bull",
+        "bear",
+        "snapshot",
+    ]
+    assert debated.debate_enabled is True
+    assert debated.debate_snapshot.status == "available"
+    assert debated.debate_context["debate_hash"] == (
+        debated.debate_snapshot.debate_hash
+    )
+    assert debated.debate_prompt_context.count(
+        "DSA_UNTRUSTED_EXTERNAL_DATA_BEGIN"
+    ) == 1
+
+    replay = service.prepare_debate(
+        prepared,
+        completion=lambda _request: pytest.fail("bound Debate must not rerun"),
+        model_route=_route(channel="research-debate", model="changed-model"),
+    )
+    assert replay.debate_snapshot.debate_hash == debated.debate_snapshot.debate_hash
+    assert len(repository.debate_events) == 4
+
+    frozen = _freeze(service, debated)
+    assert frozen.snapshot.snapshot_version == "research-snapshot-v3"
+    assert frozen.snapshot.field_dictionary_version == "research-fields-v3"
+    assert frozen.snapshot.debate_snapshot_hash == debated.debate_snapshot.debate_hash
+
+
+def test_debate_retry_reuses_persisted_bull_and_calls_only_missing_bear(tmp_path):
+    service, prepared, repository = _prepare_debate_fixture(tmp_path)
+    calls = []
+
+    def first_attempt(request):
+        calls.append(request.stance)
+        if request.stance == "bear":
+            raise DebateTransientError("rate_limited")
+        return DebateCompletionResult(
+            output=_debate_output(prepared, request.stance),
+            model_used="fixture-model",
+        )
+
+    with pytest.raises(DebateTransientError, match="rate_limited"):
+        service.prepare_debate(
+            prepared,
+            completion=first_attempt,
+            model_route=_route(channel="research-debate"),
+        )
+
+    assert calls == ["bull", "bear"]
+    assert tuple(repository.debate_turn_records) == ("bull",)
+    assert repository.debate_records == []
+
+    with pytest.raises(
+        ResearchRuntimeContractError,
+        match="differs from the current frozen contract",
+    ):
+        service.prepare_debate(
+            prepared,
+            completion=lambda _request: pytest.fail(
+                "route drift must fail before another Debate call"
+            ),
+            model_route=_route(
+                channel="research-debate",
+                model="changed-model",
+            ),
+        )
+    assert calls == ["bull", "bear"]
+
+    debated = service.prepare_debate(
+        prepared,
+        completion=lambda request: (
+            calls.append(request.stance)
+            or DebateCompletionResult(
+                output=_debate_output(prepared, request.stance),
+                model_used="fixture-model",
+            )
+        ),
+        model_route=_route(channel="research-debate"),
+    )
+
+    assert calls == ["bull", "bear", "bear"]
+    assert debated.debate_snapshot.status == "available"
+    assert len(repository.debate_request_records) == 1
+    assert len(repository.debate_turn_records) == 2
+    assert len(repository.debate_records) == 1
+
+
+def test_debate_retry_reuses_terminal_bull_and_calls_only_missing_bear(tmp_path):
+    service, prepared, repository = _prepare_debate_fixture(tmp_path)
+    calls = []
+
+    def first_attempt(request):
+        calls.append(request.stance)
+        if request.stance == "bull":
+            raise DebateTerminalError("content_rejected")
+        raise DebateTransientError("rate_limited")
+
+    with pytest.raises(DebateTransientError, match="rate_limited"):
+        service.prepare_debate(
+            prepared,
+            completion=first_attempt,
+            model_route=_route(channel="research-debate"),
+        )
+
+    assert calls == ["bull", "bear"]
+    assert tuple(repository.debate_failure_records) == ("bull",)
+    assert repository.debate_turn_records == {}
+    assert repository.debate_records == []
+
+    debated = service.prepare_debate(
+        prepared,
+        completion=lambda request: (
+            calls.append(request.stance)
+            or DebateCompletionResult(
+                output=_debate_output(prepared, request.stance),
+                model_used="fixture-model",
+            )
+        ),
+        model_route=_route(channel="research-debate"),
+    )
+
+    assert calls == ["bull", "bear", "bear"]
+    assert debated.debate_snapshot.status == "partial"
+    assert debated.debate_snapshot.failures[0].error_code == "content_rejected"
+    assert len(repository.debate_failure_records) == 1
+    assert tuple(repository.debate_turn_records) == ("bear",)
+    assert len(repository.debate_records) == 1
+
+
+def test_debate_flag_requires_evidence_before_any_collection(tmp_path):
+    context = _Context()
+    collector = _Collector(_collection())
+    service = ResearchRuntimeService(
+        _config(tmp_path, evidence=False, debate=True),
+        collector=collector,
+        repository=_Repository(),
+        durable_context_getter=lambda: context,
+    )
+
+    with pytest.raises(RuntimeError, match="RESEARCH_EVIDENCE_ENABLED"):
+        service.prepare("600519", "A", AS_OF, reference_mode="live")
+    assert collector.calls == []
 
 
 def test_evidence_search_stop_signal_preserves_durable_cancellation(tmp_path):

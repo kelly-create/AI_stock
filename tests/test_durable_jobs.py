@@ -93,6 +93,7 @@ def store(isolated_db, registry) -> DurableJobStore:
 def _request(
     stock_code: str,
     *,
+    job_type: str = "analysis",
     sequence: int = 0,
     task_id: str | None = None,
     priority: int = 0,
@@ -103,7 +104,7 @@ def _request(
     notify: bool = False,
 ) -> JobEnqueueRequest:
     return JobEnqueueRequest(
-        job_type="analysis",
+        job_type=job_type,
         payload={"stock_code": stock_code, "sequence": sequence},
         task_id=task_id,
         stock_code=stock_code,
@@ -434,11 +435,31 @@ def test_research_state_events_follow_parent_lifecycle_retention(
         event_retention_days=1,
         event_limit_per_job=2,
     )
-    store.enqueue(_request("active", task_id="active-research-job"), now=old)
+    registry.register(
+        "stock_analysis",
+        1,
+        DemoPayload,
+        lambda payload: payload.stock_code,
+    )
+    store.enqueue(
+        _request(
+            "600519",
+            task_id="active-research-job",
+            job_type="stock_analysis",
+        ),
+        now=old,
+    )
     first_lease = store.claim_next("worker-a", now=old)
     assert first_lease is not None
 
-    store.enqueue(_request("terminal", task_id="terminal-research-job"), now=old)
+    store.enqueue(
+        _request(
+            "600519",
+            task_id="terminal-research-job",
+            job_type="stock_analysis",
+        ),
+        now=old,
+    )
     terminal_lease = store.claim_next("terminal-worker", now=old + timedelta(seconds=1))
     assert terminal_lease is not None
     assert terminal_lease.task_id == "terminal-research-job"
@@ -469,6 +490,12 @@ def test_research_state_events_follow_parent_lifecycle_retention(
                     created_at=old,
                 ),
                 JobEventRecord(
+                    job_id="active-research-job",
+                    event_type="research_debate_request",
+                    payload_json='{"marker": "active-old-debate-request"}',
+                    created_at=old,
+                ),
+                JobEventRecord(
                     job_id="terminal-research-job",
                     event_type="research_reference_time",
                     payload_json='{"marker": "terminal-old-state"}',
@@ -478,6 +505,12 @@ def test_research_state_events_follow_parent_lifecycle_retention(
                     job_id="terminal-research-job",
                     event_type="research_evidence_snapshot",
                     payload_json='{"marker": "terminal-old-evidence"}',
+                    created_at=old,
+                ),
+                JobEventRecord(
+                    job_id="terminal-research-job",
+                    event_type="research_debate_request",
+                    payload_json='{"marker": "terminal-old-debate-request"}',
                     created_at=old,
                 ),
                 JobEventRecord(
@@ -493,6 +526,10 @@ def test_research_state_events_follow_parent_lifecycle_retention(
             "research_dataset_snapshot",
             "research_factor_snapshot",
             "research_evidence_snapshot",
+            "research_debate_request",
+            "research_debate_turn",
+            "research_debate_failure",
+            "research_debate_snapshot",
             "research_snapshot",
         ):
             payload_json = '{"marker": "fresh-state"}'
@@ -529,6 +566,10 @@ def test_research_state_events_follow_parent_lifecycle_retention(
         event.payload.get("marker") == "active-old-evidence"
         for event in events
     )
+    assert any(
+        event.payload.get("marker") == "active-old-debate-request"
+        for event in events
+    )
     assert all(event.payload.get("marker") != "ordinary-old" for event in events)
     assert {
         event.event_type
@@ -539,6 +580,10 @@ def test_research_state_events_follow_parent_lifecycle_retention(
         "research_dataset_snapshot",
         "research_factor_snapshot",
         "research_evidence_snapshot",
+        "research_debate_request",
+        "research_debate_turn",
+        "research_debate_failure",
+        "research_debate_snapshot",
         "research_snapshot",
     }
     assert len([event for event in events if event.event_type == "task_progress"]) == 2
@@ -546,7 +591,11 @@ def test_research_state_events_follow_parent_lifecycle_retention(
     terminal_events = store.read_events(job_id="terminal-research-job")
     assert all(
         event.payload.get("marker")
-        not in {"terminal-old-state", "terminal-old-evidence"}
+        not in {
+            "terminal-old-state",
+            "terminal-old-evidence",
+            "terminal-old-debate-request",
+        }
         for event in terminal_events
     )
 

@@ -83,6 +83,10 @@ _DURABLE_STATE_EVENT_TYPES = frozenset(
         "research_dataset_snapshot",
         "research_factor_snapshot",
         "research_evidence_snapshot",
+        "research_debate_request",
+        "research_debate_turn",
+        "research_debate_failure",
+        "research_debate_snapshot",
         "research_snapshot",
     }
 )

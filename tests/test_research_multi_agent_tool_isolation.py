@@ -107,6 +107,7 @@ def _decision_dashboard() -> str:
 
 
 def test_locked_multi_agent_rejects_hallucinated_tool_without_mutating_snapshot() -> None:
+    debate_sentinel = "DSA-MULTI-DEBATE-DECISION-ONLY"
     handler_calls: list[str] = []
 
     def _trap_get_stock_info(stock_code: str) -> dict[str, str]:
@@ -177,6 +178,7 @@ def test_locked_multi_agent_rejects_hallucinated_tool_without_mutating_snapshot(
         "stock_name": "Kweichow Moutai",
         "report_language": "en",
         "analysis_context_pack_summary": "FROZEN-CONTEXT-PACK-v1",
+        "research_debate_prompt_context": debate_sentinel,
         "daily_history": [{"date": "2026-08-07", "close": 1410.0}],
         "news_context": "FROZEN-NEWS-EVIDENCE",
     }
@@ -229,6 +231,19 @@ def test_locked_multi_agent_rejects_hallucinated_tool_without_mutating_snapshot(
     assert frozen_contract == frozen_contract_before_run
     assert context == context_before
 
+    technical_contract_text = "\n".join(
+        str(message.get("content", ""))
+        for message in technical_contract["messages"]
+    )
+    decision_contract_text = "\n".join(
+        str(message.get("content", ""))
+        for message in decision_contract["messages"]
+    )
+    assert technical_contract_text.count("FROZEN-CONTEXT-PACK-v1") == 1
+    assert technical_contract_text.count(debate_sentinel) == 0
+    assert decision_contract_text.count("FROZEN-CONTEXT-PACK-v1") == 1
+    assert decision_contract_text.count(debate_sentinel) == 1
+
     first_technical_messages = adapter.calls[0]["messages"]
     second_technical_messages = adapter.calls[1]["messages"]
     decision_messages = adapter.calls[2]["messages"]
@@ -244,6 +259,14 @@ def test_locked_multi_agent_rejects_hallucinated_tool_without_mutating_snapshot(
     assert "FROZEN-CONTEXT-PACK-v1" in "\n".join(
         str(message.get("content", "")) for message in decision_messages
     )
+    assert all(
+        debate_sentinel
+        not in "\n".join(str(message.get("content", "")) for message in messages)
+        for messages in (first_technical_messages, second_technical_messages)
+    )
+    assert "\n".join(
+        str(message.get("content", "")) for message in decision_messages
+    ).count(debate_sentinel) == 1
     assert all(memory.enabled is False for memory in memories)
 
 

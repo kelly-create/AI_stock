@@ -115,6 +115,48 @@ curl -fsS --get "$API_BASE/api/v1/research/evidence" \
 
 回滚只需先设置 `RESEARCH_EVIDENCE_ENABLED=false`，再重建 Worker、Analyzer 与 Server；不要删除或降级 Evidence 表，也不要清理已有 JobEvent / hash 绑定。关闭开关后用同一只读请求确认历史仍可查询，再按相反顺序关闭其它个人投研开关。
 
+### 3.5 PR4 Bounded Research Debate（按需启用）
+
+先应用追加式迁移，并保持 PR3 的完整依赖链开启，再启用 Debate：
+
+```bash
+python -m src.migrations --apply
+# .env
+PERSONAL_RESEARCH_ENABLED=true
+DURABLE_JOBS_ENABLED=true
+TUSHARE_RESEARCH_ENABLED=true
+RESEARCH_FACTORS_ENABLED=true
+RESEARCH_EVIDENCE_ENABLED=true
+RESEARCH_DEBATE_ENABLED=true
+
+docker compose -f ./docker/docker-compose.yml --profile durable up -d --force-recreate worker
+docker compose -f ./docker/docker-compose.yml up -d --force-recreate analyzer server
+```
+
+有可引用 Evidence 时，Worker 从同一份冻结 Evidence 分别执行 Bull、Bear 两个独立、纯文本且有界的高层 completion；每次 durable attempt 对每个尚未解析的 stance 至多发起一次，已经持久化的成功或终止失败 stance 不会重调。provider 返回到检查点提交之间的崩溃窗口可能让尚未持久化的 stance 在 retry 中再次调用，因此这里不承诺整个 job 生命周期的物理请求 exactly-once。没有可引用 Evidence 时不调用模型。Debate 不调用工具、网络或记忆，不抓取新资料，也不生成 arbiter、thesis、交易动作、目标价或仓位建议。每侧最多 6 条 argument 和 6 条 open question；argument 只能引用冻结 Evidence 中已有的 claim/citation ID，不能把模型解释提升为新证据。一个 stance 的终止失败可形成 `partial`，两侧均失败形成 `generation_failed`；瞬时失败交回 durable retry，已经持久化且重新校验通过的 turn 可在 lease reclaim 后复用，避免重复调用。
+
+不可变 request、turn、snapshot 分别写入 `research_debate_requests`、`research_debate_turns`、`research_debate_snapshots`。所有写入与 JobEvent 绑定都受当前 durable lease 和取消状态 fence；失效或已取消 lease 不能提交产物。成功 stance 用 `research_debate_turn` 绑定，终止失败 stance 用仅含安全错误码的 `research_debate_failure` 绑定；重试只补未解析 stance，且 prompt/route 漂移会 fail closed。`research_debate_snapshot` JobEvent 记录实际消费任务，`research_snapshots.debate_snapshot_hash` 固定本轮 Debate，并同时保留 `evidence_snapshot_hash` lineage。request 的精确 messages 只属于持久化执行记录，任何 Debate API 都不得返回。
+
+只读接口不依赖 `RESEARCH_DEBATE_ENABLED`，所以关闭写入开关后历史仍可读：
+
+- `GET /api/v1/research/debates`：至少提供 `job_id`、`research_snapshot_hash`、`stock_code` 之一；可选 `evidence_snapshot_hash`、带 UTC offset 的 `as_of`、opaque `cursor` 和 `limit`（默认 20、最大 100）。结果按 `as_of DESC, id DESC` 稳定分页，只返回 status、argument/open-question count、hash 与 lineage 摘要，不返回完整 Debate。
+- `GET /api/v1/research/debates/{debate_hash}`：按 64 位小写 SHA-256 返回严格 typed 的 bounded payload；包含 Bull/Bear turn、失败码和限制，但不包含 request messages。
+
+Web Run Flow 的“研究辩论”位于“研究证据”下方，默认折叠，只在当前来源是 Task 且用户展开时加载分页摘要，再按 hash 懒加载详情。列表、详情和加载更多均可重试；切换 Task 会丢弃旧请求结果。所有模型文本按纯文本渲染，不生成可点击链接或执行 HTML。
+
+可用一个已完成的 durable task 验证列表和详情；启用管理员认证时给 `curl` 补充有效 session Cookie：
+
+```bash
+API_BASE="${API_BASE:-http://127.0.0.1:8000}"
+TASK_ID="replace-with-completed-task-id"
+curl -fsS --get "$API_BASE/api/v1/research/debates" \
+  --data-urlencode "job_id=$TASK_ID" \
+  --data-urlencode "limit=20"
+curl -fsS "$API_BASE/api/v1/research/debates/replace-with-64-char-lowercase-hash"
+```
+
+回滚时先设置 `RESEARCH_DEBATE_ENABLED=false`，再重建 Worker、Analyzer 与 Server。不要删除或降级三张 Debate 表，也不要清理 request/turn/snapshot、JobEvent 或 Research Snapshot hash 绑定；用相同只读请求确认历史仍可查询后，再按相反顺序关闭上游开关。
+
 ### 4. 常用管理命令
 
 ```bash

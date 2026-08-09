@@ -209,6 +209,45 @@ def test_research_evidence_block_is_additive_and_not_quality_weighted() -> None:
     assert enriched.data_quality == legacy.data_quality
 
 
+def test_research_debate_block_exposes_only_metadata_and_is_not_quality_weighted() -> None:
+    legacy = AnalysisContextBuilder.build(_artifacts())
+    enriched = AnalysisContextBuilder.build(
+        _artifacts(
+            research_debate_context={
+                "status": "partial",
+                "available_at": "2026-05-24T15:00:00Z",
+                "debate_hash": "f" * 64,
+                "bull_argument_count": 2,
+                "bear_argument_count": 0,
+                "open_question_count": 1,
+                "failed_stances": [
+                    {"stance": "bear", "error_code": "invalid_debate_output"}
+                ],
+                "turns": [
+                    {
+                        "stance": "bull",
+                        "summary": "must not be copied into the context pack",
+                    }
+                ],
+            }
+        )
+    )
+
+    block = enriched.blocks["research_debate"]
+    assert block.status == ContextFieldStatus.PARTIAL
+    assert block.items["debate_hash"].value == "f" * 64
+    assert block.items["bull_argument_count"].value == 2
+    assert block.items["bear_argument_count"].value == 0
+    assert block.items["open_question_count"].value == 1
+    assert block.items["failed_stances"].value == [
+        {"stance": "bear", "error_code": "invalid_debate_output"}
+    ]
+    assert "turns" not in block.items
+    assert "summary" not in str(block.model_dump(mode="json"))
+    assert block.metadata == {"auxiliary": True, "quality_weighted": False}
+    assert enriched.data_quality == legacy.data_quality
+
+
 @pytest.mark.parametrize(
     ("research_status", "pack_status", "missing_reason"),
     [

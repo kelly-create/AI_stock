@@ -85,6 +85,35 @@ def test_build_is_deterministic_and_projects_repository_contract() -> None:
     assert canonical_hash(first.canonical_payload, exclude_volatile=False) == first.evidence_hash
 
 
+@pytest.mark.parametrize(
+    "version_field",
+    ("evidence_engine_version", "claim_policy_version"),
+)
+def test_public_evidence_versions_reject_secret_like_identifiers(
+    version_field: str,
+) -> None:
+    kwargs = {version_field: "password:supersecret"}
+    with pytest.raises(ValueError, match="secret-like"):
+        build_evidence_snapshot(_build_input(), **kwargs)
+
+
+@pytest.mark.parametrize(
+    "identifier",
+    (
+        "sk-abcdefghijklmnopqrstuvwxyz123456",
+        "password:supersecret",
+    ),
+)
+def test_evidence_graph_ids_are_public_safe(identifier: str) -> None:
+    build_input = _build_input()
+    with pytest.raises(ValueError, match="secret-like"):
+        replace(build_input.citations[0], id=identifier)
+    with pytest.raises(ValueError, match="secret-like"):
+        replace(build_input.claims[0], id=identifier)
+    with pytest.raises(ValueError, match="secret-like"):
+        replace(build_input.claims[0], citation_ids=(identifier,))
+
+
 def test_factor_claims_reference_real_pointer_value_hashes() -> None:
     build_input = _build_input()
     factor_artifact = next(item for item in build_input.artifacts if item.artifact_type == "factor")

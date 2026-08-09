@@ -45,6 +45,9 @@ DEFAULT_BACKUP_CORE_TABLES = DEFAULT_CORE_TABLES + (
     "research_dataset_snapshots",
     "research_factor_snapshots",
     "research_evidence_snapshots",
+    "research_debate_requests",
+    "research_debate_turns",
+    "research_debate_snapshots",
     "research_snapshots",
 )
 

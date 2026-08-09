@@ -8,11 +8,9 @@ from datetime import date, datetime, timedelta, timezone
 import re
 import threading
 from types import MappingProxyType
-import json
 from typing import Any, Callable, Literal, Mapping, Optional, Protocol, Sequence
 
 import pandas as pd
-from sqlalchemy import func, or_, select
 
 from data_provider.tushare_provider import (
     TushareApiError,
@@ -26,7 +24,6 @@ from data_provider.tushare_provider import (
     TushareTransportError,
 )
 from src.services.durable_jobs import StaleLeaseError
-from src.storage import AnalysisJobRecord, JobEventRecord, ResearchDatasetSnapshotRecord
 
 from .availability import (
     DATASET_DEFINITIONS,
@@ -1081,34 +1078,68 @@ class ResearchDatasetCollector:
                 _touch_cyq_key_locked(cache_key)
             if in_process is not None and in_process > cutoff:
                 in_process = None
+            cached_results = [*_CYQ_RESULT_CHUNKS.get(cache_key, ())]
+            latest = _CYQ_LATEST_RESULTS.get(cache_key)
+            if latest is not None:
+                cached_results.append(latest)
+        cached_hashes = {
+            item.snapshot.content_hash
+            for item in cached_results
+            if item.snapshot is not None
+            and item.trade_date is not None
+            and item.trade_date <= cutoff
+            and item.available_at <= boundary
+            and item.data_as_of <= boundary
+            and item.status
+            in {
+                DatasetStatus.AVAILABLE.value,
+                DatasetStatus.PARTIAL.value,
+                DatasetStatus.STALE.value,
+            }
+        }
         persisted: Optional[date] = None
         if self._last_trade_date_resolver is not None:
             persisted = self._last_trade_date_resolver(dataset, scope_value, cutoff)
             if persisted is not None and persisted > cutoff:
                 persisted = None
         else:
-            db = getattr(self.repository, "db", None)
-            if db is not None:
-                with db.get_session() as session:
-                    persisted = session.scalar(
-                        select(func.max(ResearchDatasetSnapshotRecord.trade_date)).where(
-                            ResearchDatasetSnapshotRecord.dataset == dataset,
-                            ResearchDatasetSnapshotRecord.scope_type == "stock",
-                            ResearchDatasetSnapshotRecord.scope_value == scope_value,
-                            ResearchDatasetSnapshotRecord.trade_date <= cutoff,
-                            ResearchDatasetSnapshotRecord.available_at
-                            <= boundary.replace(tzinfo=None),
-                            ResearchDatasetSnapshotRecord.data_as_of
-                            <= boundary.replace(tzinfo=None),
-                            ResearchDatasetSnapshotRecord.status.in_(
-                                {
-                                    DatasetStatus.AVAILABLE.value,
-                                    DatasetStatus.PARTIAL.value,
-                                    DatasetStatus.STALE.value,
-                                }
-                            ),
-                        )
-                    )
+            checkpoints = self._load_dataset_checkpoints(
+                dataset=dataset,
+                scope_value=scope_value,
+                boundary=boundary,
+                trade_date_to=cutoff,
+                statuses=(
+                    DatasetStatus.AVAILABLE.value,
+                    DatasetStatus.PARTIAL.value,
+                    DatasetStatus.STALE.value,
+                ),
+            )
+            persisted_hashes = {
+                item.snapshot.content_hash
+                for item in checkpoints
+                if item.snapshot is not None
+            }
+            missing_cached_hashes = cached_hashes.difference(persisted_hashes)
+            if missing_cached_hashes:
+                raise ValueError(
+                    "cached incremental Dataset checkpoint is missing from "
+                    "durable storage"
+                )
+            persisted = max(
+                (
+                    item.trade_date
+                    for item in checkpoints
+                    if item.trade_date is not None
+                ),
+                default=None,
+            )
+            if (
+                in_process is not None
+                and (persisted is None or persisted < in_process)
+            ):
+                raise ValueError(
+                    "cached Dataset high-watermark is not backed by durable storage"
+                )
         candidates = [value for value in (in_process, persisted) if value is not None]
         return max(candidates) if candidates else None
 
@@ -1170,27 +1201,7 @@ class ResearchDatasetCollector:
     def _assert_live_lease_after_wait(self, lease: LeaseFence) -> None:
         """Fence a caller again after waiting on another caller's transport."""
 
-        db = getattr(self.repository, "db", None)
-        if db is None:
-            return
-        with db.get_session() as session:
-            now = _utc_now().replace(tzinfo=None)
-            live_job = session.execute(
-                select(AnalysisJobRecord.task_id).where(
-                    AnalysisJobRecord.task_id == lease.job_id,
-                    AnalysisJobRecord.status == "processing",
-                    AnalysisJobRecord.cancel_requested_at.is_(None),
-                    AnalysisJobRecord.lease_owner == lease.worker_id,
-                    AnalysisJobRecord.lease_token == lease.lease_token,
-                    AnalysisJobRecord.lease_expires_at.is_not(None),
-                    AnalysisJobRecord.lease_expires_at > now,
-                )
-            ).scalar_one_or_none()
-        if live_job is None:
-            raise StaleLeaseError(
-                f"research dataset persistence rejected after wait for stale job "
-                f"{lease.job_id!r}"
-            )
+        self.repository.assert_live_lease(lease)
 
     def _bind_existing_incremental_result(
         self,
@@ -1274,50 +1285,12 @@ class ResearchDatasetCollector:
             cached_chunks = _CYQ_RESULT_CHUNKS.get(cache_key)
             if cached_chunks is not None:
                 _touch_cyq_key_locked(cache_key)
-            chunks = list(cached_chunks or ())
-        known_hashes = {
+            cached = list(cached_chunks or ())
+        cached_hashes = {
             item.snapshot.content_hash
-            for item in chunks
+            for item in cached
             if item.snapshot is not None
-        }
-        db = getattr(self.repository, "db", None)
-        if db is not None:
-            boundary_naive = normalize_as_of(boundary).replace(tzinfo=None)
-            with db.get_session() as session:
-                rows = session.execute(
-                    select(ResearchDatasetSnapshotRecord)
-                    .where(
-                        ResearchDatasetSnapshotRecord.dataset == definition.name,
-                        ResearchDatasetSnapshotRecord.scope_type == "stock",
-                        ResearchDatasetSnapshotRecord.scope_value == scope_value,
-                        ResearchDatasetSnapshotRecord.trade_date.is_not(None),
-                        ResearchDatasetSnapshotRecord.trade_date >= start_date,
-                        ResearchDatasetSnapshotRecord.trade_date <= cutoff,
-                        ResearchDatasetSnapshotRecord.available_at <= boundary_naive,
-                        ResearchDatasetSnapshotRecord.data_as_of <= boundary_naive,
-                        ResearchDatasetSnapshotRecord.status.in_(
-                            {
-                                DatasetStatus.AVAILABLE.value,
-                                DatasetStatus.PARTIAL.value,
-                                DatasetStatus.STALE.value,
-                            }
-                        ),
-                    )
-                    .order_by(
-                        ResearchDatasetSnapshotRecord.trade_date.asc(),
-                        ResearchDatasetSnapshotRecord.id.asc(),
-                    )
-                ).scalars().all()
-                for row in rows:
-                    if row.content_hash not in known_hashes:
-                        chunks.append(self._hydrate_snapshot_row(row, reused=True))
-                        known_hashes.add(row.content_hash)
-        if current.snapshot is not None and current.snapshot.content_hash not in known_hashes:
-            chunks.append(current)
-        return [
-            item
-            for item in chunks
-            if item.trade_date is not None
+            and item.trade_date is not None
             and start_date <= item.trade_date <= cutoff
             and item.available_at <= boundary
             and item.data_as_of <= boundary
@@ -1327,7 +1300,45 @@ class ResearchDatasetCollector:
                 DatasetStatus.PARTIAL.value,
                 DatasetStatus.STALE.value,
             }
-        ]
+        }
+        chunks = self._load_dataset_checkpoints(
+            dataset=definition.name,
+            scope_value=scope_value,
+            boundary=boundary,
+            trade_date_from=start_date,
+            trade_date_to=cutoff,
+            statuses=(
+                DatasetStatus.AVAILABLE.value,
+                DatasetStatus.PARTIAL.value,
+                DatasetStatus.STALE.value,
+            ),
+        )
+        durable_hashes = {
+            item.snapshot.content_hash
+            for item in chunks
+            if item.snapshot is not None
+        }
+        if cached_hashes.difference(durable_hashes):
+            raise ValueError(
+                "cached incremental Dataset checkpoint is missing from "
+                "durable storage"
+            )
+        if (
+            current.snapshot is not None
+            and current.trade_date is not None
+            and start_date <= current.trade_date <= cutoff
+            and current.status
+            in {
+                DatasetStatus.AVAILABLE.value,
+                DatasetStatus.PARTIAL.value,
+                DatasetStatus.STALE.value,
+            }
+            and current.snapshot.content_hash not in durable_hashes
+        ):
+            raise ValueError(
+                "current incremental Dataset result is missing from durable storage"
+            )
+        return chunks
 
     def _merge_incremental_window(
         self,
@@ -1411,50 +1422,199 @@ class ResearchDatasetCollector:
         return value.astimezone(timezone.utc)
 
     @classmethod
-    def _hydrate_snapshot_row(
+    def _checkpoint_datetime(cls, value: Any, field_name: str) -> datetime:
+        if isinstance(value, datetime):
+            return cls._aware_utc(value)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"verified Dataset {field_name} is invalid")
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(
+                f"verified Dataset {field_name} is invalid"
+            ) from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError(f"verified Dataset {field_name} must include an offset")
+        return cls._aware_utc(parsed)
+
+    @staticmethod
+    def _checkpoint_date(value: Any, field_name: str) -> Optional[date]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            raise ValueError(f"verified Dataset {field_name} is invalid")
+        if isinstance(value, date):
+            return value
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"verified Dataset {field_name} is invalid")
+        try:
+            return date.fromisoformat(value.strip())
+        except ValueError as exc:
+            raise ValueError(
+                f"verified Dataset {field_name} is invalid"
+            ) from exc
+
+    @classmethod
+    def _hydrate_snapshot_payload(
         cls,
-        row: ResearchDatasetSnapshotRecord,
+        payload: Mapping[str, Any],
         *,
         reused: bool,
     ) -> DatasetCollectionResult:
-        normalized_payload = (
-            json.loads(row.normalized_json) if row.normalized_json is not None else None
-        )
+        dataset = payload.get("dataset")
+        status = payload.get("status")
+        record_id = payload.get("id")
+        content_hash = payload.get("content_hash")
+        if not isinstance(dataset, str) or not dataset.strip():
+            raise ValueError("verified Dataset name is invalid")
+        if status not in {item.value for item in DatasetStatus}:
+            raise ValueError("verified Dataset status is invalid")
+        if isinstance(record_id, bool) or not isinstance(record_id, int) or record_id <= 0:
+            raise ValueError("verified Dataset id is invalid")
+        if (
+            not isinstance(content_hash, str)
+            or re.fullmatch(r"[0-9a-f]{64}", content_hash) is None
+        ):
+            raise ValueError("verified Dataset content_hash is invalid")
+
+        normalized_payload = payload.get("normalized")
         if isinstance(normalized_payload, list):
+            if any(not isinstance(item, Mapping) for item in normalized_payload):
+                raise ValueError("verified Dataset normalized rows are invalid")
             normalized_rows = tuple(
-                MappingProxyType(dict(item))
-                for item in normalized_payload
-                if isinstance(item, Mapping)
+                MappingProxyType(dict(item)) for item in normalized_payload
             )
         elif isinstance(normalized_payload, Mapping):
             normalized_rows = (MappingProxyType(dict(normalized_payload)),)
-        else:
+        elif normalized_payload is None and status not in {
+            DatasetStatus.AVAILABLE.value,
+            DatasetStatus.EMPTY.value,
+            DatasetStatus.PARTIAL.value,
+            DatasetStatus.STALE.value,
+        }:
             normalized_rows = ()
-        raw_payload = json.loads(row.raw_ref_json) if row.raw_ref_json else None
-        raw_ref = raw_payload if isinstance(raw_payload, Mapping) else None
+        else:
+            raise ValueError("verified Dataset normalized payload is invalid")
+
+        raw_payload = payload.get("raw_ref")
+        if raw_payload is not None and not isinstance(raw_payload, Mapping):
+            raise ValueError("verified Dataset raw_ref is invalid")
+        raw_ref = (
+            MappingProxyType(dict(raw_payload))
+            if isinstance(raw_payload, Mapping)
+            else None
+        )
+        retryable = payload.get(
+            "binding_retryable",
+            payload.get("retryable", False),
+        )
+        if not isinstance(retryable, bool):
+            raise ValueError("verified Dataset retryable flag is invalid")
+        error_code = payload.get("error_code")
+        error_message = payload.get("error_message")
+        if error_code is not None and not isinstance(error_code, str):
+            raise ValueError("verified Dataset error_code is invalid")
+        if error_message is not None and not isinstance(error_message, str):
+            raise ValueError("verified Dataset error_message is invalid")
         return DatasetCollectionResult(
-            dataset=row.dataset,
-            status=row.status,
+            dataset=dataset,
+            status=status,
             row_count=len(normalized_rows),
             snapshot=SnapshotWriteResult(
-                int(row.id),
-                str(row.content_hash),
+                record_id,
+                content_hash,
                 False,
             ),
             query_params=MappingProxyType({}),
             normalized_rows=normalized_rows,
-            available_at=cls._aware_utc(row.available_at),
-            data_as_of=cls._aware_utc(row.data_as_of),
-            trade_date=row.trade_date,
-            report_date=row.report_date,
-            announcement_date=row.announcement_date,
+            available_at=cls._checkpoint_datetime(
+                payload.get("available_at"), "available_at"
+            ),
+            data_as_of=cls._checkpoint_datetime(
+                payload.get("data_as_of"), "data_as_of"
+            ),
+            trade_date=cls._checkpoint_date(
+                payload.get("trade_date"), "trade_date"
+            ),
+            report_date=cls._checkpoint_date(
+                payload.get("report_date"), "report_date"
+            ),
+            announcement_date=cls._checkpoint_date(
+                payload.get("announcement_date"), "announcement_date"
+            ),
             raw_ref=raw_ref,
-            error_code=row.error_code,
-            error_message_sanitized=row.error_message_sanitized,
+            error_code=error_code,
+            error_message_sanitized=error_message,
+            retryable=retryable,
             skipped=reused,
             reused=reused,
-            source_snapshot_hashes=(str(row.content_hash),),
+            source_snapshot_hashes=(content_hash,),
         )
+
+    def _load_dataset_checkpoints(
+        self,
+        *,
+        dataset: str,
+        scope_value: str,
+        boundary: datetime,
+        trade_date_from: Optional[date] = None,
+        trade_date_to: Optional[date] = None,
+        statuses: Optional[Sequence[str]] = None,
+    ) -> list[DatasetCollectionResult]:
+        """Hydrate only repository-verified rows; never trust ORM/cache state."""
+
+        rows = self.repository.list_dataset_checkpoints(
+            scope_value=scope_value,
+            dataset=dataset,
+            as_of=boundary,
+            trade_date_from=trade_date_from,
+            trade_date_to=trade_date_to,
+            statuses=statuses,
+        )
+        results: list[DatasetCollectionResult] = []
+        allowed_statuses = set(statuses) if statuses is not None else None
+        boundary_value = normalize_as_of(boundary)
+        for row in rows:
+            if not isinstance(row, Mapping):
+                raise ValueError("verified Dataset checkpoint must be an object")
+            if (
+                row.get("dataset") != dataset
+                or row.get("scope_type") != "stock"
+                or row.get("scope_value") != scope_value
+            ):
+                raise ValueError(
+                    "verified Dataset checkpoint conflicts with requested scope"
+                )
+            result = self._hydrate_snapshot_payload(row, reused=True)
+            if result.available_at > boundary_value or result.data_as_of > boundary_value:
+                raise ValueError("verified Dataset checkpoint is after cutoff")
+            if dataset == "stock_basic":
+                observed_at = self._checkpoint_datetime(
+                    row.get("observed_at"), "observed_at"
+                )
+                if observed_at > boundary_value:
+                    raise ValueError(
+                        "verified stock_basic checkpoint was observed after cutoff"
+                    )
+            if allowed_statuses is not None and result.status not in allowed_statuses:
+                raise ValueError("verified Dataset checkpoint has unexpected status")
+            if trade_date_from is not None and (
+                result.trade_date is None or result.trade_date < trade_date_from
+            ):
+                raise ValueError("verified Dataset checkpoint is before requested window")
+            if trade_date_to is not None and (
+                result.trade_date is None or result.trade_date > trade_date_to
+            ):
+                raise ValueError("verified Dataset checkpoint is after requested window")
+            results.append(result)
+        results.sort(
+            key=lambda item: (
+                item.trade_date or date.min,
+                item.available_at,
+                item.snapshot.record_id if item.snapshot is not None else 0,
+            )
+        )
+        return results
 
     def _remember_terminal_result(
         self,
@@ -1488,97 +1648,42 @@ class ResearchDatasetCollector:
             cached = _JOB_DATASET_RESULTS.get(cache_key)
             if cached is not None:
                 _JOB_DATASET_RESULTS.move_to_end(cache_key)
-        if cached is not None:
-            self._assert_live_lease_after_wait(lease)
-            return replace(cached, skipped=True, reused=True)
-
-        db = getattr(self.repository, "db", None)
-        if db is None:
+        self._assert_live_lease_after_wait(lease)
+        row = self.repository.get_job_dataset(
+            job_id=lease.job_id,
+            dataset=dataset,
+            scope_value=scope_value,
+            as_of=boundary,
+            terminal_only=True,
+        )
+        if row is None:
+            if cached is not None:
+                raise ValueError(
+                    "cached terminal Dataset checkpoint lost its durable binding"
+                )
             return None
-        selected_hash: Optional[str] = None
-        with db.get_session() as session:
-            current = _utc_now().replace(tzinfo=None)
-            live_job = session.execute(
-                select(AnalysisJobRecord.task_id).where(
-                    AnalysisJobRecord.task_id == lease.job_id,
-                    AnalysisJobRecord.status == "processing",
-                    AnalysisJobRecord.cancel_requested_at.is_(None),
-                    AnalysisJobRecord.lease_owner == lease.worker_id,
-                    AnalysisJobRecord.lease_token == lease.lease_token,
-                    AnalysisJobRecord.lease_expires_at > current,
-                )
-            ).scalar_one_or_none()
-            if live_job is None:
-                raise StaleLeaseError(
-                    f"research dataset resume rejected for stale job {lease.job_id!r}"
-                )
-            payload_json = session.execute(
-                select(JobEventRecord.payload_json)
-                .where(
-                    JobEventRecord.job_id == lease.job_id,
-                    JobEventRecord.event_type == "research_dataset_snapshot",
-                    func.json_extract(
-                        JobEventRecord.payload_json,
-                        "$.dataset",
-                    )
-                    == dataset,
-                    func.json_extract(
-                        JobEventRecord.payload_json,
-                        "$.scope_type",
-                    )
-                    == "stock",
-                    func.json_extract(
-                        JobEventRecord.payload_json,
-                        "$.scope_value",
-                    )
-                    == scope_value,
-                    func.json_extract(
-                        JobEventRecord.payload_json,
-                        "$.knowledge_as_of",
-                    )
-                    == boundary_key,
-                )
-                .where(
-                    or_(
-                        func.json_extract(
-                            JobEventRecord.payload_json,
-                            "$.status",
-                        )
-                        != DatasetStatus.FETCH_FAILED.value,
-                        func.coalesce(
-                            func.json_extract(
-                                JobEventRecord.payload_json,
-                                "$.retryable",
-                            ),
-                            0,
-                        )
-                        == 0,
-                    )
-                )
-                .order_by(JobEventRecord.id.desc())
-                .limit(1)
-            ).scalar_one_or_none()
-            if payload_json is not None:
-                try:
-                    payload = json.loads(payload_json)
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    payload = None
-                if isinstance(payload, Mapping):
-                    selected_hash = str(payload.get("content_hash") or "")
-            if not selected_hash:
-                return None
-            row = session.execute(
-                select(ResearchDatasetSnapshotRecord).where(
-                    ResearchDatasetSnapshotRecord.content_hash == selected_hash,
-                    ResearchDatasetSnapshotRecord.available_at
-                    <= normalize_as_of(boundary).replace(tzinfo=None),
-                    ResearchDatasetSnapshotRecord.data_as_of
-                    <= normalize_as_of(boundary).replace(tzinfo=None),
-                )
-            ).scalar_one_or_none()
-            if row is None:
-                return None
-            result = self._hydrate_snapshot_row(row, reused=True)
+        if not isinstance(row, Mapping):
+            raise ValueError("verified job Dataset checkpoint must be an object")
+        if (
+            row.get("dataset") != dataset
+            or row.get("scope_type") != "stock"
+            or row.get("scope_value") != scope_value
+        ):
+            raise ValueError("verified job Dataset checkpoint conflicts with scope")
+        result = self._hydrate_snapshot_payload(row, reused=True)
+        if result.retryable:
+            raise ValueError("terminal Dataset checkpoint cannot be retryable")
+        if result.available_at > boundary or result.data_as_of > boundary:
+            raise ValueError("verified job Dataset checkpoint is after cutoff")
+        if (
+            cached is not None
+            and cached.snapshot is not None
+            and result.snapshot is not None
+            and cached.snapshot.content_hash != result.snapshot.content_hash
+        ):
+            raise ValueError(
+                "cached terminal Dataset checkpoint conflicts with durable binding"
+            )
         with _CYQ_STATE_LOCK:
             _remember_job_result_locked(cache_key, result)
         return result
@@ -1595,50 +1700,48 @@ class ResearchDatasetCollector:
             cached = _CYQ_LATEST_RESULTS.get(cache_key)
             if cached is not None:
                 _touch_cyq_key_locked(cache_key)
-        if (
+        cached_is_visible = (
             cached is not None
             and cached.trade_date is not None
             and cached.trade_date <= as_of_trade_date(boundary_value)
             and cached.available_at <= boundary_value
             and cached.data_as_of <= boundary_value
+        )
+        checkpoints = self._load_dataset_checkpoints(
+            dataset=dataset,
+            scope_value=scope_value,
+            boundary=boundary_value,
+            trade_date_to=as_of_trade_date(boundary_value),
+            statuses=(
+                DatasetStatus.AVAILABLE.value,
+                DatasetStatus.PARTIAL.value,
+                DatasetStatus.STALE.value,
+            ),
+        )
+        durable_hashes = {
+            item.snapshot.content_hash
+            for item in checkpoints
+            if item.snapshot is not None
+        }
+        if (
+            cached_is_visible
+            and cached is not None
+            and cached.snapshot is not None
+            and cached.snapshot.content_hash not in durable_hashes
         ):
-            return cached
-
-        db = getattr(self.repository, "db", None)
-        if db is None:
+            raise ValueError(
+                "cached latest Dataset checkpoint is missing from durable storage"
+            )
+        if not checkpoints:
             return None
-        with db.get_session() as session:
-            row = session.execute(
-                select(ResearchDatasetSnapshotRecord)
-                .where(
-                    ResearchDatasetSnapshotRecord.dataset == dataset,
-                    ResearchDatasetSnapshotRecord.scope_type == "stock",
-                    ResearchDatasetSnapshotRecord.scope_value == scope_value,
-                    ResearchDatasetSnapshotRecord.trade_date.is_not(None),
-                    ResearchDatasetSnapshotRecord.trade_date
-                    <= as_of_trade_date(boundary_value),
-                    ResearchDatasetSnapshotRecord.available_at
-                    <= boundary_value.replace(tzinfo=None),
-                    ResearchDatasetSnapshotRecord.data_as_of
-                    <= boundary_value.replace(tzinfo=None),
-                    ResearchDatasetSnapshotRecord.status.in_(
-                        {
-                            DatasetStatus.AVAILABLE.value,
-                            DatasetStatus.PARTIAL.value,
-                            DatasetStatus.STALE.value,
-                        }
-                    ),
-                )
-                .order_by(
-                    ResearchDatasetSnapshotRecord.trade_date.desc(),
-                    ResearchDatasetSnapshotRecord.available_at.desc(),
-                    ResearchDatasetSnapshotRecord.id.desc(),
-                )
-                .limit(1)
-            ).scalar_one_or_none()
-            if row is None:
-                return None
-            result = self._hydrate_snapshot_row(row, reused=True)
+        result = max(
+            checkpoints,
+            key=lambda item: (
+                item.trade_date or date.min,
+                item.available_at,
+                item.snapshot.record_id if item.snapshot is not None else 0,
+            ),
+        )
         with _CYQ_STATE_LOCK:
             _remember_cyq_latest_locked((dataset, scope_value), result)
         return result
@@ -1651,34 +1754,25 @@ class ResearchDatasetCollector:
     ) -> Optional[DatasetCollectionResult]:
         """Read an observation that was genuinely known by a historical cutoff."""
 
-        db = getattr(self.repository, "db", None)
-        if db is None:
+        checkpoints = self._load_dataset_checkpoints(
+            dataset=dataset,
+            scope_value=scope_value,
+            boundary=normalize_as_of(boundary),
+            statuses=tuple(
+                status.value
+                for status in DatasetStatus
+                if status is not DatasetStatus.FETCH_FAILED
+            ),
+        )
+        if not checkpoints:
             return None
-        boundary_value = normalize_as_of(boundary).replace(tzinfo=None)
-        with db.get_session() as session:
-            row = session.execute(
-                select(ResearchDatasetSnapshotRecord)
-                .where(
-                    ResearchDatasetSnapshotRecord.dataset == dataset,
-                    ResearchDatasetSnapshotRecord.scope_type == "stock",
-                    ResearchDatasetSnapshotRecord.scope_value == scope_value,
-                    ResearchDatasetSnapshotRecord.available_at <= boundary_value,
-                    ResearchDatasetSnapshotRecord.data_as_of <= boundary_value,
-                    ResearchDatasetSnapshotRecord.observed_at <= boundary_value,
-                    ResearchDatasetSnapshotRecord.status
-                    != DatasetStatus.FETCH_FAILED.value,
-                )
-                .order_by(
-                    ResearchDatasetSnapshotRecord.available_at.desc(),
-                    ResearchDatasetSnapshotRecord.id.desc(),
-                )
-                .limit(1)
-            ).scalar_one_or_none()
-            return (
-                self._hydrate_snapshot_row(row, reused=True)
-                if row is not None
-                else None
-            )
+        return max(
+            checkpoints,
+            key=lambda item: (
+                item.available_at,
+                item.snapshot.record_id if item.snapshot is not None else 0,
+            ),
+        )
 
     @staticmethod
     def _query_cyq_single_flight(

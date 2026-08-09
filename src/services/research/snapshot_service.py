@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 from .canonical import canonical_hash, canonical_json, canonicalize, sha256_hex
 from .datasets import normalize_status
+from .debate_security import strict_version_identifier
 
 if TYPE_CHECKING:
     from .repositories import LeaseFence, ResearchSnapshotInput, ResearchSnapshotRepository, SnapshotWriteResult
@@ -27,6 +28,8 @@ SNAPSHOT_VERSION = "research-snapshot-v1"
 FIELD_DICTIONARY_VERSION = "research-fields-v1"
 EVIDENCE_SNAPSHOT_VERSION = "research-snapshot-v2"
 EVIDENCE_FIELD_DICTIONARY_VERSION = "research-fields-v2"
+DEBATE_SNAPSHOT_VERSION = "research-snapshot-v3"
+DEBATE_FIELD_DICTIONARY_VERSION = "research-fields-v3"
 FACTOR_ENGINE_VERSION = "factor-engine-v1"
 
 _EXTERNAL_TOKENS = frozenset({"news", "search", "article", "intelligence", "external"})
@@ -75,6 +78,10 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     r"(\s*(?::|=)\s*)(?:bearer\s+)?([^\s,;]+)"
 )
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
+_TOKEN_LIKE_RE = re.compile(
+    r"(?i)\b(?:sk-[a-z0-9_-]{16,}|xox[baprs]-[a-z0-9-]{16,}|"
+    r"gh[pousr]_[a-z0-9_]{20,})\b"
+)
 _KNOWLEDGE_TIME_KEYS = frozenset(
     {
         "available_at",
@@ -480,7 +487,8 @@ def _sanitize_text_urls(value: str) -> str:
         lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]",
         sanitized,
     )
-    return _BEARER_RE.sub("Bearer [REDACTED]", sanitized)
+    sanitized = _BEARER_RE.sub("Bearer [REDACTED]", sanitized)
+    return _TOKEN_LIKE_RE.sub("[REDACTED_TOKEN]", sanitized)
 
 
 def _sanitize_tree(value: Any) -> Any:
@@ -723,6 +731,17 @@ def project_evidence(evidence: Any, *, as_of: Any) -> Any:
     return canonicalize(_project_tree(safe))
 
 
+def project_debate(debate: Any, *, as_of: Any) -> Any:
+    """Project a frozen Debate payload into the final research snapshot."""
+
+    cutoff = _aware_datetime(as_of, field="as_of")
+    if debate is None:
+        return None
+    safe = _safe_object(debate, field="debate")
+    _validate_evidence_times(safe, snapshot_as_of=cutoff, path="debate")
+    return canonicalize(_project_tree(safe))
+
+
 def _route_output_parameters(route: Mapping[str, Any]) -> Mapping[str, Any]:
     parameter_sources = [route]
     for container_key in sorted(_ROUTE_PARAMETER_CONTAINERS):
@@ -831,6 +850,7 @@ class FrozenResearchSnapshot:
     snapshot_hash: str
     factor_snapshot_hash: Optional[str] = None
     evidence_snapshot_hash: Optional[str] = None
+    debate_snapshot_hash: Optional[str] = None
 
     def to_repository_input(self) -> "ResearchSnapshotInput":
         from .repositories import ResearchSnapshotInput
@@ -851,6 +871,7 @@ class FrozenResearchSnapshot:
             canonical_payload=self.canonical_payload,
             factor_snapshot_hash=self.factor_snapshot_hash,
             evidence_snapshot_hash=self.evidence_snapshot_hash,
+            debate_snapshot_hash=self.debate_snapshot_hash,
         )
 
     def persist(
@@ -885,6 +906,8 @@ def build_research_snapshot(
     factor_snapshot_hash: Optional[str] = None,
     evidence: Any = None,
     evidence_snapshot_hash: Optional[str] = None,
+    debate: Any = None,
+    debate_snapshot_hash: Optional[str] = None,
 ) -> FrozenResearchSnapshot:
     cutoff = _aware_datetime(as_of, field="as_of")
     observable_at = _aware_datetime(available_at, field="available_at")
@@ -892,6 +915,12 @@ def build_research_snapshot(
         raise ValueError("available_at cannot be after as_of")
     if factor_snapshot_hash is not None and not _SHA256_RE.fullmatch(str(factor_snapshot_hash)):
         raise ValueError("factor_snapshot_hash must be a lowercase SHA-256 digest")
+    projected_factors = project_factors(factors, as_of=cutoff)
+    has_factor_projection = projected_factors not in (None, {})
+    if has_factor_projection != (factor_snapshot_hash is not None):
+        raise ValueError(
+            "non-empty factors and factor_snapshot_hash must either both be set or both be omitted"
+        )
     if evidence_snapshot_hash is not None and not _SHA256_RE.fullmatch(
         str(evidence_snapshot_hash)
     ):
@@ -900,11 +929,21 @@ def build_research_snapshot(
         raise ValueError(
             "evidence and evidence_snapshot_hash must either both be set or both be omitted"
         )
+    if debate_snapshot_hash is not None and not _SHA256_RE.fullmatch(
+        str(debate_snapshot_hash)
+    ):
+        raise ValueError("debate_snapshot_hash must be a lowercase SHA-256 digest")
+    if (debate is None) != (debate_snapshot_hash is None):
+        raise ValueError(
+            "debate and debate_snapshot_hash must either both be set or both be omitted"
+        )
+    if debate_snapshot_hash is not None and evidence_snapshot_hash is None:
+        raise ValueError("debate requires a frozen evidence snapshot")
     route_fingerprint = model_route_fingerprint(model_route)
     payload_values = {
         "context_pack": safe_project_context_pack(context_pack, as_of=cutoff),
         "datasets": project_structured_datasets(datasets, as_of=cutoff),
-        "factors": project_factors(factors, as_of=cutoff),
+        "factors": projected_factors,
         # Prompt and policy bodies are not retained.  Their fingerprints make
         # semantic changes alter the immutable snapshot identity.
         "prompt_fingerprint": canonical_hash(prompt),
@@ -912,16 +951,39 @@ def build_research_snapshot(
     }
     if evidence_snapshot_hash is not None:
         payload_values["evidence"] = project_evidence(evidence, as_of=cutoff)
+    if debate_snapshot_hash is not None:
+        debate_projection = project_debate(debate, as_of=cutoff)
+        if (
+            not isinstance(debate_projection, Mapping)
+            or debate_projection.get("evidence_snapshot_hash")
+            != evidence_snapshot_hash
+        ):
+            raise ValueError(
+                "debate evidence_snapshot_hash conflicts with frozen evidence"
+            )
+        payload_values["debate"] = debate_projection
     payload = canonicalize(payload_values)
     values = {
         "stock_code": _required_text(stock_code, "stock_code"),
         "market": _required_text(market, "market"),
-        "snapshot_version": _required_text(snapshot_version, "snapshot_version"),
-        "field_dictionary_version": _required_text(field_dictionary_version, "field_dictionary_version"),
-        "factor_engine_version": _required_text(factor_engine_version, "factor_engine_version"),
-        "pack_version": _required_text(pack_version, "pack_version"),
-        "prompt_version": _required_text(prompt_version, "prompt_version"),
-        "policy_version": _required_text(policy_version, "policy_version"),
+        "snapshot_version": strict_version_identifier(
+            snapshot_version, field="snapshot_version"
+        ),
+        "field_dictionary_version": strict_version_identifier(
+            field_dictionary_version, field="field_dictionary_version"
+        ),
+        "factor_engine_version": strict_version_identifier(
+            factor_engine_version, field="factor_engine_version"
+        ),
+        "pack_version": strict_version_identifier(
+            pack_version, field="pack_version"
+        ),
+        "prompt_version": strict_version_identifier(
+            prompt_version, field="prompt_version"
+        ),
+        "policy_version": strict_version_identifier(
+            policy_version, field="policy_version"
+        ),
         "model_route_fingerprint": route_fingerprint,
         "as_of": _utc_naive(cutoff),
         "available_at": _utc_naive(observable_at),
@@ -931,6 +993,8 @@ def build_research_snapshot(
     }
     if evidence_snapshot_hash is not None:
         values["evidence_snapshot_hash"] = evidence_snapshot_hash
+    if debate_snapshot_hash is not None:
+        values["debate_snapshot_hash"] = debate_snapshot_hash
     snapshot_hash = canonical_hash(values)
     return FrozenResearchSnapshot(
         stock_code=values["stock_code"],
@@ -950,6 +1014,7 @@ def build_research_snapshot(
         snapshot_hash=snapshot_hash,
         factor_snapshot_hash=factor_snapshot_hash,
         evidence_snapshot_hash=evidence_snapshot_hash,
+        debate_snapshot_hash=debate_snapshot_hash,
     )
 
 
@@ -964,6 +1029,8 @@ def persist_research_snapshot(
 
 
 __all__ = [
+    "DEBATE_FIELD_DICTIONARY_VERSION",
+    "DEBATE_SNAPSHOT_VERSION",
     "EVIDENCE_FIELD_DICTIONARY_VERSION",
     "EVIDENCE_SNAPSHOT_VERSION",
     "FACTOR_ENGINE_VERSION",
@@ -974,6 +1041,7 @@ __all__ = [
     "model_route_fingerprint",
     "persist_research_snapshot",
     "project_factors",
+    "project_debate",
     "project_evidence",
     "project_model_route",
     "project_structured_datasets",

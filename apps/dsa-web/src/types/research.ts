@@ -65,6 +65,7 @@ export interface ResearchSnapshotResponse {
   snapshotHash: string;
   factorSnapshotHash: string | null;
   evidenceSnapshotHash: string | null;
+  debateSnapshotHash: string | null;
   originJobId: string | null;
   createdAt: string;
 }
@@ -239,6 +240,113 @@ type ResearchEvidenceSelector =
     };
 
 export type ResearchEvidenceListParams = ResearchEvidenceSelector & {
+  asOf?: string;
+  cursor?: string;
+  limit?: number;
+};
+
+export type ResearchDebateStatus =
+  | 'available'
+  | 'partial'
+  | 'empty'
+  | 'generation_failed';
+export type ResearchDebateStance = 'bull' | 'bear';
+
+export interface ResearchDebateFailure {
+  stance: ResearchDebateStance;
+  errorCode: string;
+}
+
+export interface ResearchDebateArgument {
+  id: string;
+  statement: string;
+  claimIds: string[];
+  citationIds: string[];
+  confidence: number;
+  limitations: string[];
+}
+
+export interface ResearchDebateTurn {
+  turnHash: string;
+  promptFingerprint: string;
+  modelUsed: string;
+  stance: ResearchDebateStance;
+  summary: string;
+  arguments: ResearchDebateArgument[];
+  openQuestions: string[];
+}
+
+export interface ResearchDebatePayload {
+  debateEngineVersion: string;
+  outputSchemaVersion: string;
+  promptVersion: string;
+  stockCode: string;
+  market: string;
+  asOf: string;
+  availableAt: string;
+  status: ResearchDebateStatus;
+  evidenceSnapshotHash: string;
+  requestHash: string;
+  modelRouteFingerprint: string;
+  bullTurnHash: string | null;
+  bearTurnHash: string | null;
+  failedStances: ResearchDebateFailure[];
+  limitations: string[];
+  turns: ResearchDebateTurn[];
+}
+
+export interface ResearchDebateSummary {
+  id: number;
+  stockCode: string;
+  market: string;
+  debateEngineVersion: string;
+  outputSchemaVersion: string;
+  promptVersion: string;
+  evidenceSnapshotHash: string;
+  requestHash: string;
+  modelRouteFingerprint: string;
+  asOf: string;
+  availableAt: string;
+  status: ResearchDebateStatus;
+  bullTurnHash: string | null;
+  bearTurnHash: string | null;
+  bullArgumentCount: number;
+  bearArgumentCount: number;
+  openQuestionCount: number;
+  debateHash: string;
+  originJobId: string | null;
+  createdAt: string;
+}
+
+export interface ResearchDebateDetailResponse extends ResearchDebateSummary {
+  debate: ResearchDebatePayload;
+}
+
+export interface ResearchDebateListResponse {
+  items: ResearchDebateSummary[];
+  count: number;
+  nextCursor: string | null;
+}
+
+type ResearchDebateSelector =
+  | {
+      jobId: string;
+      researchSnapshotHash?: string;
+      stockCode?: string;
+    }
+  | {
+      jobId?: string;
+      researchSnapshotHash: string;
+      stockCode?: string;
+    }
+  | {
+      jobId?: string;
+      researchSnapshotHash?: string;
+      stockCode: string;
+    };
+
+export type ResearchDebateListParams = ResearchDebateSelector & {
+  evidenceSnapshotHash?: string;
   asOf?: string;
   cursor?: string;
   limit?: number;

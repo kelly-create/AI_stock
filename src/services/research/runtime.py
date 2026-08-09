@@ -8,7 +8,7 @@ disabled rollout has no provider, filesystem, or database side effects.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import logging
 from pathlib import Path
@@ -32,6 +32,7 @@ from .factor_service import evaluate_research_factors
 from .provider_health import TushareProviderHealthReporter
 from .raw_store import RawArtifactStore
 from .repositories import (
+    DebateFailureInput,
     FactorSnapshotInput,
     LeaseFence,
     ResearchSnapshotRepository,
@@ -39,11 +40,14 @@ from .repositories import (
 )
 from .schemas import ComponentStatus, MetricStatus, ResearchFactorResult
 from .snapshot_service import (
+    DEBATE_FIELD_DICTIONARY_VERSION,
+    DEBATE_SNAPSHOT_VERSION,
     EVIDENCE_FIELD_DICTIONARY_VERSION,
     EVIDENCE_SNAPSHOT_VERSION,
     FACTOR_ENGINE_VERSION,
     FrozenResearchSnapshot,
     build_research_snapshot,
+    model_route_fingerprint,
 )
 
 
@@ -83,6 +87,10 @@ class PreparedResearch:
     evidence_context: Optional[Mapping[str, Any]]
     evidence_prompt_context: Optional[str]
     evidence_enabled: bool
+    debate_snapshot: Optional[Any] = None
+    debate_context: Optional[Mapping[str, Any]] = None
+    debate_prompt_context: Optional[str] = None
+    debate_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -498,6 +506,306 @@ class ResearchRuntimeService:
     def _evidence_enabled(self) -> bool:
         return bool(_config_value(self.config, "research_evidence_enabled", False))
 
+    def _debate_enabled(self) -> bool:
+        return bool(_config_value(self.config, "research_debate_enabled", False))
+
+    @staticmethod
+    def _load_bound_debate(
+        repository: Any,
+        *,
+        lease: LeaseFence,
+        prepared: PreparedResearch,
+    ) -> Any:
+        """Load one fully bound Debate artifact without consulting origin_job_id."""
+
+        from .debate_service import (
+            hydrate_debate_request,
+            hydrate_debate_snapshot,
+        )
+
+        evidence = prepared.evidence_snapshot
+        if evidence is None:
+            raise ResearchRuntimeContractError(
+                "debate requires a frozen evidence snapshot"
+            )
+        result = repository.list_debate_snapshots(
+            job_id=lease.job_id,
+            stock_code=prepared.stock_code,
+            evidence_snapshot_hash=evidence.evidence_hash,
+            limit=100,
+        )
+        if not isinstance(result, Mapping) or not isinstance(
+            result.get("items"), list
+        ):
+            raise ResearchRuntimeContractError(
+                "repository.list_debate_snapshots returned an invalid contract"
+            )
+        records = result["items"]
+        if not records:
+            return None
+        distinct_hashes = {
+            str(item.get("debate_hash") or "")
+            for item in records
+            if isinstance(item, Mapping)
+        }
+        if len(records) != 1 or len(distinct_hashes) != 1:
+            raise ResearchRuntimeContractError(
+                "durable job contains ambiguous debate snapshots for one stock"
+            )
+        summary = records[0]
+        if not isinstance(summary, Mapping):
+            raise ResearchRuntimeContractError(
+                "bound debate snapshot must be a mapping"
+            )
+        debate_hash = str(summary.get("debate_hash") or "")
+        record = repository.get_debate_snapshot(debate_hash)
+        if not isinstance(record, Mapping):
+            raise ResearchRuntimeContractError(
+                "bound debate snapshot references a missing immutable row"
+            )
+        request_hash = str(record.get("request_hash") or "")
+        request_record = repository.get_debate_request(request_hash)
+        if not isinstance(request_record, Mapping):
+            raise ResearchRuntimeContractError(
+                "bound debate snapshot references a missing frozen request"
+            )
+        request = hydrate_debate_request(
+            request_record,
+            evidence_snapshot=evidence,
+        )
+        snapshot = hydrate_debate_snapshot(record, request=request)
+        if (
+            snapshot.stock_code != prepared.stock_code
+            or snapshot.evidence_snapshot_hash != evidence.evidence_hash
+            or snapshot.as_of != evidence.as_of
+            or snapshot.available_at != evidence.available_at
+        ):
+            raise ResearchRuntimeContractError(
+                "bound debate lineage differs from prepared research"
+            )
+        return snapshot
+
+    def prepare_debate(
+        self,
+        prepared: PreparedResearch,
+        *,
+        completion: Callable[[Any], Any],
+        model_route: Mapping[str, Any],
+    ) -> PreparedResearch:
+        """Freeze, run, and persist the bounded Bull/Bear Debate stage."""
+
+        if not isinstance(prepared, PreparedResearch):
+            raise TypeError("prepared must be a PreparedResearch")
+        if not prepared.debate_enabled:
+            return prepared
+        if not callable(completion):
+            raise TypeError("completion must be callable")
+        if not isinstance(model_route, Mapping):
+            raise TypeError("model_route must be a mapping")
+        if prepared.evidence_snapshot is None:
+            raise ResearchRuntimeContractError(
+                "debate-enabled research requires a frozen evidence snapshot"
+            )
+
+        from .debate_runner import run_research_debate
+        from .debate_service import (
+            DEBATE_PROMPT_VERSION,
+            DebateFailure,
+            build_debate_request,
+            debate_context_from_snapshot,
+            format_research_debate_context,
+            hydrate_debate_request,
+            hydrate_debate_turn,
+        )
+
+        self.checkpoint(prepared)
+        repository = self._get_repository()
+        snapshot = self._load_bound_debate(
+            repository,
+            lease=prepared.lease,
+            prepared=prepared,
+        )
+        if snapshot is None:
+            route_fingerprint = model_route_fingerprint(model_route)
+            expected_request = build_debate_request(
+                prepared.evidence_snapshot,
+                model_route_fingerprint=route_fingerprint,
+            )
+            request_record = repository.get_job_debate_request(
+                job_id=prepared.lease.job_id,
+                stock_code=prepared.stock_code,
+                evidence_snapshot_hash=prepared.evidence_snapshot.evidence_hash,
+                prompt_version=DEBATE_PROMPT_VERSION,
+                model_route_fingerprint=route_fingerprint,
+            )
+            if request_record is None:
+                self.checkpoint(prepared)
+                request_write = repository.write_debate_request(
+                    expected_request.to_repository_input(),
+                    lease=prepared.lease,
+                )
+                self.checkpoint(prepared)
+                if request_write.content_hash != expected_request.request_hash:
+                    raise ResearchRuntimeContractError(
+                        "debate request repository returned a conflicting hash"
+                    )
+                request = expected_request
+            else:
+                request = hydrate_debate_request(
+                    request_record,
+                    evidence_snapshot=prepared.evidence_snapshot,
+                )
+                if request.request_hash != expected_request.request_hash:
+                    raise ResearchRuntimeContractError(
+                        "bound debate request differs from the current frozen contract"
+                    )
+
+            prompt_fingerprints = {
+                item.stance: item.prompt_fingerprint
+                for item in request.turn_requests
+            }
+            turn_records = repository.get_job_debate_turns(
+                job_id=prepared.lease.job_id,
+                stock_code=prepared.stock_code,
+                evidence_snapshot_hash=request.evidence_snapshot_hash,
+                request_hash=request.request_hash,
+                prompt_version=request.prompt_version,
+                prompt_fingerprints=prompt_fingerprints,
+                model_route_fingerprint=request.model_route_fingerprint,
+            )
+            if not isinstance(turn_records, Mapping):
+                raise ResearchRuntimeContractError(
+                    "repository.get_job_debate_turns returned an invalid contract"
+                )
+            existing_turns = tuple(
+                hydrate_debate_turn(turn_records[stance], request=request)
+                for stance in ("bull", "bear")
+                if stance in turn_records
+            )
+            failure_records = repository.get_job_debate_failures(
+                job_id=prepared.lease.job_id,
+                stock_code=prepared.stock_code,
+                evidence_snapshot_hash=request.evidence_snapshot_hash,
+                request_hash=request.request_hash,
+                prompt_version=request.prompt_version,
+                prompt_fingerprints=prompt_fingerprints,
+                model_route_fingerprint=request.model_route_fingerprint,
+            )
+            if not isinstance(failure_records, Mapping):
+                raise ResearchRuntimeContractError(
+                    "repository.get_job_debate_failures returned an invalid contract"
+                )
+            existing_failures = tuple(
+                DebateFailure(
+                    stance=stance,
+                    error_code=str(failure_records[stance].get("error_code") or ""),
+                )
+                for stance in ("bull", "bear")
+                if stance in failure_records
+                and isinstance(failure_records[stance], Mapping)
+            )
+
+            def _fenced_completion(call: Any) -> Any:
+                self.checkpoint(prepared)
+                result = completion(call)
+                self.checkpoint(prepared)
+                return result
+
+            def _persist_turn(turn: Any) -> None:
+                self.checkpoint(prepared)
+                write_result = repository.write_debate_turn(
+                    turn.to_repository_input(),
+                    lease=prepared.lease,
+                )
+                self.checkpoint(prepared)
+                if write_result.content_hash != turn.turn_hash:
+                    raise ResearchRuntimeContractError(
+                        "debate turn repository returned a conflicting hash"
+                    )
+
+            def _persist_failure(failure: Any) -> None:
+                self.checkpoint(prepared)
+                turn_request = request.request_for(failure.stance)
+                repository.write_debate_failure(
+                    DebateFailureInput(
+                        stock_code=request.stock_code,
+                        market=request.market,
+                        stance=failure.stance,
+                        debate_engine_version=request.debate_engine_version,
+                        output_schema_version=request.output_schema_version,
+                        prompt_version=request.prompt_version,
+                        as_of=request.as_of,
+                        available_at=request.available_at,
+                        evidence_snapshot_hash=request.evidence_snapshot_hash,
+                        request_hash=request.request_hash,
+                        prompt_fingerprint=turn_request.prompt_fingerprint,
+                        model_route_fingerprint=request.model_route_fingerprint,
+                        error_code=failure.error_code,
+                    ),
+                    lease=prepared.lease,
+                )
+                self.checkpoint(prepared)
+
+            run_result = run_research_debate(
+                request,
+                _fenced_completion,
+                existing_turns=existing_turns,
+                existing_failures=existing_failures,
+                on_turn=_persist_turn,
+                on_failure=_persist_failure,
+            )
+            snapshot = run_result.snapshot
+            self.checkpoint(prepared)
+            snapshot_write = repository.write_debate_snapshot(
+                snapshot.to_repository_input(),
+                lease=prepared.lease,
+            )
+            self.checkpoint(prepared)
+            if snapshot_write.content_hash != snapshot.debate_hash:
+                raise ResearchRuntimeContractError(
+                    "debate snapshot repository returned a conflicting hash"
+                )
+
+        debate_context_values = dict(debate_context_from_snapshot(snapshot))
+        debate_context_values.update(
+            {
+                "debate_hash": snapshot.debate_hash,
+                "bull_argument_count": snapshot.bull_argument_count,
+                "bear_argument_count": snapshot.bear_argument_count,
+                "open_question_count": snapshot.open_question_count,
+            }
+        )
+        debate_context = MappingProxyType(canonicalize(debate_context_values))
+        warnings = tuple(prepared.research_context.get("warnings") or ())
+        status = str(prepared.research_context.get("status") or "partial")
+        if snapshot.status != DatasetStatus.AVAILABLE.value:
+            warning = f"research_debate_{snapshot.status}"
+            if warning not in warnings:
+                warnings = (*warnings, warning)
+            if status == DatasetStatus.AVAILABLE.value:
+                status = DatasetStatus.PARTIAL.value
+        research_context_values = dict(prepared.research_context)
+        research_context_values.update(
+            {
+                "status": status,
+                "warnings": warnings,
+                "debate_snapshot_hash": snapshot.debate_hash,
+                "debate_status": snapshot.status,
+                "debate_bull_argument_count": snapshot.bull_argument_count,
+                "debate_bear_argument_count": snapshot.bear_argument_count,
+                "debate_open_question_count": snapshot.open_question_count,
+            }
+        )
+        return replace(
+            prepared,
+            research_context=MappingProxyType(
+                canonicalize(research_context_values)
+            ),
+            debate_snapshot=snapshot,
+            debate_context=debate_context,
+            debate_prompt_context=format_research_debate_context(snapshot),
+        )
+
     def _new_evidence_collector(
         self,
         *,
@@ -793,11 +1101,13 @@ class ResearchRuntimeService:
         tushare_enabled = self._tushare_enabled()
         factors_enabled = self._factors_enabled()
         evidence_enabled = self._evidence_enabled()
+        debate_enabled = self._debate_enabled()
         if (
             not personal_enabled
             and not tushare_enabled
             and not factors_enabled
             and not evidence_enabled
+            and not debate_enabled
         ):
             return None
         if factors_enabled and (not personal_enabled or not tushare_enabled):
@@ -809,6 +1119,10 @@ class ResearchRuntimeService:
         if evidence_enabled and not factors_enabled:
             raise RuntimeError(
                 "RESEARCH_EVIDENCE_ENABLED requires RESEARCH_FACTORS_ENABLED"
+            )
+        if debate_enabled and not evidence_enabled:
+            raise RuntimeError(
+                "RESEARCH_DEBATE_ENABLED requires RESEARCH_EVIDENCE_ENABLED"
             )
         if reference_mode not in {"live", "historical"}:
             raise ValueError("reference_mode must be 'live' or 'historical'")
@@ -1017,6 +1331,7 @@ class ResearchRuntimeService:
             evidence_context=evidence_context,
             evidence_prompt_context=evidence_prompt_context,
             evidence_enabled=evidence_enabled,
+            debate_enabled=debate_enabled,
         )
 
     def freeze(
@@ -1055,6 +1370,19 @@ class ResearchRuntimeService:
                     "field_dictionary_version": EVIDENCE_FIELD_DICTIONARY_VERSION,
                     "evidence": prepared.evidence_snapshot.canonical_payload,
                     "evidence_snapshot_hash": prepared.evidence_snapshot.evidence_hash,
+                }
+            )
+        if prepared.debate_enabled:
+            if prepared.debate_snapshot is None or prepared.debate_context is None:
+                raise ResearchRuntimeContractError(
+                    "debate-enabled research must expose a frozen debate snapshot"
+                )
+            snapshot_kwargs.update(
+                {
+                    "snapshot_version": DEBATE_SNAPSHOT_VERSION,
+                    "field_dictionary_version": DEBATE_FIELD_DICTIONARY_VERSION,
+                    "debate": prepared.debate_snapshot.canonical_payload,
+                    "debate_snapshot_hash": prepared.debate_snapshot.debate_hash,
                 }
             )
         snapshot = build_research_snapshot(
