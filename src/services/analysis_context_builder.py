@@ -74,6 +74,7 @@ class PipelineAnalysisArtifacts:
     portfolio_context: Optional[Dict[str, Any]] = None
     research_context: Optional[Dict[str, Any]] = None
     research_evidence_context: Optional[Dict[str, Any]] = None
+    research_debate_context: Optional[Dict[str, Any]] = None
 
 
 class AnalysisContextBuilder:
@@ -102,6 +103,9 @@ class AnalysisContextBuilder:
         evidence_block = _build_research_evidence_block(artifacts)
         if evidence_block is not None:
             blocks["research_evidence"] = evidence_block
+        debate_block = _build_research_debate_block(artifacts)
+        if debate_block is not None:
+            blocks["research_debate"] = debate_block
         portfolio_block = _build_portfolio_block(artifacts)
         if portfolio_block is not None:
             blocks["portfolio"] = portfolio_block
@@ -681,6 +685,81 @@ def _build_research_evidence_block(
         source="frozen_research_evidence",
         timestamp=_metadata_iso_datetime_value(context, "available_at"),
         warnings=warnings[:10],
+        metadata={"auxiliary": True, "quality_weighted": False},
+    )
+
+
+def _build_research_debate_block(
+    artifacts: PipelineAnalysisArtifacts,
+) -> Optional[AnalysisContextBlock]:
+    """Expose only bounded Debate metadata; full model output is prompted separately."""
+
+    context = _to_dict(artifacts.research_debate_context)
+    if not context:
+        return None
+    raw_status = str(context.get("status") or "partial").strip().lower()
+    status_map = {
+        "available": ContextFieldStatus.AVAILABLE,
+        "partial": ContextFieldStatus.PARTIAL,
+        "empty": ContextFieldStatus.MISSING,
+        "generation_failed": ContextFieldStatus.FETCH_FAILED,
+    }
+    block_status = status_map.get(raw_status, ContextFieldStatus.PARTIAL)
+    missing_reason = (
+        None
+        if block_status == ContextFieldStatus.AVAILABLE
+        else f"research_debate_{raw_status or 'partial'}"
+    )
+    items: Dict[str, AnalysisContextItem] = {
+        "status": AnalysisContextItem(
+            status=block_status,
+            value=raw_status,
+            source="frozen_research_debate",
+            missing_reason=missing_reason,
+        ),
+    }
+    debate_hash = str(context.get("debate_hash") or "").strip()
+    if debate_hash:
+        items["debate_hash"] = AnalysisContextItem(
+            status=ContextFieldStatus.AVAILABLE,
+            value=debate_hash,
+            source="frozen_research_debate",
+        )
+    for field_name in (
+        "bull_argument_count",
+        "bear_argument_count",
+        "open_question_count",
+    ):
+        value = context.get(field_name)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            items[field_name] = AnalysisContextItem(
+                status=block_status,
+                value=value,
+                source="frozen_research_debate",
+                missing_reason=missing_reason,
+            )
+    failed_stances = [
+        {
+            "stance": str(item.get("stance") or "").strip(),
+            "error_code": str(item.get("error_code") or "").strip(),
+        }
+        for item in context.get("failed_stances", [])
+        if isinstance(item, Mapping)
+        and str(item.get("stance") or "").strip() in {"bull", "bear"}
+        and str(item.get("error_code") or "").strip()
+    ]
+    if failed_stances:
+        items["failed_stances"] = AnalysisContextItem(
+            status=ContextFieldStatus.PARTIAL,
+            value=failed_stances,
+            source="frozen_research_debate",
+        )
+    return AnalysisContextBlock(
+        status=block_status,
+        items=items,
+        source="frozen_research_debate",
+        timestamp=_metadata_iso_datetime_value(context, "available_at"),
+        warnings=([] if missing_reason is None else [missing_reason]),
         metadata={"auxiliary": True, "quality_weighted": False},
     )
 

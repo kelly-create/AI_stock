@@ -58,7 +58,11 @@ from src.services.durable_jobs import (
 )
 from src.services.research.raw_retention import build_raw_retention_plan
 from src.services.research.repositories import ResearchSnapshotRepository
-from src.storage import DatabaseManager, JobEventRecord
+from src.storage import (
+    DatabaseManager,
+    JobEventRecord,
+    ResearchDatasetSnapshotRecord,
+)
 
 
 AS_OF = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
@@ -94,6 +98,17 @@ class FakeRepository:
         self.leases = []
         self._lock = threading.Lock()
         self.references = {}
+        self.records = {}
+        self.bindings = {}
+
+    @staticmethod
+    def _as_utc(value):
+        if value.tzinfo is None or value.utcoffset() is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    def assert_live_lease(self, lease, *, now=None):
+        del lease, now
 
     def get_research_reference_time(self, *, scope_value, lease):
         return self.references.get((lease.job_id, scope_value))
@@ -123,7 +138,122 @@ class FakeRepository:
             self.inputs.append(snapshot)
             self.leases.append(lease)
             identifier = len(self.inputs)
-        return SnapshotWriteResult(identifier, f"{identifier:064x}", True)
+            content_hash = f"{identifier:064x}"
+            observed_at = snapshot.observed_at or snapshot.available_at
+            record = {
+                "id": identifier,
+                "dataset": snapshot.dataset,
+                "scope_type": snapshot.scope_type,
+                "scope_value": snapshot.scope_value,
+                "market": snapshot.market,
+                "provider": snapshot.provider,
+                "schema_version": snapshot.schema_version,
+                "trade_date": snapshot.trade_date,
+                "report_date": snapshot.report_date,
+                "announcement_date": snapshot.announcement_date,
+                "data_as_of": self._as_utc(snapshot.data_as_of),
+                "available_at": self._as_utc(snapshot.available_at),
+                "observed_at": self._as_utc(observed_at),
+                "status": snapshot.status,
+                "normalized": snapshot.normalized,
+                "content_hash": content_hash,
+                "raw_ref": snapshot.raw_ref,
+                "error_code": snapshot.error_code,
+                "error_message": snapshot.error_message_sanitized,
+                "retryable": snapshot.retryable,
+            }
+            self.records[content_hash] = record
+            boundary = self._as_utc(snapshot.knowledge_as_of)
+            self.bindings[
+                (
+                    lease.job_id,
+                    snapshot.dataset,
+                    snapshot.scope_value,
+                    boundary,
+                )
+            ] = record
+        return SnapshotWriteResult(identifier, content_hash, True)
+
+    def get_job_dataset(
+        self,
+        *,
+        job_id,
+        dataset,
+        scope_value,
+        as_of=None,
+        terminal_only=False,
+    ):
+        boundary = self._as_utc(as_of) if as_of is not None else None
+        if boundary is None:
+            matches = [
+                record
+                for key, record in self.bindings.items()
+                if key[:3] == (job_id, dataset, scope_value)
+            ]
+            if len(matches) > 1:
+                raise ValueError("ambiguous fake Dataset binding")
+            record = matches[0] if matches else None
+        else:
+            record = self.bindings.get(
+                (job_id, dataset, scope_value, boundary)
+            )
+        if (
+            record is not None
+            and terminal_only
+            and record["status"] == "fetch_failed"
+            and record["retryable"] is True
+        ):
+            return None
+        if record is None:
+            return None
+        result = dict(record)
+        result["binding_retryable"] = result.pop("retryable")
+        return result
+
+    def list_dataset_checkpoints(
+        self,
+        *,
+        scope_value,
+        dataset,
+        as_of,
+        trade_date_from=None,
+        trade_date_to=None,
+        statuses=None,
+    ):
+        cutoff = self._as_utc(as_of)
+        allowed = set(statuses) if statuses is not None else None
+        rows = []
+        for record in self.records.values():
+            trade_day = record["trade_date"]
+            if (
+                record["scope_value"] != scope_value
+                or record["dataset"] != dataset
+                or record["available_at"] > cutoff
+                or record["data_as_of"] > cutoff
+                or (
+                    dataset == "stock_basic"
+                    and record["observed_at"] > cutoff
+                )
+                or (allowed is not None and record["status"] not in allowed)
+                or (
+                    trade_date_from is not None
+                    and (trade_day is None or trade_day < trade_date_from)
+                )
+                or (
+                    trade_date_to is not None
+                    and (trade_day is None or trade_day > trade_date_to)
+                )
+            ):
+                continue
+            rows.append(dict(record))
+        return sorted(
+            rows,
+            key=lambda item: (
+                item["trade_date"] or date.min,
+                item["available_at"],
+                item["id"],
+            ),
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -151,6 +281,60 @@ def _build_collector(
         last_trade_date_resolver=last_trade_date_resolver,
     )
     return collector, fake_provider, fake_repository
+
+
+def _build_real_collector_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    database_name: str,
+):
+    monkeypatch.setenv("DATABASE_MIGRATION_MODE", "auto")
+    Config.reset_instance()
+    DatabaseManager.reset_instance()
+    db = DatabaseManager(
+        db_url=f"sqlite:///{(tmp_path / database_name).as_posix()}"
+    )
+    registry = DurableJobHandlerRegistry()
+    registry.register(
+        "research-collector",
+        1,
+        CollectorJobPayload,
+        lambda payload: payload.stock_code,
+    )
+    return (
+        db,
+        DurableJobStore(
+            registry,
+            db,
+            lease_seconds=300,
+            heartbeat_seconds=30,
+        ),
+        ResearchSnapshotRepository(db),
+    )
+
+
+def _claim_real_collector_job(
+    store: DurableJobStore,
+    *,
+    task_id: str,
+    worker_id: str,
+    now: datetime,
+    stock_code: str = "600519",
+) -> LeaseFence:
+    store.enqueue(
+        JobEnqueueRequest(
+            job_type="research-collector",
+            payload={"stock_code": stock_code},
+            task_id=task_id,
+            stock_code=stock_code,
+        ),
+        now=now,
+    )
+    claim = store.claim_next(worker_id, now=now)
+    assert claim is not None
+    assert claim.task_id == task_id
+    return LeaseFence(claim.task_id, claim.worker_id, claim.lease_token)
 
 
 def test_first_release_dataset_registry_and_a_share_code_mapping_are_fixed() -> None:
@@ -726,6 +910,439 @@ def test_same_job_reentry_reuses_terminal_dataset_without_second_provider_call(
     assert second.normalized_rows == first.normalized_rows
 
 
+@pytest.mark.parametrize(
+    "damage",
+    ("row_payload", "missing_row", "cross_stock_event"),
+)
+def test_terminal_checkpoint_damage_fails_closed_before_recovery_provider_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    damage: str,
+) -> None:
+    db, store, repository = _build_real_collector_store(
+        tmp_path,
+        monkeypatch,
+        database_name=f"terminal-{damage}.db",
+    )
+    boundary = datetime.now(timezone.utc)
+    trade_day = (boundary + timedelta(hours=8)).date() - timedelta(days=1)
+    lease = _claim_real_collector_job(
+        store,
+        task_id=f"terminal-{damage}-job",
+        worker_id="seed-worker",
+        now=boundary,
+    )
+    seed_provider = FakeProvider(
+        {
+            "daily": pd.DataFrame(
+                [
+                    {
+                        "trade_date": trade_day.strftime("%Y%m%d"),
+                        "close": 100.0,
+                    }
+                ]
+            )
+        }
+    )
+    try:
+        ResearchDatasetCollector(
+            seed_provider,
+            repository,
+            RawArtifactStore(tmp_path / f"raw-terminal-seed-{damage}"),
+            clock=lambda: boundary,
+        ).collect_dataset("600519", "daily", as_of=boundary, lease=lease)
+        assert len(seed_provider.calls) == 1
+
+        with db.get_session() as session:
+            row = session.query(ResearchDatasetSnapshotRecord).filter_by(
+                dataset="daily",
+                scope_value="600519",
+            ).one()
+            event = session.query(JobEventRecord).filter_by(
+                job_id=lease.job_id,
+                event_type="research_dataset_snapshot",
+            ).one()
+            if damage == "row_payload":
+                row.normalized_json = json.dumps(
+                    [{"trade_date": trade_day.isoformat(), "close": 999.0}]
+                )
+            elif damage == "missing_row":
+                session.delete(row)
+            else:
+                payload = json.loads(event.payload_json)
+                payload["scope_value"] = "000001"
+                event.payload_json = json.dumps(payload, sort_keys=True)
+            session.commit()
+
+        recovery_provider = FakeProvider(
+            {
+                "daily": pd.DataFrame(
+                    [
+                        {
+                            "trade_date": trade_day.strftime("%Y%m%d"),
+                            "close": 101.0,
+                        }
+                    ]
+                )
+            }
+        )
+        recovery_collector = ResearchDatasetCollector(
+            recovery_provider,
+            repository,
+            RawArtifactStore(tmp_path / f"raw-terminal-recovery-{damage}"),
+            clock=lambda: boundary,
+        )
+
+        with pytest.raises(ValueError):
+            recovery_collector.collect_dataset(
+                "600519",
+                "daily",
+                as_of=boundary,
+                lease=lease,
+            )
+
+        assert recovery_provider.calls == []
+    finally:
+        DatabaseManager.reset_instance()
+        Config.reset_instance()
+
+
+def test_retryable_checkpoint_still_allows_one_real_recovery_provider_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _db, store, repository = _build_real_collector_store(
+        tmp_path,
+        monkeypatch,
+        database_name="retryable-checkpoint.db",
+    )
+    boundary = datetime.now(timezone.utc)
+    trade_day = (boundary + timedelta(hours=8)).date() - timedelta(days=1)
+    lease = _claim_real_collector_job(
+        store,
+        task_id="retryable-checkpoint-job",
+        worker_id="retry-worker",
+        now=boundary,
+    )
+    try:
+        first_provider = FakeProvider(
+            {"daily": TushareTimeoutError("first attempt timed out")}
+        )
+        with pytest.raises(TushareTimeoutError):
+            ResearchDatasetCollector(
+                first_provider,
+                repository,
+                RawArtifactStore(tmp_path / "raw-retryable-first"),
+                clock=lambda: boundary,
+            ).collect_dataset("600519", "daily", as_of=boundary, lease=lease)
+        assert len(first_provider.calls) == 1
+
+        _reset_collector_state_for_tests()
+        recovery_provider = FakeProvider(
+            {
+                "daily": pd.DataFrame(
+                    [
+                        {
+                            "trade_date": trade_day.strftime("%Y%m%d"),
+                            "close": 100.0,
+                        }
+                    ]
+                )
+            }
+        )
+        recovered = ResearchDatasetCollector(
+            recovery_provider,
+            repository,
+            RawArtifactStore(tmp_path / "raw-retryable-recovery"),
+            clock=lambda: boundary,
+        ).collect_dataset("600519", "daily", as_of=boundary, lease=lease)
+
+        assert recovered.status == "available"
+        assert len(recovery_provider.calls) == 1
+    finally:
+        DatabaseManager.reset_instance()
+        Config.reset_instance()
+
+
+def test_valid_cross_stock_checkpoint_event_fails_before_provider_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db, store, repository = _build_real_collector_store(
+        tmp_path,
+        monkeypatch,
+        database_name="cross-stock-checkpoint.db",
+    )
+    boundary = datetime.now(timezone.utc)
+    trade_day = (boundary + timedelta(hours=8)).date() - timedelta(days=1)
+    requested_lease = _claim_real_collector_job(
+        store,
+        task_id="requested-stock-job",
+        worker_id="requested-worker",
+        now=boundary,
+    )
+    other_lease = _claim_real_collector_job(
+        store,
+        task_id="other-stock-job",
+        worker_id="other-worker",
+        stock_code="000001",
+        now=boundary + timedelta(microseconds=1),
+    )
+    try:
+        repository.write_dataset(
+            DatasetSnapshotInput(
+                dataset="daily",
+                scope_type="stock",
+                scope_value="000001",
+                market="A",
+                provider="tushare",
+                schema_version=DATASET_DEFINITIONS["daily"].schema_version,
+                trade_date=trade_day,
+                data_as_of=boundary - timedelta(days=1),
+                available_at=boundary - timedelta(days=1),
+                observed_at=boundary - timedelta(days=1),
+                status="available",
+                normalized=[
+                    {
+                        "trade_date": trade_day.strftime("%Y%m%d"),
+                        "close": 10.0,
+                    }
+                ],
+                knowledge_as_of=boundary,
+            ),
+            lease=other_lease,
+        )
+        with db.get_session() as session:
+            other_event = session.query(JobEventRecord).filter_by(
+                job_id=other_lease.job_id,
+                event_type="research_dataset_snapshot",
+            ).one()
+            session.add(
+                JobEventRecord(
+                    job_id=requested_lease.job_id,
+                    event_type=other_event.event_type,
+                    stage=other_event.stage,
+                    payload_json=other_event.payload_json,
+                    created_at=other_event.created_at,
+                )
+            )
+            session.commit()
+
+        provider = FakeProvider(
+            {
+                "daily": pd.DataFrame(
+                    [
+                        {
+                            "trade_date": trade_day.strftime("%Y%m%d"),
+                            "close": 100.0,
+                        }
+                    ]
+                )
+            }
+        )
+        with pytest.raises(ValueError):
+            ResearchDatasetCollector(
+                provider,
+                repository,
+                RawArtifactStore(tmp_path / "raw-cross-stock-checkpoint"),
+                clock=lambda: boundary,
+            ).collect_dataset(
+                "600519",
+                "daily",
+                as_of=boundary,
+                lease=requested_lease,
+            )
+
+        assert provider.calls == []
+    finally:
+        DatabaseManager.reset_instance()
+        Config.reset_instance()
+
+
+@pytest.mark.parametrize(
+    "damage",
+    ("missing_cached_row", "cold_status_tamper"),
+)
+def test_incremental_checkpoint_damage_fails_before_new_job_provider_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    damage: str,
+) -> None:
+    db, store, repository = _build_real_collector_store(
+        tmp_path,
+        monkeypatch,
+        database_name=f"incremental-{damage}.db",
+    )
+    boundary = datetime.now(timezone.utc)
+    trade_day = (boundary + timedelta(hours=8)).date() - timedelta(days=1)
+    seed_lease = _claim_real_collector_job(
+        store,
+        task_id="incremental-cache-seed-job",
+        worker_id="seed-worker",
+        now=boundary,
+    )
+    seed_provider = FakeProvider(
+        {
+            "cyq_chips": pd.DataFrame(
+                [
+                    {
+                        "trade_date": trade_day.strftime("%Y%m%d"),
+                        "price": 99.0,
+                    }
+                ]
+            )
+        }
+    )
+    try:
+        ResearchDatasetCollector(
+            seed_provider,
+            repository,
+            RawArtifactStore(tmp_path / "raw-incremental-cache-seed"),
+            clock=lambda: boundary,
+        ).collect_dataset(
+            "600519",
+            "cyq_chips",
+            as_of=boundary,
+            lease=seed_lease,
+        )
+        assert len(seed_provider.calls) == 1
+        assert ("cyq_chips", "600519") in _CYQ_HIGH_WATERMARKS
+
+        with db.get_session() as session:
+            row = session.query(ResearchDatasetSnapshotRecord).filter_by(
+                dataset="cyq_chips",
+                scope_value="600519",
+            ).one()
+            if damage == "missing_cached_row":
+                session.delete(row)
+            else:
+                row.status = "fetch_failed"
+            session.commit()
+        if damage == "cold_status_tamper":
+            _reset_collector_state_for_tests()
+
+        recovery_boundary = boundary + timedelta(microseconds=1)
+        recovery_lease = _claim_real_collector_job(
+            store,
+            task_id="incremental-cache-recovery-job",
+            worker_id="recovery-worker",
+            now=recovery_boundary,
+        )
+        recovery_provider = FakeProvider(
+            {
+                "cyq_chips": pd.DataFrame(
+                    [
+                        {
+                            "trade_date": trade_day.strftime("%Y%m%d"),
+                            "price": 100.0,
+                        }
+                    ]
+                )
+            }
+        )
+
+        with pytest.raises(ValueError):
+            ResearchDatasetCollector(
+                recovery_provider,
+                repository,
+                RawArtifactStore(tmp_path / "raw-incremental-cache-recovery"),
+                clock=lambda: recovery_boundary,
+            ).collect_dataset(
+                "600519",
+                "cyq_chips",
+                as_of=recovery_boundary,
+                lease=recovery_lease,
+            )
+
+        assert recovery_provider.calls == []
+    finally:
+        DatabaseManager.reset_instance()
+        Config.reset_instance()
+
+
+def test_corrupt_current_state_checkpoint_fails_closed_without_provider_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db, store, repository = _build_real_collector_store(
+        tmp_path,
+        monkeypatch,
+        database_name="current-state-corrupt.db",
+    )
+    boundary = datetime.now(timezone.utc)
+    seed_lease = _claim_real_collector_job(
+        store,
+        task_id="current-state-seed-job",
+        worker_id="seed-worker",
+        now=boundary,
+    )
+    try:
+        repository.write_dataset(
+            DatasetSnapshotInput(
+                dataset="stock_basic",
+                scope_type="stock",
+                scope_value="600519",
+                market="A",
+                provider="tushare",
+                schema_version=DATASET_DEFINITIONS["stock_basic"].schema_version,
+                data_as_of=boundary,
+                available_at=boundary,
+                observed_at=boundary,
+                status="available",
+                normalized=[
+                    {
+                        "ts_code": "600519.SH",
+                        "name": "seed company",
+                    }
+                ],
+                knowledge_as_of=boundary,
+            ),
+            lease=seed_lease,
+        )
+        with db.get_session() as session:
+            row = session.query(ResearchDatasetSnapshotRecord).filter_by(
+                dataset="stock_basic",
+                scope_value="600519",
+            ).one()
+            row.normalized_json = json.dumps(
+                [{"ts_code": "600519.SH", "name": "tampered company"}]
+            )
+            session.commit()
+
+        replay_lease = _claim_real_collector_job(
+            store,
+            task_id="current-state-replay-job",
+            worker_id="replay-worker",
+            now=boundary + timedelta(microseconds=1),
+        )
+        provider = FakeProvider(
+            {
+                "stock_basic": pd.DataFrame(
+                    [{"ts_code": "600519.SH", "name": "provider company"}]
+                )
+            }
+        )
+
+        with pytest.raises(ValueError):
+            ResearchDatasetCollector(
+                provider,
+                repository,
+                RawArtifactStore(tmp_path / "raw-current-state-replay"),
+                clock=lambda: boundary + timedelta(microseconds=1),
+            ).collect_dataset(
+                "600519",
+                "stock_basic",
+                as_of=boundary + timedelta(microseconds=1),
+                lease=replay_lease,
+                reference_mode="historical",
+            )
+
+        assert provider.calls == []
+    finally:
+        DatabaseManager.reset_instance()
+        Config.reset_instance()
+
+
 def test_bundle_retry_only_refetches_endpoint_that_failed_transiently(
     tmp_path: Path,
 ) -> None:
@@ -818,6 +1435,7 @@ def test_lease_reclaim_hydrates_job_binding_from_database_without_refetch(
             "600519", "daily", as_of=as_of, lease=first_lease
         )
         with db.get_session() as session:
+            assert first.snapshot is not None
             for index in range(250):
                 session.add(
                     JobEventRecord(
@@ -828,13 +1446,16 @@ def test_lease_reclaim_hydrates_job_binding_from_database_without_refetch(
                             {
                                 "dataset": "daily",
                                 "scope_type": "stock",
-                                "scope_value": f"{index:06d}",
-                                "knowledge_as_of": as_of.replace(
-                                    tzinfo=None
-                                ).isoformat(timespec="microseconds")
+                                "scope_value": "600519",
+                                "knowledge_as_of": (
+                                    as_of + timedelta(microseconds=index + 1)
+                                ).replace(tzinfo=None).isoformat(
+                                    timespec="microseconds"
+                                )
                                 + "Z",
-                                "content_hash": f"{index:064x}",
-                                "status": "available",
+                                "content_hash": first.snapshot.content_hash,
+                                "status": first.status,
+                                "retryable": False,
                             },
                             sort_keys=True,
                         ),
@@ -1386,7 +2007,7 @@ def test_live_reference_survives_reclaim_after_terminal_stock_basic_result(
         Config.reset_instance()
 
 
-def test_historical_stock_basic_does_not_reuse_later_observed_legacy_row(
+def test_historical_stock_basic_does_not_reuse_later_observed_row(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1441,7 +2062,7 @@ def test_historical_stock_basic_does_not_reuse_later_observed_legacy_row(
                         "industry": "2026 industry",
                     }
                 ],
-                knowledge_as_of=historical_boundary,
+                knowledge_as_of=now,
             ),
             lease=legacy_lease,
         )

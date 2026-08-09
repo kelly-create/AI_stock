@@ -89,6 +89,7 @@ describe('researchApi', () => {
         snapshot_hash: 'c'.repeat(64),
         factor_snapshot_hash: 'd'.repeat(64),
         evidence_snapshot_hash: 'e'.repeat(64),
+        debate_snapshot_hash: 'f'.repeat(64),
         origin_job_id: 'job-1',
         created_at: '2026-08-08T15:05:00+08:00',
       },
@@ -102,6 +103,7 @@ describe('researchApi', () => {
     expect(result.fieldDictionaryVersion).toBe('field-v1');
     expect(result.factorSnapshotHash).toBe('d'.repeat(64));
     expect(result.evidenceSnapshotHash).toBe('e'.repeat(64));
+    expect(result.debateSnapshotHash).toBe('f'.repeat(64));
     expect(result.snapshot).toEqual({
       source_payload: { original_key: true },
     });
@@ -373,6 +375,149 @@ describe('researchApi', () => {
 
     await expect(researchApi.getEvidence('malformed')).rejects.toThrow(
       'Research evidence detail response is malformed',
+    );
+  });
+
+  it('lists debates by durable job with evidence filtering and opaque pagination', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        items: [{
+          id: 41,
+          stock_code: '600519',
+          market: 'cn',
+          debate_engine_version: 'research-debate-v1',
+          output_schema_version: 'research-debate-output-v1',
+          prompt_version: 'research-debate-prompt-v1',
+          evidence_snapshot_hash: 'a'.repeat(64),
+          request_hash: 'b'.repeat(64),
+          model_route_fingerprint: 'c'.repeat(64),
+          as_of: '2026-08-08T08:00:00Z',
+          available_at: '2026-08-08T08:00:00Z',
+          status: 'available',
+          bull_turn_hash: 'd'.repeat(64),
+          bear_turn_hash: 'e'.repeat(64),
+          bull_argument_count: 2,
+          bear_argument_count: 1,
+          open_question_count: 1,
+          debate_hash: 'f'.repeat(64),
+          origin_job_id: 'job-1',
+          created_at: '2026-08-08T08:00:00Z',
+        }],
+        count: 1,
+        next_cursor: 'opaque-debate-next',
+      },
+    });
+
+    const result = await researchApi.listDebates({
+      jobId: 'job / 1',
+      evidenceSnapshotHash: 'a'.repeat(64),
+      asOf: '2026-08-08T16:00:00+08:00',
+      cursor: 'opaque-debate-current',
+      limit: 20,
+    });
+
+    expect(get).toHaveBeenCalledWith('/api/v1/research/debates', {
+      params: {
+        job_id: 'job / 1',
+        evidence_snapshot_hash: 'a'.repeat(64),
+        as_of: '2026-08-08T16:00:00+08:00',
+        cursor: 'opaque-debate-current',
+        limit: 20,
+      },
+    });
+    expect(result.nextCursor).toBe('opaque-debate-next');
+    expect(result.items[0]).toMatchObject({
+      debateHash: 'f'.repeat(64),
+      bullArgumentCount: 2,
+      bearArgumentCount: 1,
+      openQuestionCount: 1,
+    });
+  });
+
+  it('gets typed debate detail and rejects malformed nested payloads', async () => {
+    const summary = {
+      id: 41,
+      stock_code: '600519',
+      market: 'cn',
+      debate_engine_version: 'research-debate-v1',
+      output_schema_version: 'research-debate-output-v1',
+      prompt_version: 'research-debate-prompt-v1',
+      evidence_snapshot_hash: 'a'.repeat(64),
+      request_hash: 'b'.repeat(64),
+      model_route_fingerprint: 'c'.repeat(64),
+      as_of: '2026-08-08T08:00:00Z',
+      available_at: '2026-08-08T08:00:00Z',
+      status: 'available',
+      bull_turn_hash: 'd'.repeat(64),
+      bear_turn_hash: 'e'.repeat(64),
+      bull_argument_count: 1,
+      bear_argument_count: 0,
+      open_question_count: 1,
+      debate_hash: 'f'.repeat(64),
+      origin_job_id: 'job-1',
+      created_at: '2026-08-08T08:00:00Z',
+    };
+    const detail = {
+      ...summary,
+      debate: {
+        debate_engine_version: 'research-debate-v1',
+        output_schema_version: 'research-debate-output-v1',
+        prompt_version: 'research-debate-prompt-v1',
+        stock_code: '600519',
+        market: 'cn',
+        as_of: '2026-08-08T08:00:00Z',
+        available_at: '2026-08-08T08:00:00Z',
+        status: 'available',
+        evidence_snapshot_hash: 'a'.repeat(64),
+        request_hash: 'b'.repeat(64),
+        model_route_fingerprint: 'c'.repeat(64),
+        bull_turn_hash: 'd'.repeat(64),
+        bear_turn_hash: 'e'.repeat(64),
+        failed_stances: [],
+        limitations: [],
+        turns: [{
+          turn_hash: 'd'.repeat(64),
+          prompt_fingerprint: '1'.repeat(64),
+          model_used: 'provider/model',
+          stance: 'bull',
+          summary: 'A bounded Bull view.',
+          arguments: [{
+            id: 'bull-1',
+            statement: 'Value evidence is supportive.',
+            claim_ids: ['claim-1'],
+            citation_ids: ['citation-1'],
+            confidence: 0.7,
+            limitations: [],
+          }],
+          open_questions: ['Will the valuation gap persist?'],
+        }],
+      },
+    };
+    get
+      .mockResolvedValueOnce({ data: detail })
+      .mockResolvedValueOnce({
+        data: { ...detail, debate: { ...detail.debate, turns: [{ arguments: {} }] } },
+      })
+      .mockResolvedValueOnce({
+        data: { ...detail, debate: { ...detail.debate, failed_stances: ['bear'] } },
+      });
+
+    const response = await researchApi.getDebate('hash / debate');
+
+    expect(get).toHaveBeenNthCalledWith(
+      1,
+      '/api/v1/research/debates/hash%20%2F%20debate',
+    );
+    expect(response.debate.turns[0].arguments[0].claimIds).toEqual(['claim-1']);
+    expect(response.debate.turns[0].openQuestions).toEqual([
+      'Will the valuation gap persist?',
+    ]);
+
+    await expect(researchApi.getDebate('malformed')).rejects.toThrow(
+      'Research debate detail response is malformed',
+    );
+    await expect(researchApi.getDebate('malformed-failure')).rejects.toThrow(
+      'Research debate detail response is malformed',
     );
   });
 });

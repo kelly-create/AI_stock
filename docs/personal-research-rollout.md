@@ -104,9 +104,22 @@ Evidence 写入 `research_evidence_snapshots`，并以 `research_evidence_snapsh
 
 关闭 `RESEARCH_EVIDENCE_ENABLED` 只停止新 Evidence 的采集、构建和写入；已有 Evidence、Research Snapshot 及其只读 API 仍可查询。Web 的 Run Flow 默认折叠“研究证据”，只有用户展开且当前来源是 Task 时才按 `taskId` 加载；先读分页摘要，再按 hash 加载展开项的 claim/citation。空结果使用中性状态，失败可重试，Task 切换会丢弃旧请求结果；来源链接仅在协议为 `http` / `https` 时渲染，并使用 `noopener noreferrer`。
 
+## PR4 Bounded Research Debate 与可见性
+
+启用 `RESEARCH_DEBATE_ENABLED=true` 还要求 Personal Research、Durable Jobs、Tushare Research、Factors 和 Evidence 全部开启。有可引用 Evidence 时，Durable Worker 从同一份冻结 Evidence 顺序执行 Bull、Bear 两个独立、纯文本的高层 completion；每次 durable attempt 对每个尚未解析的 stance 至多调用一次，已经持久化的成功或终止失败 stance 不会重调。provider 返回到检查点提交之间的崩溃窗口仍可能让未持久化 stance 在 retry 中再次调用，因此不承诺整个 job 生命周期的物理请求 exactly-once。没有可引用 claim 时调用数为零。Debate 无工具、网络或记忆入口，不检索新资料，也不产生 arbiter、thesis、动作、目标价或仓位。每侧最多 6 条 argument 和 6 条 open question；每条 argument 最多引用 8 个既有 claim ID 和 8 个既有 citation ID，限制文本和置信度均有界。模型输出只是解释层，不能成为新 Evidence。
+
+不可变的 exact request、单侧 turn 和最终 snapshot 分别持久化到 `research_debate_requests`、`research_debate_turns`、`research_debate_snapshots`；request hash 可作为 API lineage 摘要，但 exact messages 绝不通过 API 暴露。写入会重新校验 canonical payload/hash、Evidence lineage、Bull/Bear 顺序与计数，并受当前 lease、过期时间和取消状态 fence。单侧终止失败得到 `partial`，双侧终止失败得到 `generation_failed`；瞬时错误回到 durable retry。每个已确定的 stance 都在继续下一侧前先写入 lease-fenced 检查点：成功侧绑定 `research_debate_turn`，终止失败侧绑定仅含安全错误码的 `research_debate_failure`。因此 lease reclaim 只补同一 request hash 下尚未解析的 stance，prompt/route 漂移会 fail closed，不会重调已终止侧或拼接不同合同；完成后再绑定 `research_debate_snapshot`。`research_snapshots.debate_snapshot_hash` 固定本轮 Debate，且必须与 `evidence_snapshot_hash` 同链。
+
+只读接口：
+
+- `GET /api/v1/research/debates`：至少提供 `job_id`、`research_snapshot_hash`、`stock_code` 之一；可选 `evidence_snapshot_hash`、带 UTC offset 的 `as_of`、opaque `cursor` 和 `limit`（默认 20、最大 100）。结果按 `as_of DESC, id DESC` 稳定分页，只返回 status、Bull/Bear argument count、open-question count、hash 与 lineage 摘要，不返回完整 Debate 或 request messages。
+- `GET /api/v1/research/debates/{debate_hash}`：按 64 位小写 SHA-256 读取严格 typed 的 bounded payload。`turns` 固定为 Bull/Bear 顺序；每项只包含 turn/prompt hash、实际模型、stance、summary、arguments 和 open questions，失败侧另以 `{stance,error_code}` 记录。
+
+关闭 `RESEARCH_DEBATE_ENABLED` 只停止新 request/turn/snapshot 的构建和写入，历史 Debate 及其 API 仍可读取。Web Run Flow 在“研究证据”下方默认折叠“研究辩论”，仅对 Task 来源按需加载分页摘要和 hash 详情；列表、详情、加载更多均可重试，切换 Task 会丢弃旧响应，重复页按 Debate hash 去重。所有模型文本按纯文本渲染，不创建链接、不解释 HTML，也不使用浏览器原生 `title` 承载隐藏内容。
+
 ## 备份与恢复
 
-生产切换前使用 [SQLite 在线备份、校验与恢复](operations/sqlite-backup.md) 创建带 SHA-256、Schema/Index hash、核心表计数、`quick_check` 和外键检查的备份对，再按[研究原始数据归档与取证恢复](operations/research-raw-backup.md)创建与该 SQLite 哈希及引用集合绑定的 raw 归档。恢复演练必须执行 SQLite 严格校验与异名隔离恢复、raw 严格校验与隔离恢复，并通过 `RawArtifactStore` 抽样回读；记录数据库大小、raw 文件数与字节数、运行环境及总耗时，目标 RTO 不超过 15 分钟。默认核心表包括任务、事件、Outbox、组件健康以及不可变 Research Dataset / Factor / Evidence / Research Snapshot 表；恢复演练不得只验证业务报告表。
+生产切换前使用 [SQLite 在线备份、校验与恢复](operations/sqlite-backup.md) 创建带 SHA-256、Schema/Index hash、核心表计数、`quick_check` 和外键检查的备份对，再按[研究原始数据归档与取证恢复](operations/research-raw-backup.md)创建与该 SQLite 哈希及引用集合绑定的 raw 归档。恢复演练必须执行 SQLite 严格校验与异名隔离恢复、raw 严格校验与隔离恢复，并通过 `RawArtifactStore` 抽样回读；记录数据库大小、raw 文件数与字节数、运行环境及总耗时，目标 RTO 不超过 15 分钟。默认核心表包括任务、事件、Outbox、组件健康以及不可变 Research Dataset / Factor / Evidence / Debate Request / Debate Turn / Debate Snapshot / Research Snapshot 表；恢复演练不得只验证业务报告表。
 
 ## 功能开关和依赖
 

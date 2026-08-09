@@ -111,6 +111,48 @@ curl -fsS --get "$API_BASE/api/v1/research/evidence" \
 
 To roll back, set `RESEARCH_EVIDENCE_ENABLED=false` first and recreate the Worker, Analyzer, and Server. Do not drop or downgrade the Evidence table and do not delete existing JobEvent/hash bindings. Confirm that the same read-only query still returns historical data before disabling the remaining personal-research flags in reverse order.
 
+### 3.5 PR4 Bounded Research Debate (opt in)
+
+Apply the additive migration, keep the full PR3 dependency chain enabled, and then enable Debate:
+
+```bash
+python -m src.migrations --apply
+# .env
+PERSONAL_RESEARCH_ENABLED=true
+DURABLE_JOBS_ENABLED=true
+TUSHARE_RESEARCH_ENABLED=true
+RESEARCH_FACTORS_ENABLED=true
+RESEARCH_EVIDENCE_ENABLED=true
+RESEARCH_DEBATE_ENABLED=true
+
+docker compose -f ./docker/docker-compose.yml --profile durable up -d --force-recreate worker
+docker compose -f ./docker/docker-compose.yml up -d --force-recreate analyzer server
+```
+
+When citable Evidence exists, the Worker runs two independent, bounded, text-only high-level completions, Bull and Bear, from the same frozen Evidence. Each durable attempt makes at most one high-level call for each unresolved stance; a persisted success or terminal failure is never called again. A crash between provider return and checkpoint commit may cause an unpersisted stance to be called again on retry, so this is not a physical-request exactly-once guarantee across the whole job lifetime. It makes no model call when Evidence has no citable claim. Debate cannot use tools, network access, or memory, cannot collect new material, and produces no arbiter, thesis, trade action, price target, or position advice. Each stance has at most six arguments and six open questions. Arguments may only reference claim/citation IDs already present in frozen Evidence, so model interpretation never becomes new evidence. A terminal failure for one stance produces `partial`; failures for both produce `generation_failed`. Transient failures return to durable retry, while a persisted turn that passes full revalidation may be reused after lease reclaim to avoid a duplicate call.
+
+Immutable request, turn, and snapshot records are stored in `research_debate_requests`, `research_debate_turns`, and `research_debate_snapshots`. Every artifact write and JobEvent binding is fenced by the current durable lease and cancellation state, so a stale or cancelled lease cannot commit. A successful stance binds `research_debate_turn`; a terminal stance binds `research_debate_failure` with only a safe error code. Retries fill only unresolved stances and fail closed on prompt or route drift. A `research_debate_snapshot` JobEvent records the actual consuming task; `research_snapshots.debate_snapshot_hash` pins the Debate while retaining its `evidence_snapshot_hash` lineage. Exact request messages belong only to the persisted execution record and are never exposed by a Debate API.
+
+Read-only APIs do not depend on `RESEARCH_DEBATE_ENABLED`, so historical artifacts remain readable after new writes are disabled:
+
+- `GET /api/v1/research/debates` requires at least one of `job_id`, `research_snapshot_hash`, or `stock_code`. Optional filters are `evidence_snapshot_hash`, offset-aware `as_of`, opaque `cursor`, and `limit` (default 20, maximum 100). Stable `as_of DESC, id DESC` pages contain only status, argument/open-question counts, hashes, and lineage summaries, never the complete Debate.
+- `GET /api/v1/research/debates/{debate_hash}` accepts a 64-character lowercase SHA-256 and returns the strict bounded typed payload, including Bull/Bear turns, failure codes, and limitations, but never request messages.
+
+In Web Run Flow, Research Debate sits below Research Evidence, is collapsed by default, and loads paginated summaries only after expansion for a Task source. Detail is then loaded lazily by hash. List, detail, and load-more failures are retryable; switching tasks discards stale responses. All model text is rendered as plain text, without executable HTML or generated links.
+
+Use one completed durable task to verify list and detail reads. When admin authentication is enabled, add a valid session Cookie to `curl`:
+
+```bash
+API_BASE="${API_BASE:-http://127.0.0.1:8000}"
+TASK_ID="replace-with-completed-task-id"
+curl -fsS --get "$API_BASE/api/v1/research/debates" \
+  --data-urlencode "job_id=$TASK_ID" \
+  --data-urlencode "limit=20"
+curl -fsS "$API_BASE/api/v1/research/debates/replace-with-64-char-lowercase-hash"
+```
+
+To roll back, set `RESEARCH_DEBATE_ENABLED=false` first and recreate the Worker, Analyzer, and Server. Do not drop or downgrade the three Debate tables, and do not remove request/turn/snapshot records, JobEvents, or Research Snapshot hash bindings. Confirm historical reads with the same API calls before disabling upstream flags in reverse order.
+
 ### 4. Common Management Commands
 
 ```bash

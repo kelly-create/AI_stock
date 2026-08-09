@@ -22,6 +22,7 @@ from src.services.untrusted_external_content import (
 )
 
 from .canonical import canonical_hash, canonical_json as encode_canonical_json, canonicalize
+from .debate_security import strict_public_identifier, strict_version_identifier
 from .evidence_security import (
     MAX_EVIDENCE_CLAIMS,
     MAX_EVIDENCE_EXCERPT_CHARS,
@@ -175,7 +176,11 @@ class EvidenceCitation:
     canonical_url: Optional[str] = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "id", require_identifier(self.id, field="citation.id"))
+        object.__setattr__(
+            self,
+            "id",
+            strict_public_identifier(self.id, field="citation.id"),
+        )
         relation = str(self.relation or "").strip().casefold()
         if relation not in EVIDENCE_RELATIONS:
             raise ValueError(f"unsupported evidence relation: {self.relation!r}")
@@ -263,7 +268,11 @@ class ResearchClaim:
     available_at: datetime
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "id", require_identifier(self.id, field="claim.id"))
+        object.__setattr__(
+            self,
+            "id",
+            strict_public_identifier(self.id, field="claim.id"),
+        )
         kind = str(self.kind or "").strip().casefold()
         if kind not in RESEARCH_CLAIM_KINDS:
             raise ValueError(f"unsupported research claim kind: {self.kind!r}")
@@ -283,7 +292,10 @@ class ResearchClaim:
             raise ValueError(f"unsupported research claim status: {self.status!r}")
         object.__setattr__(self, "status", status)
         citation_ids = tuple(
-            require_identifier(item, field=f"claim.citation_ids[{index}]")
+            strict_public_identifier(
+                item,
+                field=f"claim.citation_ids[{index}]",
+            )
             for index, item in enumerate(self.citation_ids)
         )
         if len(citation_ids) != len(set(citation_ids)):
@@ -594,15 +606,13 @@ def build_evidence_snapshot(
 
     if not isinstance(build_input, EvidenceBuildInput):
         raise TypeError("build_input must be an EvidenceBuildInput")
-    engine_version = _required_text(
+    engine_version = strict_version_identifier(
         evidence_engine_version,
-        field_name="evidence_engine_version",
-        max_chars=64,
+        field="evidence_engine_version",
     )
-    policy_version = _required_text(
+    policy_version = strict_version_identifier(
         claim_policy_version,
-        field_name="claim_policy_version",
-        max_chars=64,
+        field="claim_policy_version",
     )
     registry, dataset_hashes, factor_hash = _artifact_registry(build_input)
     _validate_graph(
@@ -691,6 +701,14 @@ def validate_evidence_snapshot(snapshot: FrozenEvidenceSnapshot) -> None:
 
     if not isinstance(snapshot, FrozenEvidenceSnapshot):
         raise TypeError("snapshot must be a FrozenEvidenceSnapshot")
+    strict_version_identifier(
+        snapshot.evidence_engine_version,
+        field="evidence_engine_version",
+    )
+    strict_version_identifier(
+        snapshot.claim_policy_version,
+        field="claim_policy_version",
+    )
     snapshot_as_of = require_aware_utc(snapshot.as_of, field="snapshot.as_of")
     available_at = require_aware_utc(snapshot.available_at, field="snapshot.available_at")
     if available_at > snapshot_as_of:
@@ -1000,15 +1018,13 @@ def hydrate_evidence_snapshot(
     frozen = FrozenEvidenceSnapshot(
         stock_code=_required_text(payload.get("stock_code"), field_name="stock_code", max_chars=64),
         market=_required_text(payload.get("market"), field_name="market", max_chars=32),
-        evidence_engine_version=_required_text(
+        evidence_engine_version=strict_version_identifier(
             payload.get("evidence_engine_version"),
-            field_name="evidence_engine_version",
-            max_chars=64,
+            field="evidence_engine_version",
         ),
-        claim_policy_version=_required_text(
+        claim_policy_version=strict_version_identifier(
             payload.get("claim_policy_version"),
-            field_name="claim_policy_version",
-            max_chars=64,
+            field="claim_policy_version",
         ),
         as_of=require_aware_utc(payload.get("as_of"), field="as_of"),
         available_at=require_aware_utc(payload.get("available_at"), field="available_at"),

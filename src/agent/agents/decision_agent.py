@@ -191,6 +191,16 @@ should sum to 100; all-zero means no effective signal and must not be faked.
                         parts.append(f"Extra data: {json.dumps(extra_keys, ensure_ascii=False, default=str)}")
                 parts.append("")
 
+        research_debate_prompt_context = ctx.meta.get(
+            "research_debate_prompt_context"
+        )
+        if (
+            isinstance(research_debate_prompt_context, str)
+            and research_debate_prompt_context
+        ):
+            parts.append(research_debate_prompt_context)
+            parts.append("")
+
         invalid_opinions = ctx.meta.get("invalid_opinions") or []
         if invalid_opinions:
             reason_labels = {

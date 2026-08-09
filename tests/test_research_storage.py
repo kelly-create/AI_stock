@@ -54,6 +54,12 @@ class ResearchJobPayload(BaseModel):
     stock_code: str
 
 
+class ScheduledResearchJobPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    stock_codes: list[str]
+
+
 @pytest.fixture()
 def research_db(tmp_path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("DATABASE_MIGRATION_MODE", "auto")
@@ -62,6 +68,12 @@ def research_db(tmp_path, monkeypatch: pytest.MonkeyPatch):
     db = DatabaseManager(db_url=f"sqlite:///{(tmp_path / 'research.db').as_posix()}")
     registry = DurableJobHandlerRegistry()
     registry.register("research", 1, ResearchJobPayload, lambda payload: payload.stock_code)
+    registry.register(
+        "scheduled_analysis",
+        1,
+        ScheduledResearchJobPayload,
+        lambda payload: payload.stock_codes,
+    )
     store = DurableJobStore(
         registry,
         db,
@@ -82,6 +94,26 @@ def _claim(store: DurableJobStore, task_id: str = "research-job"):
             payload={"stock_code": "600519"},
             task_id=task_id,
             stock_code="600519",
+        ),
+        now=NOW,
+    )
+    claimed = store.claim_next("research-worker", now=NOW)
+    assert claimed is not None
+    assert claimed.task_id == task_id
+    return claimed, LeaseFence(
+        job_id=claimed.task_id,
+        worker_id=claimed.worker_id,
+        lease_token=claimed.lease_token,
+    )
+
+
+def _claim_multi_stock(store: DurableJobStore, task_id: str):
+    store.enqueue(
+        JobEnqueueRequest(
+            job_type="scheduled_analysis",
+            payload={"stock_codes": ["600519", "601398"]},
+            task_id=task_id,
+            stock_code="scheduled_analysis",
         ),
         now=NOW,
     )
@@ -221,6 +253,33 @@ def _stock_basic_input(
     )
 
 
+def _dataset_projection(
+    snapshot: DatasetSnapshotInput,
+    content_hash: str,
+) -> dict[str, object]:
+    normalized = snapshot.normalized
+    rows = (
+        list(normalized)
+        if isinstance(normalized, list)
+        else [dict(normalized)]
+        if isinstance(normalized, dict)
+        else []
+    )
+    return {
+        snapshot.dataset: {
+            "dataset": snapshot.dataset,
+            "status": snapshot.status,
+            "row_count": len(rows),
+            "available_at": snapshot.available_at,
+            "data_as_of": snapshot.data_as_of,
+            "content_hash": content_hash,
+            "content_hashes": [content_hash],
+            "raw_ref": snapshot.raw_ref,
+            "rows": rows,
+        }
+    }
+
+
 def test_stock_basic_reference_and_snapshot_binding_are_one_transaction(
     research_db,
     monkeypatch: pytest.MonkeyPatch,
@@ -242,12 +301,14 @@ def test_stock_basic_reference_and_snapshot_binding_are_one_transaction(
         repository.write_dataset(
             _stock_basic_input("600519", reference_time),
             lease=lease,
+            now=reference_time,
             establish_reference_for="600519",
         )
 
     assert repository.get_research_reference_time(
         scope_value="600519",
         lease=lease,
+        now=reference_time,
     ) is None
     with db.get_session() as session:
         assert session.scalar(
@@ -264,7 +325,10 @@ def test_stock_basic_reference_and_snapshot_binding_are_one_transaction(
 
 def test_research_reference_time_is_unique_per_job_and_stock(research_db) -> None:
     db, store = research_db
-    _claimed, lease = _claim(store, task_id="multi-stock-reference-job")
+    _claimed, lease = _claim_multi_stock(
+        store,
+        task_id="multi-stock-reference-job",
+    )
     repository = ResearchSnapshotRepository(db)
     first_time = NOW + timedelta(seconds=1)
     second_time = NOW + timedelta(seconds=3)
@@ -272,21 +336,25 @@ def test_research_reference_time_is_unique_per_job_and_stock(research_db) -> Non
     repository.write_dataset(
         _stock_basic_input("600519", first_time),
         lease=lease,
+        now=first_time,
         establish_reference_for="600519",
     )
     repository.write_dataset(
         _stock_basic_input("601398", second_time),
         lease=lease,
+        now=second_time,
         establish_reference_for="601398",
     )
 
     assert repository.get_research_reference_time(
         scope_value="600519",
         lease=lease,
+        now=second_time,
     ) == first_time
     assert repository.get_research_reference_time(
         scope_value="601398",
         lease=lease,
+        now=second_time,
     ) == second_time
     with db.get_session() as session:
         assert session.scalar(
@@ -746,11 +814,24 @@ def test_factor_and_research_snapshots_are_hash_idempotent_and_version_sensitive
         market="A",
         company_profile="industrial",
         engine_bundle_version="factor-engine-v1",
-        factor_payload={"value": {"score": 72}, "unknown": None},
+        factor_payload={
+            "value": {"score": 72},
+            "quality": {"score": 80},
+            "trend_timing": {"score": 68},
+            "catalyst": {"score": 55},
+            "risk": {"score": 20},
+            "unknown": None,
+        },
         input_dataset_hashes=[dataset.content_hash],
         status="available",
         coverage=0.8,
-        unknowns=["roe_5y"],
+        unknowns=[
+            {
+                "component": "quality",
+                "metric": "roe_5y",
+                "reason": "source metric unavailable",
+            }
+        ],
         as_of=NOW,
         available_at=NOW - timedelta(minutes=1),
         value_score=72,
@@ -779,12 +860,35 @@ def test_factor_and_research_snapshots_are_hash_idempotent_and_version_sensitive
         available_at=NOW - timedelta(seconds=1),
         status="available",
         canonical_payload={
-            "datasets": [dataset.content_hash],
+            "datasets": _dataset_projection(_dataset_input(), dataset.content_hash),
             "factor": factor_first.content_hash,
+            "factors": factor_input.factor_payload,
             "trace_id": "ignored",
         },
         factor_snapshot_hash=factor_first.content_hash,
     )
+    for field_name, forged_value in (
+        ("status", "fetch_failed"),
+        ("provider", "forged-provider"),
+        ("schema_version", "forged-v9"),
+    ):
+        forged_datasets = _dataset_projection(
+            _dataset_input(),
+            dataset.content_hash,
+        )
+        forged_datasets["daily_basic"][field_name] = forged_value
+        with pytest.raises(ValueError, match="dataset projection conflicts"):
+            repository.write_research_snapshot(
+                replace(
+                    research_input,
+                    canonical_payload={
+                        **research_input.canonical_payload,
+                        "datasets": forged_datasets,
+                    },
+                ),
+                lease=lease,
+                now=NOW + timedelta(seconds=4),
+            )
     research_first = repository.write_research_snapshot(
         research_input, lease=lease, now=NOW + timedelta(seconds=4)
     )
@@ -792,7 +896,8 @@ def test_factor_and_research_snapshots_are_hash_idempotent_and_version_sensitive
         replace(research_input, canonical_payload={
             "trace_id": "different",
             "factor": factor_first.content_hash,
-            "datasets": [dataset.content_hash],
+            "factors": factor_input.factor_payload,
+            "datasets": _dataset_projection(_dataset_input(), dataset.content_hash),
         }),
         lease=lease,
         now=NOW + timedelta(seconds=5),
@@ -858,7 +963,11 @@ def test_factor_and_research_dedupe_bind_each_consuming_job_once(research_db) ->
         as_of=NOW,
         available_at=NOW - timedelta(seconds=1),
         status="available",
-        canonical_payload={"factor": first_factor.content_hash},
+        canonical_payload={
+            "factor": first_factor.content_hash,
+            "factors": factor_input.factor_payload,
+            "datasets": {},
+        },
         factor_snapshot_hash=first_factor.content_hash,
     )
     first_snapshot = repository.write_research_snapshot(
@@ -906,8 +1015,11 @@ def test_read_queries_return_detached_decoded_artifacts_when_flags_are_off(
     db, store = research_db
     _claimed, lease = _claim(store)
     repository = ResearchSnapshotRepository(db)
+    dataset_input = _dataset_input(
+        normalized=[{"trade_date": "20260807", "pe_ttm": 20.5}]
+    )
     dataset = repository.write_dataset(
-        _dataset_input(normalized=[{"trade_date": "20260807", "pe_ttm": 20.5}]),
+        dataset_input,
         lease=lease,
         now=NOW + timedelta(seconds=1),
     )
@@ -952,7 +1064,22 @@ def test_read_queries_return_detached_decoded_artifacts_when_flags_are_off(
             as_of=NOW,
             available_at=NOW - timedelta(seconds=1),
             status="available",
-            canonical_payload={"datasets": [dataset.content_hash]},
+            canonical_payload={
+                "datasets": _dataset_projection(
+                    dataset_input,
+                    dataset.content_hash,
+                ),
+                "factors": {
+                    "value": {"score": 72.0},
+                    "trend_timing": {
+                        "metrics": [
+                            {"name": "return_5d", "status": "available", "score": 61.0},
+                            {"name": "return_10d", "status": "available", "score": 67.0},
+                            {"name": "return_20d", "status": "available", "score": 74.0},
+                        ]
+                    },
+                },
+            },
             factor_snapshot_hash=factors.content_hash,
         ),
         lease=lease,
@@ -995,7 +1122,9 @@ def test_read_queries_return_detached_decoded_artifacts_when_flags_are_off(
     assert factor_row_20d["requested_horizon"] == 20
     assert factor_row_20d["requested_trend"]["score"] == 74.0
     assert snapshot_row is not None
-    assert snapshot_row["snapshot"]["datasets"] == [dataset.content_hash]
+    assert snapshot_row["snapshot"]["datasets"]["daily_basic"][
+        "content_hash"
+    ] == dataset.content_hash
     assert snapshot_row["snapshot_hash"] == snapshot.content_hash
 
 
@@ -1007,8 +1136,8 @@ def test_read_cutoffs_apply_to_both_availability_and_data_time(research_db) -> N
         replace(
             _dataset_input(dataset="visible"),
             data_as_of=NOW - timedelta(hours=1),
-            available_at=NOW - timedelta(minutes=2),
-            knowledge_as_of=NOW,
+            available_at=NOW - timedelta(hours=2),
+            knowledge_as_of=NOW - timedelta(hours=1),
         ),
         lease=lease,
         now=NOW + timedelta(seconds=1),
@@ -1073,50 +1202,38 @@ def test_read_cutoffs_apply_to_both_availability_and_data_time(research_db) -> N
 def test_historical_dataset_reads_reject_future_stock_basic_observations(
     research_db,
 ) -> None:
-    db, _store = research_db
+    db, store = research_db
     cutoff = datetime(2010, 1, 1, tzinfo=timezone.utc)
     old_boundary = datetime(2001, 8, 27, tzinfo=timezone.utc)
     future_observation = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    with db.get_session() as session:
-        session.add_all(
-            [
-                ResearchDatasetSnapshotRecord(
-                    dataset="stock_basic",
-                    scope_type="stock",
-                    scope_value="600519",
-                    market="A",
-                    provider="tushare",
-                    schema_version="legacy-stock-basic-v1",
-                    data_as_of=old_boundary,
-                    available_at=old_boundary,
-                    observed_at=future_observation,
-                    status="available",
-                    normalized_json=json.dumps(
-                        [{"name": "2026 renamed", "industry": "2026 industry"}]
-                    ),
-                    content_hash="d" * 64,
-                    created_at=future_observation,
-                ),
-                ResearchDatasetSnapshotRecord(
-                    dataset="income",
-                    scope_type="stock",
-                    scope_value="600519",
-                    market="A",
-                    provider="tushare",
-                    schema_version="legacy-income-v1",
-                    data_as_of=old_boundary,
-                    available_at=old_boundary,
-                    observed_at=future_observation,
-                    status="available",
-                    normalized_json=json.dumps([{"revenue": 1.0}]),
-                    content_hash="e" * 64,
-                    created_at=future_observation,
-                ),
-            ]
-        )
-        session.commit()
-
+    _claimed, lease = _claim(store, "historical-dataset-read")
     repository = ResearchSnapshotRepository(db)
+    for dataset, schema_version, normalized in (
+        (
+            "stock_basic",
+            "legacy-stock-basic-v1",
+            [{"name": "2026 renamed", "industry": "2026 industry"}],
+        ),
+        ("income", "legacy-income-v1", [{"revenue": 1.0}]),
+    ):
+        repository.write_dataset(
+            DatasetSnapshotInput(
+                dataset=dataset,
+                scope_type="stock",
+                scope_value="600519",
+                market="A",
+                provider="tushare",
+                schema_version=schema_version,
+                data_as_of=old_boundary,
+                available_at=old_boundary,
+                observed_at=future_observation,
+                knowledge_as_of=future_observation,
+                status="available",
+                normalized=normalized,
+            ),
+            lease=lease,
+            now=NOW,
+        )
     stock_basic = repository.list_datasets(
         scope_value="600519",
         dataset="stock_basic",
@@ -1130,3 +1247,378 @@ def test_historical_dataset_reads_reject_future_stock_basic_observations(
 
     assert stock_basic == []
     assert financial[0]["normalized"] == [{"revenue": 1.0}]
+
+
+def test_dataset_writer_rejects_ambiguous_flags_and_unsafe_metadata(
+    research_db,
+) -> None:
+    db, store = research_db
+    _claimed, lease = _claim(store, "dataset-strict-input")
+    repository = ResearchSnapshotRepository(db)
+
+    for retryable in ("false", 0, 1):
+        with pytest.raises(TypeError, match="retryable must be a bool"):
+            repository.write_dataset(
+                replace(_dataset_input(), retryable=retryable),
+                lease=lease,
+                now=NOW + timedelta(seconds=1),
+            )
+    with pytest.raises(ValueError, match="retryable.*fetch_failed"):
+        repository.write_dataset(
+            replace(_dataset_input(), retryable=True),
+            lease=lease,
+            now=NOW + timedelta(seconds=1),
+        )
+    with pytest.raises(ValueError, match="safe identifier"):
+        repository.write_dataset(
+            replace(
+                _dataset_input(),
+                schema_version="password:supersecret",
+            ),
+            lease=lease,
+            now=NOW + timedelta(seconds=2),
+        )
+    with pytest.raises(ValueError, match="safe identifier"):
+        repository.write_dataset(
+            replace(
+                _dataset_input(status="fetch_failed", normalized=None),
+                error_code="sk-abcdefghijklmnopqrstuvwxyz123456",
+            ),
+            lease=lease,
+            now=NOW + timedelta(seconds=3),
+        )
+    with pytest.raises(ValueError, match="observed_at"):
+        repository.write_dataset(
+            replace(
+                _stock_basic_input("600519", NOW),
+                data_as_of=NOW - timedelta(seconds=2),
+                available_at=NOW - timedelta(seconds=2),
+                observed_at=NOW,
+                knowledge_as_of=NOW - timedelta(seconds=1),
+            ),
+            lease=lease,
+            now=NOW + timedelta(seconds=4),
+        )
+
+    normalized = replace(
+        _dataset_input(status="fetch_failed", normalized=None),
+        dataset=" daily_basic ",
+        scope_type=" stock ",
+        scope_value=" 600519 ",
+        error_code="transport",
+        error_message_sanitized=(
+            "sk-abcdefghijklmnopqrstuvwxyz123456 "
+            "ghp_abcdefghijklmnopqrstuvwxyz123456"
+        ),
+    )
+    result = repository.write_dataset(
+        normalized,
+        lease=lease,
+        now=NOW + timedelta(seconds=5),
+    )
+    recovered = repository.get_job_dataset(
+        job_id=lease.job_id,
+        dataset="daily_basic",
+        scope_value="600519",
+    )
+
+    assert recovered is not None
+    assert recovered["content_hash"] == result.content_hash
+    assert "abcdefghijklmnopqrstuvwxyz123456" not in (
+        recovered["error_message"] or ""
+    )
+    with db.get_session() as session:
+        assert session.scalar(
+            select(func.count(ResearchDatasetSnapshotRecord.id))
+        ) == 1
+        assert session.scalar(
+            select(func.count(JobEventRecord.id)).where(
+                JobEventRecord.event_type == "research_dataset_snapshot"
+            )
+        ) == 1
+
+
+def test_dataset_and_factor_rows_are_rehashed_before_read_or_dedupe(
+    research_db,
+) -> None:
+    db, store = research_db
+    _first, first_lease = _claim(store, "integrity-first")
+    repository = ResearchSnapshotRepository(db)
+    dataset_input = _dataset_input()
+    dataset = repository.write_dataset(
+        dataset_input,
+        lease=first_lease,
+        now=NOW + timedelta(seconds=1),
+    )
+    factor_input = FactorSnapshotInput(
+        stock_code="600519",
+        market="A",
+        company_profile="industrial",
+        engine_bundle_version="factor-integrity-v1",
+        factor_payload={"quality": {"score": 80}},
+        input_dataset_hashes=[dataset.content_hash],
+        status="available",
+        coverage=1.0,
+        unknowns=[],
+        as_of=NOW,
+        available_at=NOW - timedelta(minutes=1),
+        quality_score=80,
+    )
+    repository.write_factors(
+        factor_input,
+        lease=first_lease,
+        now=NOW + timedelta(seconds=2),
+    )
+    with db.get_session() as session:
+        row = session.get(ResearchDatasetSnapshotRecord, dataset.record_id)
+        assert row is not None
+        row.normalized_json = canonical_json([{"tampered": True}])
+        session.commit()
+
+    with pytest.raises(ValueError, match="content_hash"):
+        repository.get_job_dataset(
+            job_id=first_lease.job_id,
+            dataset="daily_basic",
+            scope_value="600519",
+        )
+    with pytest.raises(ValueError, match="content_hash"):
+        repository.write_factors(
+            factor_input,
+            lease=first_lease,
+            now=NOW + timedelta(seconds=3),
+        )
+    _second, second_lease = _claim(store, "integrity-second")
+    with pytest.raises(ValueError, match="content_hash"):
+        repository.write_dataset(
+            dataset_input,
+            lease=second_lease,
+            now=NOW + timedelta(seconds=4),
+        )
+    with db.get_session() as session:
+        assert session.scalar(
+            select(func.count(JobEventRecord.id)).where(
+                JobEventRecord.job_id == second_lease.job_id,
+                JobEventRecord.event_type == "research_dataset_snapshot",
+            )
+        ) == 0
+
+
+def test_terminal_dataset_binding_rejects_forged_retryable_success(
+    research_db,
+) -> None:
+    db, store = research_db
+    _claimed, lease = _claim(store, "dataset-retryable-contract")
+    repository = ResearchSnapshotRepository(db)
+    repository.write_dataset(
+        _dataset_input(),
+        lease=lease,
+        now=NOW + timedelta(seconds=1),
+    )
+    with db.get_session() as session:
+        event = session.execute(
+            select(JobEventRecord).where(
+                JobEventRecord.job_id == lease.job_id,
+                JobEventRecord.event_type == "research_dataset_snapshot",
+            )
+        ).scalar_one()
+        payload = json.loads(event.payload_json)
+        payload["retryable"] = True
+        event.payload_json = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        session.commit()
+
+    with pytest.raises(ValueError, match="retryable.*fetch_failed"):
+        repository.get_job_dataset(
+            job_id=lease.job_id,
+            dataset="daily_basic",
+            scope_value="600519",
+            as_of=NOW,
+            terminal_only=True,
+        )
+
+
+def test_factor_and_research_rows_are_rehashed_before_read_or_dedupe(
+    research_db,
+) -> None:
+    db, store = research_db
+    _first, first_lease = _claim(store, "derived-integrity-first")
+    repository = ResearchSnapshotRepository(db)
+    dataset_input = _dataset_input()
+    dataset = repository.write_dataset(
+        dataset_input,
+        lease=first_lease,
+        now=NOW + timedelta(seconds=1),
+    )
+    factor_input = FactorSnapshotInput(
+        stock_code="600519",
+        market="A",
+        company_profile="industrial",
+        engine_bundle_version="factor-integrity-v1",
+        factor_payload={"quality": {"score": 80}},
+        input_dataset_hashes=[dataset.content_hash],
+        status="available",
+        coverage=1.0,
+        unknowns=[],
+        as_of=NOW,
+        available_at=NOW - timedelta(minutes=1),
+        quality_score=80,
+    )
+    factor = repository.write_factors(
+        factor_input,
+        lease=first_lease,
+        now=NOW + timedelta(seconds=2),
+    )
+    research_input = ResearchSnapshotInput(
+        stock_code="600519",
+        market="A",
+        snapshot_version="research-v1",
+        field_dictionary_version="fields-v1",
+        factor_engine_version="factor-integrity-v1",
+        pack_version="pack-v1",
+        prompt_version="prompt-v1",
+        policy_version="policy-v1",
+        model_route_fingerprint="route-v1",
+        as_of=NOW,
+        available_at=NOW - timedelta(seconds=1),
+        status="available",
+        canonical_payload={
+            "factor": factor.content_hash,
+            "factors": factor_input.factor_payload,
+            "datasets": _dataset_projection(dataset_input, dataset.content_hash),
+        },
+        factor_snapshot_hash=factor.content_hash,
+    )
+    research = repository.write_research_snapshot(
+        research_input,
+        lease=first_lease,
+        now=NOW + timedelta(seconds=3),
+    )
+    with db.get_session() as session:
+        factor_row = session.get(ResearchFactorSnapshotRecord, factor.record_id)
+        research_row = session.get(ResearchSnapshotRecord, research.record_id)
+        assert factor_row is not None and research_row is not None
+        factor_row.factor_json = canonical_json(
+            {"quality": {"score": 80, "note": "tampered"}}
+        )
+        research_payload = json.loads(research_row.canonical_json)
+        research_payload["tampered"] = True
+        research_row.canonical_json = canonical_json(research_payload)
+        session.commit()
+
+    with pytest.raises(ValueError, match="content_hash"):
+        repository.get_latest_factors(stock_code="600519", as_of=NOW)
+    with pytest.raises(ValueError, match="snapshot_hash"):
+        repository.get_research_snapshot(research.content_hash)
+
+    _second, second_lease = _claim(store, "derived-integrity-second")
+    repository.write_dataset(
+        dataset_input,
+        lease=second_lease,
+        now=NOW + timedelta(seconds=4),
+    )
+    with pytest.raises(ValueError, match="content_hash"):
+        repository.write_factors(
+            factor_input,
+            lease=second_lease,
+            now=NOW + timedelta(seconds=5),
+        )
+    with db.get_session() as session:
+        assert session.scalar(
+            select(func.count(JobEventRecord.id)).where(
+                JobEventRecord.job_id == second_lease.job_id,
+                JobEventRecord.event_type == "research_factor_snapshot",
+            )
+        ) == 0
+
+
+def test_repository_rejects_secret_like_public_research_versions(
+    research_db,
+) -> None:
+    db, store = research_db
+    _claimed, lease = _claim(store, "public-version-contract")
+    repository = ResearchSnapshotRepository(db)
+    with pytest.raises(ValueError, match="safe identifier"):
+        repository.write_dataset(
+            replace(
+                _dataset_input(),
+                schema_version="password:supersecret",
+            ),
+            lease=lease,
+            now=NOW + timedelta(seconds=1),
+        )
+    dataset = repository.write_dataset(
+        _dataset_input(),
+        lease=lease,
+        now=NOW + timedelta(seconds=2),
+    )
+    factor_input = FactorSnapshotInput(
+        stock_code="600519",
+        market="A",
+        company_profile="industrial",
+        engine_bundle_version="factor-v1",
+        factor_payload={"quality": {"score": 80}},
+        input_dataset_hashes=[dataset.content_hash],
+        status="available",
+        coverage=1.0,
+        unknowns=[],
+        as_of=NOW,
+        available_at=NOW - timedelta(minutes=1),
+        quality_score=80,
+    )
+    with pytest.raises(ValueError, match="safe identifier"):
+        repository.write_factors(
+            replace(
+                factor_input,
+                engine_bundle_version="password:supersecret",
+            ),
+            lease=lease,
+            now=NOW + timedelta(seconds=3),
+        )
+    factor = repository.write_factors(
+        factor_input,
+        lease=lease,
+        now=NOW + timedelta(seconds=4),
+    )
+    research_input = ResearchSnapshotInput(
+        stock_code="600519",
+        market="A",
+        snapshot_version="research-v1",
+        field_dictionary_version="fields-v1",
+        factor_engine_version="factor-v1",
+        pack_version="pack-v1",
+        prompt_version="prompt-v1",
+        policy_version="policy-v1",
+        model_route_fingerprint="route-v1",
+        as_of=NOW,
+        available_at=NOW - timedelta(seconds=1),
+        status="available",
+        canonical_payload={
+            "factor": factor.content_hash,
+            "factors": factor_input.factor_payload,
+            "datasets": _dataset_projection(_dataset_input(), dataset.content_hash),
+        },
+        factor_snapshot_hash=factor.content_hash,
+    )
+    for field_name in (
+        "snapshot_version",
+        "field_dictionary_version",
+        "factor_engine_version",
+        "pack_version",
+        "prompt_version",
+        "policy_version",
+        "model_route_fingerprint",
+    ):
+        with pytest.raises(ValueError, match="safe identifier"):
+            repository.write_research_snapshot(
+                replace(
+                    research_input,
+                    **{field_name: "password:supersecret"},
+                ),
+                lease=lease,
+                now=NOW + timedelta(seconds=5),
+            )
+    with db.get_session() as session:
+        assert session.scalar(select(func.count(ResearchSnapshotRecord.id))) == 0

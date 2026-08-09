@@ -41,6 +41,7 @@ PR0_CONVERGENCE_SCHEMA_VERSION = "2026-08-07-pr0-schema-convergence"
 PR1_DURABLE_JOBS_SCHEMA_VERSION = "2026-08-08-pr1-durable-jobs"
 PR2_RESEARCH_DATA_SCHEMA_VERSION = "2026-08-08-pr2-research-data"
 PR3_RESEARCH_EVIDENCE_SCHEMA_VERSION = "2026-08-08-pr3-research-evidence"
+PR4_RESEARCH_DEBATE_SCHEMA_VERSION = "2026-08-08-pr4-research-debate"
 
 
 class MigrationError(RuntimeError):
@@ -115,6 +116,14 @@ def _upgrade_pr3_research_evidence_schema(engine: Engine) -> None:
     run_pr3_research_evidence_schema_upgrade(engine)
 
 
+def _upgrade_pr4_research_debate_schema(engine: Engine) -> None:
+    """Install immutable debate requests, turns, snapshots, and pack links."""
+
+    from src.storage import run_pr4_research_debate_schema_upgrade
+
+    run_pr4_research_debate_schema_upgrade(engine)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=BASELINE_SCHEMA_VERSION,
@@ -152,6 +161,14 @@ MIGRATIONS: tuple[Migration, ...] = (
             "versioned research packs"
         ),
         apply=_upgrade_pr3_research_evidence_schema,
+    ),
+    Migration(
+        version=PR4_RESEARCH_DEBATE_SCHEMA_VERSION,
+        description=(
+            "Add immutable research debate requests, turns, snapshots, and "
+            "bind final debates to versioned research packs"
+        ),
+        apply=_upgrade_pr4_research_debate_schema,
     ),
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version

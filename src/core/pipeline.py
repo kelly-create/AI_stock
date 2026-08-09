@@ -11,6 +11,7 @@ A股自选股智能分析系统 - 核心分析流水线
 4. 提供股票分析的核心功能
 """
 
+import json
 import logging
 import inspect
 import threading
@@ -486,6 +487,13 @@ class StockAnalysisPipeline:
         return dict(context) if isinstance(context, Mapping) else None
 
     @staticmethod
+    def _research_debate_context(
+        prepared_research: Any,
+    ) -> Optional[Mapping[str, Any]]:
+        context = getattr(prepared_research, "debate_context", None)
+        return dict(context) if isinstance(context, Mapping) else None
+
+    @staticmethod
     def _append_research_evidence_prompt(
         summary: str,
         prepared_research: Any,
@@ -496,6 +504,174 @@ class StockAnalysisPipeline:
         if not evidence_prompt:
             return summary
         return f"{summary}\n\n{evidence_prompt}" if summary else evidence_prompt
+
+    @staticmethod
+    def _append_research_debate_prompt(
+        summary: str,
+        prepared_research: Any,
+    ) -> str:
+        debate_prompt = str(
+            getattr(prepared_research, "debate_prompt_context", "") or ""
+        ).strip()
+        if not debate_prompt:
+            return summary
+        return f"{summary}\n\n{debate_prompt}" if summary else debate_prompt
+
+    def _build_research_debate_model_route(
+        self,
+        *,
+        use_agent: bool,
+    ) -> Dict[str, Any]:
+        """Describe the exact text-only route used by bounded Debate calls."""
+
+        route = self._build_research_model_route(use_agent=use_agent, tools=[])
+        route.update(
+            {
+                "channel": (
+                    "research-debate-agent"
+                    if use_agent
+                    else "research-debate-traditional"
+                ),
+                "response_format": "research-debate-output-v1",
+                "temperature": 0.2,
+                "max_tokens": 2048,
+                "timeout_seconds": 60.0,
+                "logical_call_cap": 2,
+                "tools": [],
+                "memory_enabled": False,
+            }
+        )
+        route.pop("max_output_tokens", None)
+        route.pop("max_steps", None)
+        return route
+
+    @staticmethod
+    def _raise_debate_completion_error(exc: Exception) -> None:
+        from src.services.durable_worker import classify_job_exception
+        from src.services.research.debate_runner import (
+            DebateTerminalError,
+            DebateTransientError,
+        )
+
+        typed_retryable = getattr(exc, "retryable", None)
+        typed_error_code = getattr(exc, "error_code", None)
+        if isinstance(typed_retryable, bool) and typed_error_code not in (None, ""):
+            normalized_error_code = getattr(typed_error_code, "value", typed_error_code)
+            error_type = (
+                DebateTransientError if typed_retryable else DebateTerminalError
+            )
+            raise error_type(str(normalized_error_code)) from exc
+        disposition = classify_job_exception(exc)
+        error_type = (
+            DebateTransientError if disposition.retryable else DebateTerminalError
+        )
+        raise error_type(disposition.error_code) from exc
+
+    def _prepare_research_debate(
+        self,
+        prepared_research: Any,
+        *,
+        use_agent: bool,
+        executor: Any = None,
+    ) -> Any:
+        """Run PR4 Debate only when its staged feature flag is active."""
+
+        if prepared_research is None or not bool(
+            getattr(prepared_research, "debate_enabled", False)
+        ):
+            return prepared_research
+
+        from src.services.research.debate_runner import (
+            DebateCompletionResult,
+            DebateTransientError,
+            DebateTerminalError,
+        )
+
+        route = self._build_research_debate_model_route(use_agent=use_agent)
+
+        def completion(request: Any) -> DebateCompletionResult:
+            messages = [dict(item) for item in request.messages]
+            try:
+                from src.services.research.debate_security import (
+                    strict_model_identifier,
+                )
+
+                configured_models = [
+                    route.get("model"),
+                    *list(route.get("fallbacks") or []),
+                ]
+                try:
+                    for index, configured_model in enumerate(configured_models):
+                        if str(configured_model or "").strip():
+                            strict_model_identifier(
+                                configured_model,
+                                field=f"research_debate route model[{index}]",
+                            )
+                except (TypeError, ValueError) as exc:
+                    raise DebateTerminalError("unsafe_model_route") from exc
+                if use_agent:
+                    adapter = getattr(executor, "llm_adapter", None)
+                    if adapter is None or not callable(getattr(adapter, "call_text", None)):
+                        raise DebateTerminalError("agent_completion_unavailable")
+                    response = adapter.call_text(
+                        messages,
+                        temperature=0.2,
+                        max_tokens=2048,
+                        timeout=60.0,
+                        raise_on_failure=True,
+                    )
+                    content = str(getattr(response, "content", "") or "").strip()
+                    provider = str(getattr(response, "provider", "") or "").strip()
+                    model_used = str(
+                        getattr(response, "model", "") or provider or "unknown-model"
+                    ).strip()
+                    model_used = strict_model_identifier(
+                        model_used,
+                        field="research_debate model_used",
+                    )
+                    if provider == "error" or not content:
+                        raise DebateTerminalError("generation_unavailable")
+                    from src.storage import persist_llm_usage
+
+                    usage = dict(getattr(response, "usage", {}) or {})
+                    usage["stage"] = f"research_debate_{request.stance}"
+                    usage["prompt_version"] = "research-debate-prompt-v1"
+                    persist_llm_usage(
+                        usage,
+                        model_used,
+                        call_type="research_debate",
+                        stock_code=getattr(prepared_research, "stock_code", None),
+                    )
+                    return DebateCompletionResult(
+                        output=content,
+                        model_used=model_used,
+                    )
+
+                text, model_used, _usage = self.analyzer.generate_structured_text(
+                    messages,
+                    response_validator=lambda raw: json.loads(raw),
+                    max_tokens=2048,
+                    temperature=0.2,
+                    timeout=60.0,
+                    call_type="research_debate",
+                    stock_code=getattr(prepared_research, "stock_code", None),
+                )
+                return DebateCompletionResult(output=text, model_used=model_used)
+            except (DebateTerminalError, DebateTransientError):
+                raise
+            except Exception as exc:
+                self._raise_debate_completion_error(exc)
+                raise AssertionError("unreachable")
+
+        self._emit_progress(
+            58,
+            f"{getattr(prepared_research, 'stock_code', '')}：正在生成有界多空研究辩论",
+        )
+        return self._get_research_runtime().prepare_debate(
+            prepared_research,
+            completion=completion,
+            model_route=route,
+        )
 
     @staticmethod
     def _research_preloaded_errors(prepared_research: Any) -> Tuple[str, ...]:
@@ -1169,8 +1345,15 @@ class StockAnalysisPipeline:
                 enhanced_context["market_structure_context"] = market_structure_context
             
             # Step 7: 调用 AI 分析（传入增强的上下文和新闻）
+            prepared_research = self._prepare_research_debate(
+                prepared_research,
+                use_agent=False,
+            )
             research_context = getattr(prepared_research, "research_context", None)
             research_evidence_context = self._research_evidence_context(
+                prepared_research
+            )
+            research_debate_context = self._research_debate_context(
                 prepared_research
             )
             (
@@ -1195,12 +1378,17 @@ class StockAnalysisPipeline:
                     portfolio_context=portfolio_context,
                     research_context=research_context,
                     research_evidence_context=research_evidence_context,
+                    research_debate_context=research_debate_context,
                 ),
                 report_language=report_language,
                 code=code,
                 query_id=query_id,
             )
             analysis_context_pack_summary = self._append_research_evidence_prompt(
+                analysis_context_pack_summary,
+                prepared_research,
+            )
+            analysis_context_pack_summary = self._append_research_debate_prompt(
                 analysis_context_pack_summary,
                 prepared_research,
             )
@@ -1894,6 +2082,12 @@ class StockAnalysisPipeline:
             ):
                 raise RuntimeError("research Agent executor did not retain its frozen tool registry")
 
+            prepared_research = self._prepare_research_debate(
+                prepared_research,
+                use_agent=True,
+                executor=executor,
+            )
+
             # Build initial context to avoid redundant tool calls
             initial_context = {
                 "stock_code": code,
@@ -1976,6 +2170,9 @@ class StockAnalysisPipeline:
             research_evidence_context = self._research_evidence_context(
                 prepared_research
             )
+            research_debate_context = self._research_debate_context(
+                prepared_research
+            )
             (
                 analysis_context_pack,
                 analysis_context_pack_summary,
@@ -1993,6 +2190,7 @@ class StockAnalysisPipeline:
                     portfolio_context=portfolio_context,
                     research_context=research_context,
                     research_evidence_context=research_evidence_context,
+                    research_debate_context=research_debate_context,
                 ),
                 report_language=report_language,
                 code=code,
@@ -2004,6 +2202,11 @@ class StockAnalysisPipeline:
             )
             if analysis_context_pack_summary:
                 initial_context["analysis_context_pack_summary"] = analysis_context_pack_summary
+            debate_prompt_context = str(
+                getattr(prepared_research, "debate_prompt_context", "") or ""
+            ).strip()
+            if debate_prompt_context:
+                initial_context["research_debate_prompt_context"] = debate_prompt_context
 
             # 运行 Agent
             if report_language in ("en", "ko"):
@@ -3497,6 +3700,7 @@ class StockAnalysisPipeline:
         portfolio_context: Optional[Dict[str, Any]] = None,
         research_context: Optional[Mapping[str, Any]] = None,
         research_evidence_context: Optional[Mapping[str, Any]] = None,
+        research_debate_context: Optional[Mapping[str, Any]] = None,
     ) -> PipelineAnalysisArtifacts:
         return PipelineAnalysisArtifacts(
             code=code,
@@ -3524,6 +3728,11 @@ class StockAnalysisPipeline:
                 if isinstance(research_evidence_context, Mapping)
                 else None
             ),
+            research_debate_context=(
+                dict(research_debate_context)
+                if isinstance(research_debate_context, Mapping)
+                else None
+            ),
         )
 
     def _build_agent_analysis_artifacts(
@@ -3540,6 +3749,7 @@ class StockAnalysisPipeline:
         portfolio_context: Optional[Dict[str, Any]] = None,
         research_context: Optional[Mapping[str, Any]] = None,
         research_evidence_context: Optional[Mapping[str, Any]] = None,
+        research_debate_context: Optional[Mapping[str, Any]] = None,
     ) -> PipelineAnalysisArtifacts:
         context_candidate = base_context
         if not isinstance(context_candidate, dict):
@@ -3582,6 +3792,11 @@ class StockAnalysisPipeline:
             research_evidence_context=(
                 dict(research_evidence_context)
                 if isinstance(research_evidence_context, Mapping)
+                else None
+            ),
+            research_debate_context=(
+                dict(research_debate_context)
+                if isinstance(research_debate_context, Mapping)
                 else None
             ),
         )
@@ -3643,6 +3858,7 @@ class StockAnalysisPipeline:
         sanitized.pop("portfolio_context", None)
         sanitized.pop("analysis_context_pack", None)
         sanitized.pop("analysis_context_pack_summary", None)
+        sanitized.pop("research_debate_prompt_context", None)
         sanitized.pop("daily_market_context_summary", None)
         enhanced_context = sanitized.get("enhanced_context")
         if isinstance(enhanced_context, dict):

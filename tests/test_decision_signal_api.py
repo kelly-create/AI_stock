@@ -263,7 +263,17 @@ def test_create_rejects_explicit_null_decision_profile_and_accepts_null_metadata
         json=_payload(source_report_id=3010, trace_id="trace-null-profile", decision_profile=None),
     )
     assert null_profile_resp.status_code == 422, null_profile_resp.text
-    assert "decision_profile" in null_profile_resp.text
+    assert null_profile_resp.json() == {
+        "error": "validation_error",
+        "message": "请求参数验证失败",
+        "detail": [
+            {
+                "type": "literal_error",
+                "loc": ["body", "decision_profile"],
+                "msg": "Input should be 'conservative', 'balanced' or 'aggressive'",
+            }
+        ],
+    }
 
     null_metadata_resp = client.post(
         "/api/v1/decision-signals",

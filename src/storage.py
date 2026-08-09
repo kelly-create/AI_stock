@@ -1082,6 +1082,15 @@ _RESEARCH_EVIDENCE_STATUS_VALUES = (
 _RESEARCH_EVIDENCE_STATUS_SQL = ', '.join(
     f"'{status}'" for status in _RESEARCH_EVIDENCE_STATUS_VALUES
 )
+_RESEARCH_DEBATE_STATUS_VALUES = (
+    'available',
+    'partial',
+    'empty',
+    'generation_failed',
+)
+_RESEARCH_DEBATE_STATUS_SQL = ', '.join(
+    f"'{status}'" for status in _RESEARCH_DEBATE_STATUS_VALUES
+)
 
 
 class ResearchDatasetSnapshotRecord(Base):
@@ -1305,6 +1314,234 @@ class ResearchEvidenceSnapshotRecord(Base):
     )
 
 
+class ResearchDebateRequestRecord(Base):
+    """Immutable, pre-LLM prompt request frozen for deterministic resume."""
+
+    __tablename__ = 'research_debate_requests'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    stock_code = Column(String(16), nullable=False)
+    market = Column(String(16), nullable=False)
+    debate_engine_version = Column(String(64), nullable=False)
+    output_schema_version = Column(String(64), nullable=False)
+    prompt_version = Column(String(64), nullable=False)
+    evidence_snapshot_hash = Column(String(64), nullable=False)
+    model_route_fingerprint = Column(String(128), nullable=False)
+    as_of = Column(DateTime, nullable=False)
+    available_at = Column(DateTime, nullable=False)
+    canonical_json = Column(Text, nullable=False)
+    request_hash = Column(CHAR(64), nullable=False)
+    origin_job_id = Column(
+        String(64),
+        ForeignKey('analysis_jobs.task_id', ondelete='SET NULL'),
+        nullable=True,
+    )
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=text('CURRENT_TIMESTAMP'),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            'length(evidence_snapshot_hash) = 64 '
+            'AND length(request_hash) = 64',
+            name='ck_research_debate_requests_hash_lengths',
+        ),
+        Index(
+            'uix_research_debate_requests_request_hash',
+            'request_hash',
+            unique=True,
+        ),
+        Index(
+            'ix_research_debate_requests_stock_asof',
+            'stock_code',
+            'as_of',
+            'id',
+        ),
+        Index(
+            'ix_research_debate_requests_evidence_route',
+            'evidence_snapshot_hash',
+            'prompt_version',
+            'model_route_fingerprint',
+        ),
+    )
+
+
+class ResearchDebateTurnRecord(Base):
+    """Immutable, content-addressed output from one bounded debate stance."""
+
+    __tablename__ = 'research_debate_turns'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    stock_code = Column(String(16), nullable=False)
+    market = Column(String(16), nullable=False)
+    stance = Column(String(16), nullable=False)
+    round_no = Column(Integer, nullable=False, server_default=text('1'))
+    debate_engine_version = Column(String(64), nullable=False)
+    output_schema_version = Column(String(64), nullable=False)
+    prompt_version = Column(String(64), nullable=False)
+    evidence_snapshot_hash = Column(String(64), nullable=False)
+    request_hash = Column(
+        String(64),
+        ForeignKey(
+            'research_debate_requests.request_hash',
+            ondelete='RESTRICT',
+        ),
+        nullable=False,
+    )
+    prompt_fingerprint = Column(CHAR(64), nullable=False)
+    model_route_fingerprint = Column(String(128), nullable=False)
+    model_used = Column(String(128), nullable=False)
+    as_of = Column(DateTime, nullable=False)
+    available_at = Column(DateTime, nullable=False)
+    canonical_json = Column(Text, nullable=False)
+    turn_hash = Column(CHAR(64), nullable=False)
+    origin_job_id = Column(
+        String(64),
+        ForeignKey('analysis_jobs.task_id', ondelete='SET NULL'),
+        nullable=True,
+    )
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=text('CURRENT_TIMESTAMP'),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "stance IN ('bull', 'bear')",
+            name='ck_research_debate_turns_stance',
+        ),
+        CheckConstraint(
+            'round_no = 1',
+            name='ck_research_debate_turns_round_no',
+        ),
+        CheckConstraint(
+            'length(evidence_snapshot_hash) = 64 '
+            'AND length(request_hash) = 64 '
+            'AND length(prompt_fingerprint) = 64 '
+            'AND length(turn_hash) = 64',
+            name='ck_research_debate_turns_hash_lengths',
+        ),
+        Index(
+            'uix_research_debate_turns_turn_hash',
+            'turn_hash',
+            unique=True,
+        ),
+        Index(
+            'ix_research_debate_turns_stock_asof',
+            'stock_code',
+            'as_of',
+            'id',
+        ),
+        Index(
+            'ix_research_debate_turns_resume',
+            'stock_code',
+            'evidence_snapshot_hash',
+            'request_hash',
+            'stance',
+            'prompt_version',
+            'prompt_fingerprint',
+            'model_route_fingerprint',
+        ),
+    )
+
+
+class ResearchDebateSnapshotRecord(Base):
+    """Immutable bounded-debate snapshot assembled from validated turns."""
+
+    __tablename__ = 'research_debate_snapshots'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    stock_code = Column(String(16), nullable=False)
+    market = Column(String(16), nullable=False)
+    debate_engine_version = Column(String(64), nullable=False)
+    output_schema_version = Column(String(64), nullable=False)
+    prompt_version = Column(String(64), nullable=False)
+    evidence_snapshot_hash = Column(String(64), nullable=False)
+    request_hash = Column(
+        String(64),
+        ForeignKey(
+            'research_debate_requests.request_hash',
+            ondelete='RESTRICT',
+        ),
+        nullable=False,
+    )
+    model_route_fingerprint = Column(String(128), nullable=False)
+    as_of = Column(DateTime, nullable=False)
+    available_at = Column(DateTime, nullable=False)
+    status = Column(String(32), nullable=False)
+    bull_turn_hash = Column(String(64), nullable=True)
+    bear_turn_hash = Column(String(64), nullable=True)
+    bull_argument_count = Column(Integer, nullable=False)
+    bear_argument_count = Column(Integer, nullable=False)
+    open_question_count = Column(Integer, nullable=False)
+    canonical_json = Column(Text, nullable=False)
+    debate_hash = Column(CHAR(64), nullable=False)
+    origin_job_id = Column(
+        String(64),
+        ForeignKey('analysis_jobs.task_id', ondelete='SET NULL'),
+        nullable=True,
+    )
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=text('CURRENT_TIMESTAMP'),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            f'status IN ({_RESEARCH_DEBATE_STATUS_SQL})',
+            name='ck_research_debate_snapshots_status',
+        ),
+        CheckConstraint(
+            'bull_argument_count >= 0 AND bear_argument_count >= 0 '
+            'AND open_question_count >= 0',
+            name='ck_research_debate_snapshots_counts',
+        ),
+        CheckConstraint(
+            'length(evidence_snapshot_hash) = 64 '
+            'AND length(request_hash) = 64 '
+            'AND (bull_turn_hash IS NULL OR length(bull_turn_hash) = 64) '
+            'AND (bear_turn_hash IS NULL OR length(bear_turn_hash) = 64) '
+            'AND length(debate_hash) = 64',
+            name='ck_research_debate_snapshots_hash_lengths',
+        ),
+        CheckConstraint(
+            "(status = 'available' AND bull_turn_hash IS NOT NULL "
+            "AND bear_turn_hash IS NOT NULL) OR "
+            "(status = 'partial' AND ((bull_turn_hash IS NOT NULL "
+            "AND bear_turn_hash IS NULL) OR (bull_turn_hash IS NULL "
+            "AND bear_turn_hash IS NOT NULL))) OR "
+            "(status IN ('empty', 'generation_failed') "
+            "AND bull_turn_hash IS NULL AND bear_turn_hash IS NULL)",
+            name='ck_research_debate_snapshots_turn_presence',
+        ),
+        Index(
+            'uix_research_debate_snapshots_debate_hash',
+            'debate_hash',
+            unique=True,
+        ),
+        Index(
+            'ix_research_debate_snapshots_stock_asof',
+            'stock_code',
+            'as_of',
+            'id',
+        ),
+        Index(
+            'ix_research_debate_snapshots_evidence_asof',
+            'evidence_snapshot_hash',
+            'as_of',
+            'id',
+        ),
+        Index(
+            'ix_research_debate_snapshots_request_hash',
+            'request_hash',
+        ),
+    )
+
+
 class ResearchSnapshotRecord(Base):
     """Immutable, versioned AnalysisContextPack research snapshot."""
 
@@ -1327,6 +1564,7 @@ class ResearchSnapshotRecord(Base):
     snapshot_hash = Column(CHAR(64), nullable=False)
     factor_snapshot_hash = Column(String(64), nullable=True)
     evidence_snapshot_hash = Column(String(64), nullable=True)
+    debate_snapshot_hash = Column(String(64), nullable=True)
     origin_job_id = Column(
         String(64),
         ForeignKey('analysis_jobs.task_id', ondelete='SET NULL'),
@@ -1360,6 +1598,10 @@ class ResearchSnapshotRecord(Base):
         Index(
             'ix_research_snapshots_evidence_hash',
             'evidence_snapshot_hash',
+        ),
+        Index(
+            'ix_research_snapshots_debate_hash',
+            'debate_snapshot_hash',
         ),
     )
 
@@ -4755,6 +4997,11 @@ _PR2_RESEARCH_TABLES = (
 _PR3_RESEARCH_EVIDENCE_TABLES = (
     ResearchEvidenceSnapshotRecord.__table__,
 )
+_PR4_RESEARCH_DEBATE_TABLES = (
+    ResearchDebateRequestRecord.__table__,
+    ResearchDebateTurnRecord.__table__,
+    ResearchDebateSnapshotRecord.__table__,
+)
 _PR1_EXTENSION_INDEX_NAMES = {
     'ix_llm_usage_job_stage_called_at',
     'ix_llm_usage_trace_called_at',
@@ -5038,6 +5285,8 @@ def _verify_research_schema_tables_contract(
     tables,
     *,
     contract_name: str,
+    ignored_columns_by_table: Optional[Dict[str, set[str]]] = None,
+    ignored_indexes_by_table: Optional[Dict[str, set[str]]] = None,
 ) -> None:
     """Fail closed when immutable research tables drift from ORM contracts."""
 
@@ -5057,11 +5306,19 @@ def _verify_research_schema_tables_contract(
         )
 
     for table in tables:
+        ignored_columns = (ignored_columns_by_table or {}).get(table.name, set())
+        ignored_indexes = (ignored_indexes_by_table or {}).get(table.name, set())
         pragma_rows = connection.exec_driver_sql(
             f"PRAGMA table_info('{table.name}')"
         ).all()
-        actual_columns = {row[1]: row for row in pragma_rows}
-        expected_columns = {column.name: column for column in table.columns}
+        actual_columns = {
+            row[1]: row for row in pragma_rows if row[1] not in ignored_columns
+        }
+        expected_columns = {
+            column.name: column
+            for column in table.columns
+            if column.name not in ignored_columns
+        }
         missing_columns = sorted(set(expected_columns).difference(actual_columns))
         unexpected_columns = sorted(set(actual_columns).difference(expected_columns))
         if missing_columns or unexpected_columns:
@@ -5096,13 +5353,18 @@ def _verify_research_schema_tables_contract(
                     f'has default {actual_default!r}; expected {expected_default!r}'
                 )
 
-        expected_indexes = {index.name: index for index in table.indexes}
+        expected_indexes = {
+            index.name: index
+            for index in table.indexes
+            if index.name not in ignored_indexes
+        }
         index_rows = {
             row[1]: row
             for row in connection.exec_driver_sql(
                 f"PRAGMA index_list('{table.name}')"
             ).all()
             if not str(row[1]).startswith('sqlite_autoindex_')
+            and row[1] not in ignored_indexes
         }
         if set(index_rows) != set(expected_indexes):
             raise RuntimeError(
@@ -5173,13 +5435,27 @@ def _verify_research_schema_tables_contract(
             )
 
 
-def _verify_pr2_research_schema_contract(connection) -> None:
+def _verify_pr2_research_schema_contract(
+    connection,
+    *,
+    ignore_pr4_extension: bool = False,
+) -> None:
     """Fail closed when a PR2 immutable research table drifts."""
 
     _verify_research_schema_tables_contract(
         connection,
         _PR2_RESEARCH_TABLES,
         contract_name='PR2',
+        ignored_columns_by_table=(
+            {'research_snapshots': {'debate_snapshot_hash'}}
+            if ignore_pr4_extension
+            else None
+        ),
+        ignored_indexes_by_table=(
+            {'research_snapshots': {'ix_research_snapshots_debate_hash'}}
+            if ignore_pr4_extension
+            else None
+        ),
     )
 
 
@@ -5220,7 +5496,10 @@ def _apply_pr2_research_schema(connection) -> None:
 def _verify_pr3_research_evidence_schema_contract(connection) -> None:
     """Verify the PR3 evidence table and its research snapshot reference."""
 
-    _verify_pr2_research_schema_contract(connection)
+    _verify_pr2_research_schema_contract(
+        connection,
+        ignore_pr4_extension=True,
+    )
     _verify_research_schema_tables_contract(
         connection,
         _PR3_RESEARCH_EVIDENCE_TABLES,
@@ -5279,6 +5558,80 @@ def _apply_pr3_research_evidence_schema(connection) -> None:
         table.create(bind=connection, checkfirst=True)
 
     _verify_pr3_research_evidence_schema_contract(connection)
+
+
+def _verify_pr4_research_debate_schema_contract(connection) -> None:
+    """Verify PR4 request, turn, debate, and final snapshot linkage."""
+
+    _verify_pr2_research_schema_contract(connection)
+    _verify_research_schema_tables_contract(
+        connection,
+        _PR3_RESEARCH_EVIDENCE_TABLES,
+        contract_name='PR3',
+    )
+    _verify_research_schema_tables_contract(
+        connection,
+        _PR4_RESEARCH_DEBATE_TABLES,
+        contract_name='PR4',
+    )
+
+
+def run_pr4_research_debate_schema_upgrade(engine) -> None:
+    """Create and verify PR4 immutable bounded-debate storage atomically."""
+
+    if engine.url.get_backend_name() != 'sqlite':
+        raise RuntimeError('PR4 research debate migration only supports SQLite')
+
+    with engine.connect() as connection:
+        connection.exec_driver_sql('BEGIN IMMEDIATE')
+        try:
+            _apply_pr4_research_debate_schema(connection)
+        except BaseException:
+            connection.rollback()
+            raise
+        else:
+            connection.commit()
+
+
+def _apply_pr4_research_debate_schema(connection) -> None:
+    """Apply PR4 DDL on a caller-owned explicit SQLite transaction."""
+
+    required_tables = {'analysis_jobs', 'research_evidence_snapshots', 'research_snapshots'}
+    existing_tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).all()
+    }
+    missing_tables = sorted(required_tables.difference(existing_tables))
+    if missing_tables:
+        raise RuntimeError(
+            'PR4 research debate migration requires PR3 tables; missing='
+            + ','.join(missing_tables)
+        )
+
+    research_snapshot_columns = {
+        row[1]
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info('research_snapshots')"
+        ).all()
+    }
+    if 'debate_snapshot_hash' not in research_snapshot_columns:
+        connection.exec_driver_sql(
+            'ALTER TABLE research_snapshots '
+            'ADD COLUMN debate_snapshot_hash VARCHAR(64)'
+        )
+
+    debate_index = next(
+        index
+        for index in ResearchSnapshotRecord.__table__.indexes
+        if index.name == 'ix_research_snapshots_debate_hash'
+    )
+    debate_index.create(bind=connection, checkfirst=True)
+    for table in _PR4_RESEARCH_DEBATE_TABLES:
+        table.create(bind=connection, checkfirst=True)
+
+    _verify_pr4_research_debate_schema_contract(connection)
 
 
 class _StorageSchemaConvergence(DatabaseManager):

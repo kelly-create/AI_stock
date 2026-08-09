@@ -25,6 +25,9 @@ def test_default_backup_contract_includes_durable_and_research_tables() -> None:
         "research_dataset_snapshots",
         "research_factor_snapshots",
         "research_evidence_snapshots",
+        "research_debate_requests",
+        "research_debate_turns",
+        "research_debate_snapshots",
         "research_snapshots",
     }.issubset(sqlite_backup.DEFAULT_BACKUP_CORE_TABLES)
 
@@ -62,6 +65,89 @@ def test_default_backup_round_trip_preserves_evidence_rows(tmp_path: Path) -> No
                     None,
                 ),
             )
+            connection.exec_driver_sql(
+                "INSERT INTO research_debate_requests ("
+                "stock_code, market, debate_engine_version, output_schema_version, "
+                "prompt_version, evidence_snapshot_hash, model_route_fingerprint, "
+                "as_of, available_at, canonical_json, request_hash, origin_job_id"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "600519",
+                    "A",
+                    "research-debate-v1",
+                    "research-debate-output-v1",
+                    "research-debate-prompt-v1",
+                    "e" * 64,
+                    "a" * 64,
+                    "2026-08-08 08:00:00",
+                    "2026-08-08 07:59:00",
+                    "{}",
+                    "1" * 64,
+                    None,
+                ),
+            )
+            for stance, turn_hash, prompt_hash in (
+                ("bull", "2" * 64, "4" * 64),
+                ("bear", "3" * 64, "5" * 64),
+            ):
+                connection.exec_driver_sql(
+                    "INSERT INTO research_debate_turns ("
+                    "stock_code, market, stance, round_no, debate_engine_version, "
+                    "output_schema_version, prompt_version, evidence_snapshot_hash, "
+                    "request_hash, prompt_fingerprint, model_route_fingerprint, "
+                    "model_used, as_of, available_at, canonical_json, turn_hash, "
+                    "origin_job_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "600519",
+                        "A",
+                        stance,
+                        1,
+                        "research-debate-v1",
+                        "research-debate-output-v1",
+                        "research-debate-prompt-v1",
+                        "e" * 64,
+                        "1" * 64,
+                        prompt_hash,
+                        "a" * 64,
+                        "bounded-model-v1",
+                        "2026-08-08 08:00:00",
+                        "2026-08-08 07:59:00",
+                        "{}",
+                        turn_hash,
+                        None,
+                    ),
+                )
+            connection.exec_driver_sql(
+                "INSERT INTO research_debate_snapshots ("
+                "stock_code, market, debate_engine_version, output_schema_version, "
+                "prompt_version, evidence_snapshot_hash, request_hash, "
+                "model_route_fingerprint, as_of, available_at, status, "
+                "bull_turn_hash, bear_turn_hash, bull_argument_count, "
+                "bear_argument_count, open_question_count, canonical_json, "
+                "debate_hash, origin_job_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "600519",
+                    "A",
+                    "research-debate-v1",
+                    "research-debate-output-v1",
+                    "research-debate-prompt-v1",
+                    "e" * 64,
+                    "1" * 64,
+                    "a" * 64,
+                    "2026-08-08 08:00:00",
+                    "2026-08-08 07:59:00",
+                    "available",
+                    "2" * 64,
+                    "3" * 64,
+                    1,
+                    1,
+                    0,
+                    "{}",
+                    "6" * 64,
+                    None,
+                ),
+            )
     finally:
         engine.dispose()
 
@@ -71,13 +157,27 @@ def test_default_backup_round_trip_preserves_evidence_rows(tmp_path: Path) -> No
     assert manifest["database"]["core_table_counts"][
         "research_evidence_snapshots"
     ] == 1
+    assert manifest["database"]["core_table_counts"][
+        "research_debate_requests"
+    ] == 1
+    assert manifest["database"]["core_table_counts"][
+        "research_debate_turns"
+    ] == 2
+    assert manifest["database"]["core_table_counts"][
+        "research_debate_snapshots"
+    ] == 1
     assert result["sha256"] == manifest["backup"]["sha256"]
     with closing(sqlite3.connect(restored)) as connection:
         row = connection.execute(
             "SELECT evidence_hash, factor_snapshot_hash "
             "FROM research_evidence_snapshots"
         ).fetchone()
+        debate_row = connection.execute(
+            "SELECT debate_hash, request_hash, bull_turn_hash, bear_turn_hash "
+            "FROM research_debate_snapshots"
+        ).fetchone()
     assert row == ("e" * 64, "f" * 64)
+    assert debate_row == ("6" * 64, "1" * 64, "2" * 64, "3" * 64)
 
 
 def _create_database(path: Path, *, item_prefix: str = "seed", item_count: int = 8) -> None:

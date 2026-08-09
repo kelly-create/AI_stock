@@ -13,6 +13,7 @@ import os
 import sys
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
+from typing import Any, Callable
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -97,6 +98,8 @@ def _prepared_research(
     *,
     factors_enabled: bool = True,
     evidence_prompt_context: str | None = None,
+    debate_enabled: bool = False,
+    debate_prompt_context: str | None = None,
 ) -> SimpleNamespace:
     collection = _FrozenCollection()
     evidence_context = None
@@ -110,6 +113,8 @@ def _prepared_research(
             "limitations": (),
         }
     return SimpleNamespace(
+        stock_code="600519",
+        market="cn",
         as_of=_AS_OF,
         lease=SimpleNamespace(
             job_id="research-job",
@@ -125,7 +130,129 @@ def _prepared_research(
         evidence_enabled=evidence_prompt_context is not None,
         evidence_context=evidence_context,
         evidence_prompt_context=evidence_prompt_context,
+        debate_enabled=debate_enabled,
+        debate_snapshot=None,
+        debate_context=None,
+        debate_prompt_context=debate_prompt_context,
     )
+
+
+def _with_debate(
+    prepared: SimpleNamespace,
+    *,
+    prompt_context: str,
+) -> SimpleNamespace:
+    values = dict(vars(prepared))
+    values.update(
+        {
+            "debate_enabled": True,
+            "debate_snapshot": SimpleNamespace(debate_hash="b" * 64),
+            "debate_context": {
+                "status": "available",
+                "debate_hash": "b" * 64,
+                "bull_argument_count": 1,
+                "bear_argument_count": 1,
+            },
+            "debate_prompt_context": prompt_context,
+        }
+    )
+    return SimpleNamespace(**values)
+
+
+def _assert_debate_route(route: dict[str, object], *, channel: str) -> None:
+    assert route["channel"] == channel
+    assert route["logical_call_cap"] == 2
+    assert route["tools"] == []
+    assert route["memory_enabled"] is False
+    assert route["temperature"] == 0.2
+    assert route["max_tokens"] == 2048
+    assert route["timeout_seconds"] == 60.0
+
+
+class _PipelineDebateRuntime:
+    """Fake durable boundary that preserves request/turn/snapshot ordering."""
+
+    def __init__(
+        self,
+        *,
+        events: list[str],
+        prompt_context: str,
+        channel: str,
+    ) -> None:
+        self.events = events
+        self.prompt_context = prompt_context
+        self.channel = channel
+        self.prepare_debate = MagicMock(side_effect=self._prepare_debate)
+        self.freeze = MagicMock(side_effect=self._freeze)
+
+    def _prepare_debate(
+        self,
+        initial: SimpleNamespace,
+        *,
+        completion: Callable[[SimpleNamespace], Any],
+        model_route: dict[str, object],
+    ) -> SimpleNamespace:
+        self.events.append("request-frozen")
+        _assert_debate_route(model_route, channel=self.channel)
+        for stance in ("bull", "bear"):
+            result = completion(
+                SimpleNamespace(
+                    stance=stance,
+                    messages=(
+                        {"role": "system", "content": "DEBATE-SYSTEM"},
+                        {"role": "user", "content": f"DEBATE-USER::{stance}"},
+                    ),
+                )
+            )
+            assert result.model_used == "provider/debate-model"
+        self.events.append("debate-snapshot-frozen")
+        return _with_debate(initial, prompt_context=self.prompt_context)
+
+    def _freeze(self, *_args: object) -> None:
+        self.events.append("final-freeze")
+
+
+class _RecordingDebateTextAdapter:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+        self.call_text = MagicMock(side_effect=self._call_text)
+
+    def _call_text(
+        self,
+        messages: list[dict[str, str]],
+        **kwargs: object,
+    ) -> SimpleNamespace:
+        stance = str(messages[1]["content"]).rsplit("::", 1)[-1]
+        self.events.append(f"debate-{stance}")
+        assert [item["role"] for item in messages] == ["system", "user"]
+        assert kwargs == {
+            "temperature": 0.2,
+            "max_tokens": 2048,
+            "timeout": 60.0,
+            "raise_on_failure": True,
+        }
+        return SimpleNamespace(
+            content="{}",
+            provider="fixture",
+            model="provider/debate-model",
+            usage={"total_tokens": 1},
+        )
+
+
+def _capture_real_research_freeze(
+    pipeline: StockAnalysisPipeline,
+    frozen_prompts: list[dict[str, object]],
+) -> None:
+    def freeze(*args: object, **kwargs: object) -> object:
+        result = StockAnalysisPipeline._freeze_research_before_llm(
+            pipeline,
+            *args,
+            **kwargs,
+        )
+        frozen_prompts.append(kwargs["prompt"])
+        return result
+
+    pipeline._freeze_research_before_llm = MagicMock(side_effect=freeze)
 
 
 def _base_config(**overrides: object) -> SimpleNamespace:
@@ -134,6 +261,7 @@ def _base_config(**overrides: object) -> SimpleNamespace:
         "personal_research_enabled": False,
         "research_factors_enabled": False,
         "research_evidence_enabled": False,
+        "research_debate_enabled": False,
         "enable_realtime_quote": False,
         "enable_chip_distribution": True,
         "realtime_source_priority": [],
@@ -220,6 +348,96 @@ def _analysis_pipeline(**config_overrides: object) -> StockAnalysisPipeline:
         }
     )
     return pipeline
+
+
+def test_agent_debate_rejects_unsafe_model_before_usage_storage() -> None:
+    from src.services.research.debate_runner import DebateTerminalError
+
+    prepared = _prepared_research(
+        evidence_prompt_context="FROZEN-EVIDENCE",
+        debate_enabled=True,
+    )
+    pipeline = _analysis_pipeline(
+        agent_mode=True,
+        research_debate_enabled=True,
+    )
+    adapter = SimpleNamespace(
+        call_text=MagicMock(
+            return_value=SimpleNamespace(
+                content="{}",
+                provider="fixture",
+                model="https://alice:password@llm.example/v1",
+                usage={"total_tokens": 3},
+            )
+        )
+    )
+    executor = SimpleNamespace(llm_adapter=adapter)
+
+    def prepare_debate(initial, *, completion, model_route):
+        _assert_debate_route(model_route, channel="research-debate-agent")
+        return completion(
+            SimpleNamespace(
+                stance="bull",
+                messages=(
+                    {"role": "system", "content": "DEBATE-SYSTEM"},
+                    {"role": "user", "content": "DEBATE-USER::bull"},
+                ),
+            )
+        )
+
+    pipeline._get_research_runtime = MagicMock(
+        return_value=SimpleNamespace(prepare_debate=prepare_debate)
+    )
+    with patch("src.storage.persist_llm_usage") as mock_persist:
+        with pytest.raises(DebateTerminalError):
+            pipeline._prepare_research_debate(
+                prepared,
+                use_agent=True,
+                executor=executor,
+            )
+
+    mock_persist.assert_not_called()
+
+
+def test_agent_debate_rejects_unsafe_route_before_adapter_dispatch() -> None:
+    from src.services.research.debate_runner import DebateTerminalError
+
+    prepared = _prepared_research(
+        evidence_prompt_context="FROZEN-EVIDENCE",
+        debate_enabled=True,
+    )
+    pipeline = _analysis_pipeline(
+        agent_mode=True,
+        research_debate_enabled=True,
+        agent_litellm_model="https://alice:password@llm.example/v1",
+    )
+    adapter = SimpleNamespace(call_text=MagicMock())
+    executor = SimpleNamespace(llm_adapter=adapter)
+
+    def prepare_debate(_initial, *, completion, model_route):
+        return completion(
+            SimpleNamespace(
+                stance="bull",
+                messages=(
+                    {"role": "system", "content": "DEBATE-SYSTEM"},
+                    {"role": "user", "content": "DEBATE-USER::bull"},
+                ),
+            )
+        )
+
+    pipeline._get_research_runtime = MagicMock(
+        return_value=SimpleNamespace(prepare_debate=prepare_debate)
+    )
+    with patch("src.storage.persist_llm_usage") as mock_persist:
+        with pytest.raises(DebateTerminalError, match="unsafe_model_route"):
+            pipeline._prepare_research_debate(
+                prepared,
+                use_agent=True,
+                executor=executor,
+            )
+
+    adapter.call_text.assert_not_called()
+    mock_persist.assert_not_called()
 
 
 def _phase_context() -> SimpleNamespace:
@@ -519,6 +737,7 @@ class TestResearchAnalyzeStockIntegration:
             == f"PACK-SUMMARY\n\n{evidence_prompt}"
         )
         pipeline.analyzer.analyze.assert_called_once()
+        pipeline.analyzer.generate_structured_text.assert_not_called()
         runtime_freeze_args = pipeline._research_runtime.freeze.call_args.args
         assert runtime_freeze_args[5] == (
             "factor-policy-v1+decision-execution-v1"
@@ -550,6 +769,113 @@ class TestResearchAnalyzeStockIntegration:
             ]
             == f"PACK-SUMMARY\n\n{evidence_prompt}"
         )
+
+    @patch("src.core.pipeline.record_llm_run")
+    @patch("src.core.pipeline.record_llm_run_started")
+    @patch("src.core.pipeline.render_market_phase_summary", return_value={})
+    @patch("src.core.pipeline.build_market_phase_context", return_value=_phase_context())
+    def test_traditional_debate_freezes_before_exact_final_messages_and_uses_two_calls(
+        self,
+        _mock_phase: MagicMock,
+        _mock_phase_summary: MagicMock,
+        _mock_started: MagicMock,
+        _mock_record: MagicMock,
+    ) -> None:
+        evidence_prompt = "DSA-PIPELINE-EVIDENCE-SENTINEL"
+        debate_prompt = "DSA-PIPELINE-DEBATE-SENTINEL"
+        prepared = _prepared_research(
+            evidence_prompt_context=evidence_prompt,
+            debate_enabled=True,
+        )
+        pipeline = _analysis_pipeline(
+            agent_mode=False,
+            research_debate_enabled=True,
+        )
+        pipeline.search_service = MagicMock()
+        pipeline.search_service.is_available = True
+        context_pack = SimpleNamespace(pack_version="analysis-context-pack-v1")
+        pipeline._build_analysis_context_pack_bundle = MagicMock(
+            return_value=(context_pack, "PACK-SUMMARY", {"data_quality": {}})
+        )
+        pipeline._enhance_context = MagicMock(return_value={"frozen": "enhanced"})
+        pipeline.analyzer._format_prompt.side_effect = (
+            lambda *_args, **kwargs: (
+                "EXACT-FINAL-USER::"
+                f"{kwargs['analysis_context_pack_summary']}"
+            )
+        )
+        pipeline.analyzer._get_analysis_system_prompt.return_value = (
+            "EXACT-FINAL-SYSTEM"
+        )
+        events: list[str] = []
+
+        def generate_debate(
+            messages: list[dict[str, str]],
+            **kwargs: object,
+        ) -> tuple[str, str, dict[str, int]]:
+            stance = str(messages[1]["content"]).rsplit("::", 1)[-1]
+            events.append(f"debate-{stance}")
+            assert [item["role"] for item in messages] == ["system", "user"]
+            assert callable(kwargs["response_validator"])
+            assert {key: value for key, value in kwargs.items() if key != "response_validator"} == {
+                "max_tokens": 2048,
+                "temperature": 0.2,
+                "timeout": 60.0,
+                "call_type": "research_debate",
+                "stock_code": "600519",
+            }
+            return "{}", "provider/debate-model", {"total_tokens": 1}
+
+        pipeline.analyzer.generate_structured_text.side_effect = generate_debate
+        runtime = _PipelineDebateRuntime(
+            events=events,
+            prompt_context=debate_prompt,
+            channel="research-debate-traditional",
+        )
+        pipeline._research_runtime = runtime
+
+        def final_analyze(*_args: object, **_kwargs: object) -> None:
+            events.append("final-analysis")
+            return None
+
+        pipeline.analyzer.analyze.side_effect = final_analyze
+
+        result = pipeline.analyze_stock(
+            "600519",
+            ReportType.SIMPLE,
+            "traditional-debate-q",
+            current_time=_AS_OF,
+            prepared_research=prepared,
+        )
+
+        assert result is None
+        assert events == [
+            "request-frozen",
+            "debate-bull",
+            "debate-bear",
+            "debate-snapshot-frozen",
+            "final-freeze",
+            "final-analysis",
+        ]
+        assert pipeline.analyzer.generate_structured_text.call_count == 2
+        assert pipeline.analyzer.analyze.call_count == 1
+        runtime.prepare_debate.assert_called_once()
+        runtime.freeze.assert_called_once()
+        exact_messages = runtime.freeze.call_args.args[3]["messages"]
+        assert exact_messages[0] == {
+            "role": "system",
+            "content": "EXACT-FINAL-SYSTEM",
+        }
+        final_user = exact_messages[1]["content"]
+        assert final_user.count(evidence_prompt) == 1
+        assert final_user.count(debate_prompt) == 1
+        sent_summary = pipeline.analyzer.analyze.call_args.kwargs[
+            "analysis_context_pack_summary"
+        ]
+        assert sent_summary.count(evidence_prompt) == 1
+        assert sent_summary.count(debate_prompt) == 1
+        artifacts = pipeline._build_analysis_context_pack_bundle.call_args.args[0]
+        assert artifacts.research_debate_context["debate_hash"] == "b" * 64
 
     def test_execution_policy_changes_with_agent_guardrail_configuration(self) -> None:
         pipeline = _analysis_pipeline(agent_mode=True, agent_arch="multi")
@@ -760,6 +1086,7 @@ class TestResearchAnalyzeStockIntegration:
         assert frozen_prompts[0]["messages"][0]["content"] == "EXACT-AGENT-SYSTEM"
         assert evidence_prompt in frozen_prompts[0]["messages"][1]["content"]
         assert frozen_prompts[0]["messages"][1]["content"].count(evidence_prompt) == 1
+        pipeline.analyzer.generate_structured_text.assert_not_called()
         assert executor.tool_registry.list_names() == []
         assert executor.tool_registry.resolve("get_stock_info") is None
         assert factory.call_args.kwargs["research_snapshot_locked"] is True
@@ -787,6 +1114,151 @@ class TestResearchAnalyzeStockIntegration:
             freeze_builder_call.kwargs["context"]
             is runtime_builder_call.kwargs["context"]
         )
+
+    @patch("src.storage.persist_llm_usage")
+    @patch("src.core.pipeline.record_llm_run")
+    @patch("src.core.pipeline.record_llm_run_started")
+    def test_single_agent_debate_is_text_only_and_injected_once_before_final_run(
+        self,
+        _mock_started: MagicMock,
+        _mock_record: MagicMock,
+        mock_persist_usage: MagicMock,
+    ) -> None:
+        evidence_prompt = "DSA-SINGLE-EVIDENCE-SENTINEL"
+        debate_prompt = "DSA-SINGLE-DEBATE-SENTINEL"
+        prepared = _prepared_research(
+            evidence_prompt_context=evidence_prompt,
+            debate_enabled=True,
+        )
+        pipeline = _analysis_pipeline(
+            agent_mode=True,
+            research_debate_enabled=True,
+        )
+        pipeline._ensure_agent_history = MagicMock()
+        pipeline._load_agent_analysis_context = MagicMock(
+            return_value={"code": "600519", "today": {}, "yesterday": {}}
+        )
+        context_pack = SimpleNamespace(pack_version="analysis-context-pack-v1")
+        pipeline._build_analysis_context_pack_bundle = MagicMock(
+            return_value=(context_pack, "SINGLE-PACK-SUMMARY", {"data_quality": {}})
+        )
+        pipeline._agent_result_to_analysis_result = MagicMock(return_value=None)
+        pipeline.search_service = SimpleNamespace(
+            is_available=True,
+            search_stock_news=MagicMock(),
+        )
+        pipeline.db.save_news_intel = MagicMock()
+        events: list[str] = []
+        frozen_prompts: list[dict[str, object]] = []
+
+        class FakeExecutor:
+            max_steps = 7
+            timeout_seconds = 45.0
+
+            def __init__(self) -> None:
+                self.tool_registry = None
+                self.llm_adapter = _RecordingDebateTextAdapter(events)
+                self.build_initial_messages = MagicMock(
+                    side_effect=self._build_initial_messages
+                )
+                self.build_research_snapshot_prompt = MagicMock(
+                    side_effect=self._build_research_snapshot_prompt
+                )
+
+            @staticmethod
+            def _build_initial_messages(
+                task: str,
+                context: dict[str, object],
+            ) -> list[dict[str, str]]:
+                return [
+                    {"role": "system", "content": "EXACT-SINGLE-SYSTEM"},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"EXACT-SINGLE-USER::{task}::"
+                            f"{context['analysis_context_pack_summary']}::"
+                            f"{context['research_debate_prompt_context']}"
+                        ),
+                    },
+                ]
+
+            def _build_research_snapshot_prompt(
+                self,
+                task: str,
+                context: dict[str, object],
+            ) -> dict[str, object]:
+                return {
+                    "architecture": "single-agent",
+                    "messages": self.build_initial_messages(task, context=context),
+                    "tool_declarations": self.tool_registry.to_openai_tools(),
+                    "max_steps": self.max_steps,
+                    "timeout_seconds": self.timeout_seconds,
+                }
+
+            def run(self, task: str, context: dict[str, object]) -> SimpleNamespace:
+                events.append("final-run")
+                assert self.build_initial_messages(task, context=context) == (
+                    frozen_prompts[0]["messages"]
+                )
+                assert events[-2:] == ["final-freeze", "final-run"]
+                return SimpleNamespace(model="provider/agent-model")
+
+        executor = FakeExecutor()
+        runtime = _PipelineDebateRuntime(
+            events=events,
+            prompt_context=debate_prompt,
+            channel="research-debate-agent",
+        )
+        pipeline._research_runtime = runtime
+
+        def build_executor(*_args: object, **kwargs: object) -> FakeExecutor:
+            assert kwargs["research_snapshot_locked"] is True
+            executor.tool_registry = kwargs["tool_registry"]
+            return executor
+
+        _capture_real_research_freeze(pipeline, frozen_prompts)
+
+        with patch(
+            "src.agent.factory.build_agent_executor",
+            side_effect=build_executor,
+        ):
+            result = pipeline._analyze_with_agent(
+                "600519",
+                ReportType.SIMPLE,
+                "single-debate-q",
+                "Kweichow Moutai",
+                None,
+                None,
+                {"status": "ok"},
+                None,
+                market_phase_context={"phase": "post_close"},
+                market_phase_summary={},
+                prepared_research=prepared,
+            )
+
+        assert result is None
+        assert events == [
+            "request-frozen",
+            "debate-bull",
+            "debate-bear",
+            "debate-snapshot-frozen",
+            "final-freeze",
+            "final-run",
+        ]
+        assert executor.llm_adapter.call_text.call_count == 2
+        assert executor.tool_registry.list_names() == []
+        assert pipeline.analyzer.generate_structured_text.call_count == 0
+        assert mock_persist_usage.call_count == 2
+        assert all(
+            call.kwargs["call_type"] == "research_debate"
+            for call in mock_persist_usage.call_args_list
+        )
+        exact_final_user = frozen_prompts[0]["messages"][1]["content"]
+        assert exact_final_user.count(evidence_prompt) == 1
+        assert exact_final_user.count(debate_prompt) == 1
+        assert frozen_prompts[0]["tool_declarations"] == []
+        artifacts = pipeline._build_analysis_context_pack_bundle.call_args.args[0]
+        assert artifacts.research_debate_context["debate_hash"] == "b" * 64
 
     @patch("src.core.pipeline.record_llm_run")
     @patch("src.core.pipeline.record_llm_run_started")
@@ -874,4 +1346,117 @@ class TestResearchAnalyzeStockIntegration:
             "decision",
         ]
         assert frozen_prompts[0]["tool_declarations"] == []
+        executor.llm_adapter.call_text.assert_not_called()
         assert executor.run.call_count == 1
+
+    @patch("src.storage.persist_llm_usage")
+    @patch("src.core.pipeline.record_llm_run")
+    @patch("src.core.pipeline.record_llm_run_started")
+    def test_multi_agent_debate_is_visible_only_to_decision_stage(
+        self,
+        _mock_started: MagicMock,
+        _mock_record: MagicMock,
+        mock_persist_usage: MagicMock,
+    ) -> None:
+        from src.agent.orchestrator import AgentOrchestrator
+
+        evidence_prompt = "DSA-MULTI-EVIDENCE-SENTINEL"
+        debate_prompt = "DSA-MULTI-DEBATE-SENTINEL"
+        prepared = _prepared_research(
+            evidence_prompt_context=evidence_prompt,
+            debate_enabled=True,
+        )
+        pipeline = _analysis_pipeline(
+            agent_mode=True,
+            agent_arch="multi",
+            research_debate_enabled=True,
+        )
+        pipeline._ensure_agent_history = MagicMock()
+        pipeline._load_agent_analysis_context = MagicMock(
+            return_value={"code": "600519", "today": {}, "yesterday": {}}
+        )
+        context_pack = SimpleNamespace(pack_version="analysis-context-pack-v1")
+        pipeline._build_analysis_context_pack_bundle = MagicMock(
+            return_value=(context_pack, "MULTI-PACK-SUMMARY", {"data_quality": {}})
+        )
+        pipeline._agent_result_to_analysis_result = MagicMock(return_value=None)
+        pipeline.search_service = SimpleNamespace(
+            is_available=True,
+            search_stock_news=MagicMock(),
+        )
+        pipeline.db.save_news_intel = MagicMock()
+        events: list[str] = []
+        frozen_prompts: list[dict[str, object]] = []
+        adapter = _RecordingDebateTextAdapter(events)
+        captured: dict[str, AgentOrchestrator] = {}
+
+        def build_executor(*_args: object, **kwargs: object) -> AgentOrchestrator:
+            executor = AgentOrchestrator(
+                tool_registry=kwargs["tool_registry"],
+                llm_adapter=adapter,
+                max_steps=5,
+                mode="quick",
+                config=SimpleNamespace(agent_orchestrator_timeout_s=30),
+                research_snapshot_locked=kwargs["research_snapshot_locked"],
+            )
+
+            def run(*_run_args: object, **_run_kwargs: object) -> SimpleNamespace:
+                events.append("final-run")
+                assert events[-2:] == ["final-freeze", "final-run"]
+                return SimpleNamespace(model="provider/multi-agent-model")
+
+            executor.run = MagicMock(side_effect=run)
+            captured["executor"] = executor
+            return executor
+        runtime = _PipelineDebateRuntime(
+            events=events,
+            prompt_context=debate_prompt,
+            channel="research-debate-agent",
+        )
+        pipeline._research_runtime = runtime
+        _capture_real_research_freeze(pipeline, frozen_prompts)
+
+        with patch(
+            "src.agent.factory.build_agent_executor",
+            side_effect=build_executor,
+        ):
+            result = pipeline._analyze_with_agent(
+                "600519",
+                ReportType.SIMPLE,
+                "multi-debate-q",
+                "Kweichow Moutai",
+                None,
+                None,
+                {"status": "ok"},
+                None,
+                market_phase_context={"phase": "post_close"},
+                market_phase_summary={},
+                prepared_research=prepared,
+            )
+
+        assert result is None
+        assert events == [
+            "request-frozen",
+            "debate-bull",
+            "debate-bear",
+            "debate-snapshot-frozen",
+            "final-freeze",
+            "final-run",
+        ]
+        assert adapter.call_text.call_count == 2
+        assert mock_persist_usage.call_count == 2
+        executor = captured["executor"]
+        assert executor.tool_registry.list_names() == []
+        prompt = frozen_prompts[0]
+        assert prompt["tool_declarations"] == []
+        stages = {item["stage"]: item for item in prompt["stage_contracts"]}
+        technical_text = "\n".join(
+            str(item.get("content", "")) for item in stages["technical"]["messages"]
+        )
+        decision_text = "\n".join(
+            str(item.get("content", "")) for item in stages["decision"]["messages"]
+        )
+        assert technical_text.count(evidence_prompt) == 1
+        assert technical_text.count(debate_prompt) == 0
+        assert decision_text.count(evidence_prompt) == 1
+        assert decision_text.count(debate_prompt) == 1

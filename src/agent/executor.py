@@ -930,6 +930,15 @@ class AgentExecutor:
             if isinstance(analysis_context_pack_summary, str) and analysis_context_pack_summary:
                 parts.append(analysis_context_pack_summary)
 
+            research_debate_prompt_context = context.get(
+                "research_debate_prompt_context"
+            )
+            if (
+                isinstance(research_debate_prompt_context, str)
+                and research_debate_prompt_context
+            ):
+                parts.append(research_debate_prompt_context)
+
             # Inject pre-fetched context data to avoid redundant fetches
             if context.get("realtime_quote"):
                 parts.append(f"\n[系统已获取的实时行情]\n{json.dumps(context['realtime_quote'], ensure_ascii=False)}")

@@ -187,6 +187,7 @@ def test_durable_planning_is_per_channel_idempotent_and_secret_free(
     monkeypatch,
 ) -> None:
     now = datetime(2026, 8, 8, 9, 0, 0)
+    monkeypatch.setattr("src.services.durable_jobs.utc_naive_now", lambda: now)
     config = _config(
         durable_jobs_enabled=True,
         wechat_webhook_url="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret-key",
@@ -256,6 +257,7 @@ def test_durable_changed_replay_notification_keeps_first_persisted_content(
     monkeypatch,
 ) -> None:
     now = datetime(2026, 8, 8, 9, 30, 0)
+    monkeypatch.setattr("src.services.durable_jobs.utc_naive_now", lambda: now)
     config = _config(
         durable_jobs_enabled=True,
         wechat_webhook_url="https://example.invalid/wechat",
@@ -293,6 +295,7 @@ def test_durable_multichannel_plan_rolls_back_as_one_transaction(
     monkeypatch,
 ) -> None:
     now = datetime(2026, 8, 8, 9, 35, 0)
+    monkeypatch.setattr("src.services.durable_jobs.utc_naive_now", lambda: now)
     config = _config(
         durable_jobs_enabled=True,
         wechat_webhook_url="https://example.invalid/wechat",
@@ -332,6 +335,7 @@ def test_durable_replay_freezes_first_channel_set_and_payload(
     monkeypatch,
 ) -> None:
     now = datetime(2026, 8, 8, 9, 40, 0)
+    monkeypatch.setattr("src.services.durable_jobs.utc_naive_now", lambda: now)
     first_config = _config(
         durable_jobs_enabled=True,
         wechat_webhook_url="https://example.invalid/wechat",
@@ -449,6 +453,7 @@ def test_durable_notify_false_and_noise_suppression_never_enqueue(
     monkeypatch,
 ) -> None:
     now = datetime(2026, 8, 8, 10, 0, 0)
+    monkeypatch.setattr("src.services.durable_jobs.utc_naive_now", lambda: now)
     config = _config(
         durable_jobs_enabled=True,
         wechat_webhook_url="https://example.invalid/wechat",
@@ -558,6 +563,7 @@ def test_context_target_is_minimal_and_dingtalk_session_is_explicitly_unsupporte
     monkeypatch,
 ) -> None:
     now = datetime(2026, 8, 8, 11, 0, 0)
+    monkeypatch.setattr("src.services.durable_jobs.utc_naive_now", lambda: now)
     monkeypatch.setattr(
         "src.notification.get_config",
         lambda: _config(durable_jobs_enabled=True),
@@ -768,6 +774,7 @@ def test_job_bound_outbox_waits_for_success_and_cancels_after_failure(
     monkeypatch,
 ) -> None:
     now = datetime(2026, 8, 8, 13, 45, 0)
+    monkeypatch.setattr("src.services.durable_jobs.utc_naive_now", lambda: now)
     config = _config(
         durable_jobs_enabled=True,
         wechat_webhook_url="https://example.invalid/wechat",
@@ -828,6 +835,7 @@ def test_durable_noise_claim_retries_concurrent_job_and_releases_failed_parent(
     monkeypatch,
 ) -> None:
     now = datetime(2026, 8, 8, 13, 50, 0)
+    monkeypatch.setattr("src.services.durable_jobs.utc_naive_now", lambda: now)
     config = _config(
         durable_jobs_enabled=True,
         wechat_webhook_url="https://example.invalid/wechat",
@@ -914,6 +922,7 @@ def test_durable_plan_does_not_treat_uncommitted_process_reservation_as_suppress
     monkeypatch,
 ) -> None:
     now = datetime(2026, 8, 8, 13, 55, 0)
+    monkeypatch.setattr("src.services.durable_jobs.utc_naive_now", lambda: now)
     config = _config(
         durable_jobs_enabled=True,
         wechat_webhook_url="https://example.invalid/wechat",
