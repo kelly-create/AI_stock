@@ -706,7 +706,22 @@ def test_live_evidence_advances_boundary_persists_once_and_retry_reuses(
     assert first.evidence_context["evidence_hash"] == first.evidence_snapshot.evidence_hash
     assert "DSA_UNTRUSTED_EXTERNAL_DATA_BEGIN" in first.evidence_prompt_context
     assert len(first.evidence_prompt_context) <= 12_000
-    assert first.datasets_payload["news_search"]["content_hash"]
+    news_payload = first.datasets_payload["news_search"]
+    assert news_payload["content_hash"]
+    assert set(news_payload) == {
+        "dataset",
+        "status",
+        "row_count",
+        "available_at",
+        "data_as_of",
+        "content_hash",
+        "content_hashes",
+        "raw_ref",
+        "rows",
+    }
+    assert news_payload["row_count"] == 1
+    assert news_payload["rows"][0]["schema_version"] == "news-search-snippet-v1"
+    assert news_payload["content_hashes"] == [news_payload["content_hash"]]
     assert len(first.rows_by_dataset["news_search"]) == 1
     assert len(search_calls) == 1
     assert search_calls[0] == {

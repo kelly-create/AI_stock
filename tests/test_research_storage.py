@@ -10,6 +10,7 @@ import json
 import os
 import threading
 import time
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -35,6 +36,8 @@ from src.services.research import (
     canonical_hash,
     canonical_json,
 )
+from src.services.research.runtime import _news_dataset_payload
+from src.services.research.snapshot_service import project_structured_datasets
 from src.storage import (
     DatabaseManager,
     JobEventRecord,
@@ -322,6 +325,79 @@ def _dataset_projection(
             "rows": rows,
         }
     }
+
+
+def test_news_dataset_projection_matches_persisted_snapshot_contract(
+    research_db,
+) -> None:
+    db, store = research_db
+    _claimed, lease = _claim(store, task_id="news-projection-job")
+    repository = ResearchSnapshotRepository(db)
+    available_at = NOW - timedelta(minutes=2)
+    news_input = DatasetSnapshotInput(
+        dataset="news_search",
+        scope_type="stock",
+        scope_value="600519",
+        market="A",
+        provider="fixture-search",
+        schema_version="news-search-v1",
+        data_as_of=available_at,
+        available_at=available_at,
+        observed_at=available_at,
+        status="available",
+        normalized={
+            "schema_version": "news-search-v1",
+            "items": [
+                {
+                    "title": "Public filing summary",
+                    "snippet": "A bounded external excerpt.",
+                    "source": "example.com",
+                    "published_at": available_at,
+                    "available_at": available_at,
+                    "canonical_url": "https://example.com/news/600519",
+                }
+            ],
+        },
+        knowledge_as_of=available_at,
+    )
+    dataset = repository.write_dataset(
+        news_input,
+        lease=lease,
+        now=NOW,
+    )
+    collection = SimpleNamespace(
+        content_hash=dataset.content_hash,
+        to_dataset_input=lambda _market: news_input,
+    )
+    payload = _news_dataset_payload(collection, market="A")
+    projection = project_structured_datasets(
+        {"news_search": payload},
+        as_of=NOW,
+    )
+
+    assert canonical_json(payload["rows"]) == canonical_json([news_input.normalized])
+    assert payload["content_hashes"] == [dataset.content_hash]
+    result = repository.write_research_snapshot(
+        ResearchSnapshotInput(
+            stock_code="600519",
+            market="A",
+            snapshot_version="research-snapshot-v2",
+            field_dictionary_version="research-fields-v2",
+            factor_engine_version="factor-engine-v1",
+            pack_version="analysis-context-pack-v1",
+            prompt_version="personal-research-v1",
+            policy_version="personal-policy-v1",
+            model_route_fingerprint="route-hash-v1",
+            as_of=NOW,
+            available_at=available_at,
+            status="available",
+            canonical_payload={"datasets": projection},
+        ),
+        lease=lease,
+        now=NOW + timedelta(seconds=1),
+    )
+
+    assert result.created is True
 
 
 def test_stock_basic_reference_and_snapshot_binding_are_one_transaction(

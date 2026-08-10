@@ -430,24 +430,26 @@ def _news_dataset_payload(collection: Any, *, market: str) -> Mapping[str, Any]:
             "evidence collection must expose to_dataset_input"
         )
     item = to_input(market)
+    normalized = item.normalized
+    rows = (
+        list(normalized)
+        if isinstance(normalized, list)
+        else [dict(normalized)]
+        if isinstance(normalized, Mapping)
+        else []
+    )
     return MappingProxyType(
         canonicalize(
             {
                 "dataset": item.dataset,
-                "scope_type": item.scope_type,
-                "scope_value": item.scope_value,
-                "market": item.market,
-                "provider": item.provider,
-                "schema_version": item.schema_version,
-                "data_as_of": item.data_as_of,
-                "available_at": item.available_at,
-                "observed_at": item.observed_at,
                 "status": item.status,
-                "normalized": item.normalized,
+                "row_count": len(rows),
+                "available_at": item.available_at,
+                "data_as_of": item.data_as_of,
                 "content_hash": content_hash,
                 "content_hashes": [content_hash],
                 "raw_ref": item.raw_ref,
-                "error_code": item.error_code,
+                "rows": rows,
             }
         )
     )
