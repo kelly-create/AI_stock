@@ -137,11 +137,9 @@ class FakeRepository:
                 self.references.setdefault(key, snapshot.knowledge_as_of)
             self.inputs.append(snapshot)
             self.leases.append(lease)
-            identifier = len(self.inputs)
-            content_hash = f"{identifier:064x}"
             observed_at = snapshot.observed_at or snapshot.available_at
-            record = {
-                "id": identifier,
+            candidate = {
+                "id": None,
                 "dataset": snapshot.dataset,
                 "scope_type": snapshot.scope_type,
                 "scope_value": snapshot.scope_value,
@@ -156,13 +154,58 @@ class FakeRepository:
                 "observed_at": self._as_utc(observed_at),
                 "status": snapshot.status,
                 "normalized": snapshot.normalized,
-                "content_hash": content_hash,
                 "raw_ref": snapshot.raw_ref,
                 "error_code": snapshot.error_code,
                 "error_message": snapshot.error_message_sanitized,
                 "retryable": snapshot.retryable,
+                "supersedes_hash": snapshot.supersedes_hash,
             }
-            self.records[content_hash] = record
+            record = next(
+                (
+                    item
+                    for item in self.records.values()
+                    if all(
+                        item.get(field) == candidate.get(field)
+                        for field in (
+                            "dataset",
+                            "scope_type",
+                            "scope_value",
+                            "market",
+                            "provider",
+                            "schema_version",
+                            "trade_date",
+                            "report_date",
+                            "announcement_date",
+                            "data_as_of",
+                            "available_at",
+                            "status",
+                            "normalized",
+                            "raw_ref",
+                            "error_code",
+                            "retryable",
+                            "supersedes_hash",
+                        )
+                    )
+                    and (
+                        snapshot.dataset != "stock_basic"
+                        or item.get("observed_at") == candidate.get("observed_at")
+                    )
+                ),
+                None,
+            )
+            created = record is None
+            if record is None:
+                identifier = len(self.records) + 1
+                content_hash = f"{identifier:064x}"
+                candidate["id"] = identifier
+                candidate["content_hash"] = content_hash
+                record = candidate
+                self.records[content_hash] = record
+            else:
+                identifier = int(record["id"])
+                content_hash = next(
+                    key for key, value in self.records.items() if value is record
+                )
             boundary = self._as_utc(snapshot.knowledge_as_of)
             self.bindings[
                 (
@@ -172,7 +215,7 @@ class FakeRepository:
                     boundary,
                 )
             ] = record
-        return SnapshotWriteResult(identifier, content_hash, True)
+        return SnapshotWriteResult(identifier, content_hash, created)
 
     def get_job_dataset(
         self,
@@ -846,7 +889,11 @@ def test_cyq_d_plus_one_increment_merges_persisted_consumption_window(
 
     assert len(provider.calls) == 2
     assert provider.calls[1][1]["start_date"] == "20260808"
-    assert len(repository.inputs) == 2
+    assert len(repository.inputs) == 3
+    assert repository.leases[-1].job_id == "day-two-job"
+    assert repository.inputs[-1].normalized == [
+        {"trade_date": "20260807", "price": 99.0}
+    ]
     assert first.row_count == 1
     assert [row["trade_date"] for row in second.normalized_rows] == [
         "20260807",
@@ -854,6 +901,136 @@ def test_cyq_d_plus_one_increment_merges_persisted_consumption_window(
     ]
     assert second.row_count == 2
     assert len(second.source_snapshot_hashes) == 2
+
+
+def test_incremental_reuse_binds_every_source_hash_and_resumes_without_refetch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db, store, repository = _build_real_collector_store(
+        tmp_path,
+        monkeypatch,
+        database_name="incremental-lineage-resume.db",
+    )
+    _reset_collector_state_for_tests()
+    boundary = datetime.now(timezone.utc)
+    cutoff = (boundary + timedelta(hours=8)).date()
+    first_day = cutoff - timedelta(days=2)
+    second_day = cutoff - timedelta(days=1)
+    first_lease = _claim_real_collector_job(
+        store,
+        task_id="incremental-lineage-first-job",
+        worker_id="first-worker",
+        now=boundary,
+    )
+    second_boundary = boundary + timedelta(microseconds=1)
+    second_lease = _claim_real_collector_job(
+        store,
+        task_id="incremental-lineage-second-job",
+        worker_id="second-worker",
+        now=second_boundary,
+    )
+    try:
+        first_provider = FakeProvider(
+            {
+                "cyq_chips": pd.DataFrame(
+                    [
+                        {
+                            "trade_date": first_day.strftime("%Y%m%d"),
+                            "price": 99.0,
+                        }
+                    ]
+                )
+            }
+        )
+        ResearchDatasetCollector(
+            first_provider,
+            repository,
+            RawArtifactStore(tmp_path / "raw-incremental-lineage"),
+            clock=lambda: boundary,
+        ).collect_dataset(
+            "600519",
+            "cyq_chips",
+            as_of=boundary,
+            lease=first_lease,
+        )
+
+        second_provider = FakeProvider(
+            {
+                "cyq_chips": pd.DataFrame(
+                    [
+                        {
+                            "trade_date": second_day.strftime("%Y%m%d"),
+                            "price": 100.0,
+                        }
+                    ]
+                )
+            }
+        )
+        raw_store = RawArtifactStore(tmp_path / "raw-incremental-lineage")
+        second = ResearchDatasetCollector(
+            second_provider,
+            repository,
+            raw_store,
+            clock=lambda: second_boundary,
+        ).collect_dataset(
+            "600519",
+            "cyq_chips",
+            as_of=second_boundary,
+            lease=second_lease,
+        )
+
+        with db.get_session() as session:
+            payloads = [
+                json.loads(value)
+                for (value,) in session.query(JobEventRecord.payload_json)
+                .filter_by(
+                    job_id=second_lease.job_id,
+                    event_type="research_dataset_snapshot",
+                )
+                .all()
+            ]
+        assert {item["content_hash"] for item in payloads} == set(
+            second.source_snapshot_hashes
+        )
+        assert len(payloads) == len(second.source_snapshot_hashes) == 2
+
+        _reset_collector_state_for_tests()
+        replay_provider = FakeProvider(
+            {"cyq_chips": AssertionError("resume must not refetch")}
+        )
+        replayed = ResearchDatasetCollector(
+            replay_provider,
+            repository,
+            raw_store,
+            clock=lambda: second_boundary,
+        ).collect_dataset(
+            "600519",
+            "cyq_chips",
+            as_of=second_boundary,
+            lease=second_lease,
+        )
+
+        assert replay_provider.calls == []
+        assert replayed.snapshot.content_hash == second.snapshot.content_hash
+        assert replayed.source_snapshot_hashes == second.source_snapshot_hashes
+        assert [row["trade_date"] for row in replayed.normalized_rows] == [
+            first_day.strftime("%Y%m%d"),
+            second_day.strftime("%Y%m%d"),
+        ]
+        with db.get_session() as session:
+            assert (
+                session.query(JobEventRecord)
+                .filter_by(
+                    job_id=second_lease.job_id,
+                    event_type="research_dataset_snapshot",
+                )
+                .count()
+                == 2
+            )
+    finally:
+        DatabaseManager.reset_instance()
+        Config.reset_instance()
 
 
 def test_bundle_exposes_normalized_rows_and_detached_frames_without_refetch(

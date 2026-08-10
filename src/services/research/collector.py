@@ -627,6 +627,7 @@ class ResearchDatasetCollector:
                     scope_value,
                     boundary,
                     recovered,
+                    lease=lease,
                 )
             return recovered
         if definition.current_state and reference_mode == "historical":
@@ -677,18 +678,27 @@ class ResearchDatasetCollector:
                 scope_value,
                 boundary,
                 result,
+                lease=lease,
             )
-        self._remember_terminal_result(
-            lease,
-            definition.name,
-            scope_value,
-            (
-                result.data_as_of
-                if definition.current_state and reference_mode == "live"
-                else boundary
-            ),
-            result,
-        )
+        # A merged incremental window intentionally binds more than one
+        # immutable chunk to the same job boundary.  The durable events remain
+        # authoritative; caching one of those chunks as though it were the
+        # sole terminal binding would make a later resume order-dependent.
+        if not (
+            definition.incremental_by_trade_date
+            and len(result.source_snapshot_hashes) > 1
+        ):
+            self._remember_terminal_result(
+                lease,
+                definition.name,
+                scope_value,
+                (
+                    result.data_as_of
+                    if definition.current_state and reference_mode == "live"
+                    else boundary
+                ),
+                result,
+            )
         return result
 
     def _assert_recovered_query_plan(
@@ -1443,6 +1453,8 @@ class ResearchDatasetCollector:
         scope_value: str,
         boundary: datetime,
         current: DatasetCollectionResult,
+        *,
+        lease: LeaseFence,
     ) -> DatasetCollectionResult:
         """Return the complete persisted CYQ window, not only the new chunk."""
 
@@ -1454,6 +1466,22 @@ class ResearchDatasetCollector:
         )
         if not chunks:
             return current
+        current_hash = (
+            current.snapshot.content_hash if current.snapshot is not None else None
+        )
+        for chunk in chunks:
+            chunk_hash = (
+                chunk.snapshot.content_hash if chunk.snapshot is not None else None
+            )
+            if chunk_hash is None or chunk_hash == current_hash:
+                continue
+            self._bind_existing_incremental_result(
+                chunk,
+                definition=definition,
+                scope_value=scope_value,
+                boundary=boundary,
+                lease=lease,
+            )
         unique_rows: dict[str, Mapping[str, Any]] = {}
         for chunk in chunks:
             for row in chunk.normalized_rows:
@@ -1497,7 +1525,7 @@ class ResearchDatasetCollector:
             )
         )
         return replace(
-            current,
+            latest_chunk,
             status=status,
             row_count=len(ordered_rows),
             normalized_rows=ordered_rows,

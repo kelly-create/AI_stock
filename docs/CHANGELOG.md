@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] 增量研究数据窗口复用时为当前 Durable Job 绑定全部来源快照，避免 Evidence 冻结阶段因 lineage 不完整而安全失败。
+
 - [修复] 冻结 Tushare 日线缺少预计算指标时，个人投研上下文会从同一不可变日线窗口确定性补算 MA5/10/20 与量比，并对缺失字段安全降级，避免 durable canary 在模型调用前因属性缺失失败。
 
 - [新功能] 新增独立 Decision Outcome v2：按 T+1 可执行性与 5/10/20 交易日计算方向收益、MFE/MAE、CSI 300/申万一级行业超额，保存冻结 lineage，并以 durable job 支持手工及唯一 Scheduler owner 入队。
