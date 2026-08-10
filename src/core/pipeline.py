@@ -1231,7 +1231,7 @@ class StockAnalysisPipeline:
                 max_steps=max_steps,
                 timeout_seconds=timeout_seconds,
             ),
-            f"{POLICY_VERSION}+decision-execution-v1",
+            f"{POLICY_VERSION}-decision-execution-v1",
             policy,
             **freeze_kwargs,
         )
