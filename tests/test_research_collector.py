@@ -1033,6 +1033,128 @@ def test_incremental_reuse_binds_every_source_hash_and_resumes_without_refetch(
         Config.reset_instance()
 
 
+def test_incremental_empty_primary_keeps_full_lineage_on_cold_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db, store, repository = _build_real_collector_store(
+        tmp_path,
+        monkeypatch,
+        database_name="incremental-empty-primary-resume.db",
+    )
+    _reset_collector_state_for_tests()
+    boundary = datetime.now(timezone.utc)
+    cutoff = (boundary + timedelta(hours=8)).date()
+    frozen_day = cutoff - timedelta(days=1)
+    first_lease = _claim_real_collector_job(
+        store,
+        task_id="incremental-empty-primary-first-job",
+        worker_id="first-worker",
+        now=boundary,
+    )
+    second_boundary = boundary + timedelta(microseconds=1)
+    second_lease = _claim_real_collector_job(
+        store,
+        task_id="incremental-empty-primary-second-job",
+        worker_id="second-worker",
+        now=second_boundary,
+    )
+    raw_store = RawArtifactStore(tmp_path / "raw-incremental-empty-primary")
+    try:
+        ResearchDatasetCollector(
+            FakeProvider(
+                {
+                    "cyq_chips": pd.DataFrame(
+                        [
+                            {
+                                "trade_date": frozen_day.strftime("%Y%m%d"),
+                                "price": 99.0,
+                            }
+                        ]
+                    )
+                }
+            ),
+            repository,
+            raw_store,
+            clock=lambda: boundary,
+        ).collect_dataset(
+            "600519",
+            "cyq_chips",
+            as_of=boundary,
+            lease=first_lease,
+        )
+
+        empty_provider = FakeProvider({"cyq_chips": pd.DataFrame()})
+        second = ResearchDatasetCollector(
+            empty_provider,
+            repository,
+            raw_store,
+            clock=lambda: second_boundary,
+        ).collect_dataset(
+            "600519",
+            "cyq_chips",
+            as_of=second_boundary,
+            lease=second_lease,
+        )
+
+        assert len(empty_provider.calls) == 1
+        assert second.status == "available"
+        assert [row["trade_date"] for row in second.normalized_rows] == [
+            frozen_day.strftime("%Y%m%d")
+        ]
+        assert len(second.source_snapshot_hashes) == 2
+        with db.get_session() as session:
+            payloads = [
+                json.loads(value)
+                for (value,) in session.query(JobEventRecord.payload_json)
+                .filter_by(
+                    job_id=second_lease.job_id,
+                    event_type="research_dataset_snapshot",
+                )
+                .order_by(JobEventRecord.id.asc())
+                .all()
+            ]
+        assert [item["status"] for item in payloads] == ["empty", "available"]
+        assert {item["content_hash"] for item in payloads} == set(
+            second.source_snapshot_hashes
+        )
+
+        _reset_collector_state_for_tests()
+        replay_provider = FakeProvider(
+            {"cyq_chips": AssertionError("cold resume must not refetch")}
+        )
+        replayed = ResearchDatasetCollector(
+            replay_provider,
+            repository,
+            raw_store,
+            clock=lambda: second_boundary,
+        ).collect_dataset(
+            "600519",
+            "cyq_chips",
+            as_of=second_boundary,
+            lease=second_lease,
+        )
+
+        assert replay_provider.calls == []
+        assert replayed.source_snapshot_hashes == second.source_snapshot_hashes
+        assert [row["trade_date"] for row in replayed.normalized_rows] == [
+            frozen_day.strftime("%Y%m%d")
+        ]
+        with db.get_session() as session:
+            assert (
+                session.query(JobEventRecord)
+                .filter_by(
+                    job_id=second_lease.job_id,
+                    event_type="research_dataset_snapshot",
+                )
+                .count()
+                == 2
+            )
+    finally:
+        DatabaseManager.reset_instance()
+        Config.reset_instance()
+
+
 def test_bundle_exposes_normalized_rows_and_detached_frames_without_refetch(
     tmp_path: Path,
 ) -> None:

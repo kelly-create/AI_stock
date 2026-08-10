@@ -3818,7 +3818,15 @@ class ResearchSnapshotRepository:
                         "research dataset binding is ambiguous for job, dataset, and scope"
                     )
 
-            content_hash, _cutoff, _bound_status, retryable = candidates[0]
+            # Events are read newest-first.  Incremental collection records
+            # its primary provider result first, then appends bindings for
+            # reused immutable history.  At an exact boundary recover that
+            # first chronological result so the collector can deterministically
+            # rebuild the same merged window (including an empty primary
+            # observation) instead of treating the last reused chunk as the
+            # primary result.
+            selected = candidates[-1] if requested_cutoff is not None else candidates[0]
+            content_hash, _cutoff, _bound_status, retryable = selected
             result = _dataset_record_dict(rows_by_hash[content_hash])
             result["binding_retryable"] = retryable
             return result

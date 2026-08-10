@@ -1515,15 +1515,18 @@ class ResearchDatasetCollector:
             if latest_chunk.status == DatasetStatus.STALE.value
             else DatasetStatus.AVAILABLE.value
         )
-        hashes = tuple(
-            sorted(
-                {
-                    item.snapshot.content_hash
-                    for item in chunks
-                    if item.snapshot is not None
-                }
-            )
-        )
+        source_hashes = {
+            item.snapshot.content_hash
+            for item in chunks
+            if item.snapshot is not None
+        }
+        # The primary incremental request is itself frozen provenance even
+        # when it returns no new rows.  Keeping that terminal observation in
+        # the merged lineage lets a cold durable resume distinguish "already
+        # up to date" from a window assembled only from older chunks.
+        if current.snapshot is not None:
+            source_hashes.add(current.snapshot.content_hash)
+        hashes = tuple(sorted(source_hashes))
         return replace(
             latest_chunk,
             status=status,
