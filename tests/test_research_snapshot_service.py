@@ -598,6 +598,38 @@ def test_structured_external_dataset_identifier_triggers_body_projection():
     assert "content_hash" in rendered
 
 
+def test_structured_external_dataset_preserves_persisted_lineage_hashes():
+    current_hash = "a" * 64
+    reused_hash = "b" * 64
+    projected = project_structured_datasets(
+        {
+            "news_search": {
+                "dataset": "news_search",
+                "status": "partial",
+                "available_at": "2025-06-30T17:00:00+08:00",
+                "content_hash": current_hash,
+                "content_hashes": [current_hash, reused_hash],
+                "normalized": {
+                    "items": [
+                        {
+                            "title": "private external body",
+                            "url": "https://example.com/a?token=x",
+                        }
+                    ]
+                },
+            }
+        },
+        as_of=AS_OF,
+    )
+
+    item = projected["news_search"]
+    assert item["content_hash"] == current_hash
+    assert item["content_hashes"] == [current_hash, reused_hash]
+    rendered = json.dumps(projected, ensure_ascii=False, sort_keys=True)
+    assert "private external body" not in rendered
+    assert "token=x" not in rendered
+
+
 def test_safe_projection_drops_sensitive_fields_and_sanitizes_urls_at_any_depth():
     context = _context()
     context["auth"] = {

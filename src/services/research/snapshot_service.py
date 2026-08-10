@@ -708,7 +708,48 @@ def project_structured_datasets(datasets: Any, *, as_of: Any) -> Any:
     cutoff = _aware_datetime(as_of, field="as_of")
     safe = _safe_object(datasets, field="datasets")
     _validate_evidence_times(safe, snapshot_as_of=cutoff, path="datasets")
-    return canonicalize(_project_tree(safe))
+    projected = _project_tree(safe)
+    if isinstance(safe, Mapping) and isinstance(projected, Mapping):
+        projected = dict(projected)
+        for raw_name, raw_item in safe.items():
+            name = str(raw_name)
+            projected_item = projected.get(name)
+            if not isinstance(raw_item, Mapping) or not isinstance(
+                projected_item,
+                Mapping,
+            ):
+                continue
+            content_hash = raw_item.get("content_hash")
+            content_hashes = raw_item.get("content_hashes")
+            if content_hash is None and content_hashes is None:
+                continue
+            restored = dict(projected_item)
+            if content_hash is not None:
+                normalized_hash = str(content_hash or "").strip()
+                if not _SHA256_RE.fullmatch(normalized_hash):
+                    raise ValueError(
+                        f"datasets.{name}.content_hash must be a lowercase SHA-256 digest"
+                    )
+                restored["content_hash"] = normalized_hash
+            if content_hashes is not None:
+                if isinstance(content_hashes, (str, bytes, bytearray)) or not isinstance(
+                    content_hashes,
+                    (list, tuple),
+                ):
+                    raise TypeError(
+                        f"datasets.{name}.content_hashes must be an array"
+                    )
+                normalized_hashes = []
+                for index, value in enumerate(content_hashes):
+                    normalized_hash = str(value or "").strip()
+                    if not _SHA256_RE.fullmatch(normalized_hash):
+                        raise ValueError(
+                            f"datasets.{name}.content_hashes[{index}] must be a lowercase SHA-256 digest"
+                        )
+                    normalized_hashes.append(normalized_hash)
+                restored["content_hashes"] = normalized_hashes
+            projected[name] = restored
+    return canonicalize(projected)
 
 
 def project_factors(factors: Any, *, as_of: Any) -> Any:

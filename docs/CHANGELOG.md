@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] Research Snapshot 对外部新闻内容继续执行脱敏投影，同时保留并校验已持久化 Dataset 的 `content_hash/content_hashes`，避免 Evidence 血缘被二次摘要后失去仓储引用。
 - [修复] 个人投研冻结快照使用只含安全标识符字符的组合 Policy 版本，避免 Evidence 任务在正式 Research Snapshot 持久化前被版本契约拒绝。
 - [修复] 增量研究数据在本次采集没有新增行时仍冻结主采集观察与全部复用历史快照，并在 Durable 冷恢复时重建同一来源集合，避免 Evidence 阶段把“已是最新”误判为 Dataset lineage 冲突。
 - [修复] 增量研究数据窗口复用时为当前 Durable Job 绑定全部来源快照，避免 Evidence 冻结阶段因 lineage 不完整而安全失败。
