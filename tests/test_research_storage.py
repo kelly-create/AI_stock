@@ -69,6 +69,18 @@ def research_db(tmp_path, monkeypatch: pytest.MonkeyPatch):
     registry = DurableJobHandlerRegistry()
     registry.register("research", 1, ResearchJobPayload, lambda payload: payload.stock_code)
     registry.register(
+        "personal_research",
+        1,
+        ResearchJobPayload,
+        lambda payload: payload.stock_code,
+    )
+    registry.register(
+        "decision_outcomes_v2",
+        1,
+        ResearchJobPayload,
+        lambda payload: payload.stock_code,
+    )
+    registry.register(
         "scheduled_analysis",
         1,
         ScheduledResearchJobPayload,
@@ -125,6 +137,38 @@ def _claim_multi_stock(store: DurableJobStore, task_id: str):
         worker_id=claimed.worker_id,
         lease_token=claimed.lease_token,
     )
+
+
+@pytest.mark.parametrize("job_type", ["personal_research", "decision_outcomes_v2"])
+def test_research_collectors_can_write_under_their_live_lease(
+    research_db,
+    job_type: str,
+) -> None:
+    db, store = research_db
+    store.enqueue(
+        JobEnqueueRequest(
+            job_type=job_type,
+            payload={"stock_code": "600519"},
+            task_id=f"{job_type}-lease",
+            stock_code="600519",
+        ),
+        now=NOW,
+    )
+    claimed = store.claim_next("personal-worker", now=NOW)
+    assert claimed is not None
+    lease = LeaseFence(
+        job_id=claimed.task_id,
+        worker_id=claimed.worker_id,
+        lease_token=claimed.lease_token,
+    )
+
+    write = ResearchSnapshotRepository(db).write_dataset(
+        _dataset_input(),
+        lease=lease,
+        now=NOW + timedelta(seconds=1),
+    )
+
+    assert write.created is True
 
 
 def test_research_daily_upsert_is_fenced_inside_the_write_transaction(
@@ -992,6 +1036,18 @@ def test_factor_and_research_dedupe_bind_each_consuming_job_once(research_db) ->
     assert second_factor.content_hash == first_factor.content_hash
     assert second_snapshot.created is False
     assert second_snapshot.content_hash == first_snapshot.content_hash
+    first_bound = repository.get_job_research_snapshot(
+        job_id=first_lease.job_id,
+        stock_code="600519",
+    )
+    second_bound = repository.get_job_research_snapshot(
+        job_id=second_lease.job_id,
+        stock_code="600519",
+    )
+    assert first_bound is not None
+    assert second_bound is not None
+    assert first_bound["snapshot_hash"] == first_snapshot.content_hash
+    assert second_bound["snapshot_hash"] == first_snapshot.content_hash
     with db.get_session() as session:
         events = session.execute(
             select(JobEventRecord).where(

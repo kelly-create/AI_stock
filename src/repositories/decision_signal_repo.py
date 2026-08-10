@@ -10,6 +10,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from sqlalchemy import and_, desc, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
+from src.repositories.portfolio_policy_evaluation_repo import (
+    PortfolioPolicyEvaluationRepository,
+)
 from src.schemas.decision_profile import (
     DECISION_PROFILE_FILTER_ALL,
     DecisionProfileFilter,
@@ -56,6 +59,27 @@ class DecisionSignalRepository:
         "action",
         "horizon",
         "market_phase",
+        "research_stance",
+        "account_action",
+        "value_quality_score",
+        "trend_timing_score",
+        "catalyst_score",
+        "risk_score",
+        "evidence_quality_score",
+        "research_snapshot_hash",
+        "policy_version",
+        "policy_hash",
+        "policy_evaluation_hash",
+        "portfolio_snapshot_ref",
+        "prompt_version",
+        "catalysts_json",
+        "invalidators_json",
+        "unknowns_json",
+        "evidence_refs_json",
+        "policy_mode",
+        "policy_decision",
+        "would_block",
+        "policy_reasons_json",
     })
 
     def __init__(self, db_manager: Optional[DatabaseManager] = None):
@@ -76,6 +100,7 @@ class DecisionSignalRepository:
         fields: Dict[str, Any],
         *,
         allow_relaxed_horizon_fill: bool = False,
+        policy_evaluation_fields: Optional[Dict[str, Any]] = None,
     ) -> DecisionSignalCreateResult:
         self.expire_due_signals()
         fields = self._normalize_datetime_fields(fields)
@@ -89,6 +114,11 @@ class DecisionSignalRepository:
             if existing is not None:
                 if self._should_refresh_existing(existing, fields):
                     self._refresh_existing_in_session(existing, fields)
+                    PortfolioPolicyEvaluationRepository.ensure_in_session(
+                        session=session,
+                        signal_id=int(existing.id),
+                        fields=policy_evaluation_fields,
+                    )
                     session.commit()
                     session.refresh(existing)
                     return DecisionSignalCreateResult(
@@ -97,6 +127,15 @@ class DecisionSignalRepository:
                         refreshed=True,
                         invalidation_reference_at=existing.updated_at,
                     )
+                _evaluation, evaluation_created = (
+                    PortfolioPolicyEvaluationRepository.ensure_in_session(
+                        session=session,
+                        signal_id=int(existing.id),
+                        fields=policy_evaluation_fields,
+                    )
+                )
+                if evaluation_created:
+                    session.commit()
                 return DecisionSignalCreateResult(
                     row=existing,
                     created=False,
@@ -117,6 +156,11 @@ class DecisionSignalRepository:
                         fields,
                         allow_horizon_fill=allow_relaxed_horizon_fill,
                     )
+                    PortfolioPolicyEvaluationRepository.ensure_in_session(
+                        session=session,
+                        signal_id=int(relaxed_existing.id),
+                        fields=policy_evaluation_fields,
+                    )
                     session.commit()
                     session.refresh(relaxed_existing)
                     return DecisionSignalCreateResult(
@@ -132,6 +176,11 @@ class DecisionSignalRepository:
                         allow_horizon_fill=allow_relaxed_horizon_fill,
                     )
                     if changed:
+                        PortfolioPolicyEvaluationRepository.ensure_in_session(
+                            session=session,
+                            signal_id=int(relaxed_existing.id),
+                            fields=policy_evaluation_fields,
+                        )
                         session.commit()
                         session.refresh(relaxed_existing)
                         return DecisionSignalCreateResult(
@@ -140,6 +189,15 @@ class DecisionSignalRepository:
                             refreshed=True,
                             invalidation_reference_at=relaxed_existing.created_at,
                         )
+                _evaluation, evaluation_created = (
+                    PortfolioPolicyEvaluationRepository.ensure_in_session(
+                        session=session,
+                        signal_id=int(relaxed_existing.id),
+                        fields=policy_evaluation_fields,
+                    )
+                )
+                if evaluation_created:
+                    session.commit()
                 return DecisionSignalCreateResult(
                     row=relaxed_existing,
                     created=False,
@@ -150,6 +208,12 @@ class DecisionSignalRepository:
             row = DecisionSignalRecord(**fields)
             session.add(row)
             try:
+                session.flush()
+                PortfolioPolicyEvaluationRepository.ensure_in_session(
+                    session=session,
+                    signal_id=int(row.id),
+                    fields=policy_evaluation_fields,
+                )
                 session.commit()
             except IntegrityError:
                 session.rollback()
@@ -163,6 +227,15 @@ class DecisionSignalRepository:
                 ).scalar_one_or_none()
                 if existing is None:
                     raise
+                _evaluation, evaluation_created = (
+                    PortfolioPolicyEvaluationRepository.ensure_in_session(
+                        session=session,
+                        signal_id=int(existing.id),
+                        fields=policy_evaluation_fields,
+                    )
+                )
+                if evaluation_created:
+                    session.commit()
                 return DecisionSignalCreateResult(
                     row=existing,
                     created=False,
@@ -412,7 +485,19 @@ class DecisionSignalRepository:
             if field_name in cls._IMMUTABLE_REFRESH_FIELDS:
                 continue
             setattr(existing, field_name, value)
-        existing.updated_at = utc_naive_now()
+        refreshed_at = utc_naive_now()
+        # Windows wall clocks can return the same microsecond for the prior
+        # status update and a subsequent refresh.  Preserve strict event order
+        # so a refreshed older row can invalidate an opposing signal created
+        # after its original version but before this refresh.
+        prior_updated_at = existing.updated_at
+        if prior_updated_at is not None:
+            prior_updated_at = to_utc_naive_datetime(prior_updated_at)
+            if refreshed_at <= prior_updated_at:
+                from datetime import timedelta
+
+                refreshed_at = prior_updated_at + timedelta(microseconds=1)
+        existing.updated_at = refreshed_at
 
     @staticmethod
     def _find_existing_in_session(*, session: Any, fields: Dict[str, Any]) -> Optional[DecisionSignalRecord]:
@@ -424,6 +509,7 @@ class DecisionSignalRepository:
                 .limit(1)
             ).scalar_one_or_none()
             if existing is not None:
+                DecisionSignalRepository._assert_formal_lineage_match(existing, fields)
                 return existing
         source_report_id = fields.get("source_report_id")
         trace_id = fields.get("trace_id")
@@ -444,6 +530,7 @@ class DecisionSignalRepository:
                 DecisionSignalRecord.action == action,
                 DecisionSignalRecord.horizon == horizon,
                 DecisionSignalRecord.market_phase == market_phase,
+                *DecisionSignalRepository._formal_lineage_conditions(fields),
             ]
         elif trace_id:
             conditions = [
@@ -455,6 +542,7 @@ class DecisionSignalRepository:
                 DecisionSignalRecord.action == action,
                 DecisionSignalRecord.horizon == horizon,
                 DecisionSignalRecord.market_phase == market_phase,
+                *DecisionSignalRepository._formal_lineage_conditions(fields),
             ]
         else:
             return None
@@ -484,6 +572,7 @@ class DecisionSignalRepository:
             DecisionSignalRecord.stock_code == fields.get("stock_code"),
             cls._same_profile_condition(fields.get("decision_profile")),
             DecisionSignalRecord.action == fields.get("action"),
+            *cls._formal_lineage_conditions(fields),
         ]
         if source_report_id is not None:
             conditions.append(DecisionSignalRecord.source_report_id == source_report_id)
@@ -614,6 +703,47 @@ class DecisionSignalRepository:
         if profile is None:
             return DecisionSignalRecord.decision_profile.is_(None)
         return DecisionSignalRecord.decision_profile == profile
+
+    @staticmethod
+    def _formal_lineage_conditions(fields: Dict[str, Any]) -> List[Any]:
+        """Bind formal personal-research signals to one immutable evaluation.
+
+        Legacy/off-only signals without a research snapshot retain their
+        historical de-duplication behavior.  Once a signal is produced from a
+        formal research snapshot or under shadow/enforce policy, a changed
+        research/policy/portfolio evaluation must create a new DecisionSignal
+        instead of mutating the prior asset.
+        """
+
+        evaluation_hash = fields.get("policy_evaluation_hash")
+        if not DecisionSignalRepository._is_formal_personal_research(fields):
+            return []
+        return [DecisionSignalRecord.policy_evaluation_hash == evaluation_hash]
+
+    @staticmethod
+    def _assert_formal_lineage_match(
+        existing: DecisionSignalRecord,
+        fields: Dict[str, Any],
+    ) -> None:
+        incoming = fields.get("policy_evaluation_hash")
+        stored = existing.policy_evaluation_hash
+        if (
+            not DecisionSignalRepository._is_formal_personal_research(fields)
+            or incoming is None
+            or stored is None
+            or incoming == stored
+        ):
+            return
+        raise ValueError(
+            "idempotency_key is already bound to a different policy evaluation"
+        )
+
+    @staticmethod
+    def _is_formal_personal_research(fields: Dict[str, Any]) -> bool:
+        return (
+            fields.get("research_snapshot_hash") is not None
+            or fields.get("policy_mode") in {"shadow", "enforce"}
+        )
 
     @classmethod
     def _append_profile_filter_condition(

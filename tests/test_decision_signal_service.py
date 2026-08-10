@@ -1551,7 +1551,13 @@ def test_service_relaxed_active_fill_does_not_invalidate_newer_opposing_signal(i
 
 def test_service_propagates_unexpected_invalidation_failures(isolated_db) -> None:
     class FailingInvalidationRepo:
-        def create_if_absent(self, fields, *, allow_relaxed_horizon_fill=False):
+        def create_if_absent(
+            self,
+            fields,
+            *,
+            allow_relaxed_horizon_fill=False,
+            policy_evaluation_fields=None,
+        ):
             row = SimpleNamespace(
                 id=1,
                 status="active",

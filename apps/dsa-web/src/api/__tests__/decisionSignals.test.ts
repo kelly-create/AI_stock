@@ -486,6 +486,60 @@ describe('decisionSignalsApi', () => {
     await expect(decisionSignalsApi.list()).rejects.toBe(error);
   });
 
+  it('maps formal personal-research and Policy fields without falling back to legacy action', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        id: 13,
+        stock_code: '600519',
+        market: 'cn',
+        source_type: 'analysis',
+        trigger_source: 'personal_research',
+        action: 'buy',
+        research_stance: 'bullish',
+        account_action: 'observe',
+        policy_mode: 'enforce',
+        policy_decision: 'block',
+        would_block: true,
+        policy_reasons: ['position_weight_limit_exceeded'],
+        catalysts: [],
+        invalidators: [],
+        unknowns: [],
+        evidence_refs: ['evidence:1'],
+        plan_quality: 'complete',
+        status: 'active',
+      },
+    });
+
+    const item = await decisionSignalsApi.get(13);
+
+    expect(item.action).toBe('buy');
+    expect(item.accountAction).toBe('observe');
+    expect(item.policyDecision).toBe('block');
+    expect(item.wouldBlock).toBe(true);
+    expect(item.policyReasons).toEqual(['position_weight_limit_exceeded']);
+    expect(item.evidenceRefs).toEqual(['evidence:1']);
+  });
+
+  it('rejects malformed formal Policy reason arrays', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        id: 13,
+        stock_code: '600519',
+        market: 'cn',
+        source_type: 'analysis',
+        trigger_source: 'personal_research',
+        action: 'buy',
+        policy_reasons: 'position_weight_limit_exceeded',
+        plan_quality: 'complete',
+        status: 'active',
+      },
+    });
+
+    await expect(decisionSignalsApi.get(13)).rejects.toThrow(
+      'DecisionSignal policy_reasons must be a string array',
+    );
+  });
+
   it('runs and lists signal outcomes with top-level field mapping', async () => {
     post.mockResolvedValueOnce({
       data: {

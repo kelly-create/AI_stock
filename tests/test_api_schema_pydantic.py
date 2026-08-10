@@ -90,6 +90,83 @@ RESEARCH_SCHEMAS = (
     "ResearchFactorResponse",
     "ResearchSnapshotResponse",
 )
+PERSONAL_RESEARCH_PATHS = (
+    "/api/v1/research/watchlist",
+    "/api/v1/research/universe",
+    "/api/v1/research/watchlist/{market}/{stock_code}",
+    "/api/v1/research/personal/runs",
+    "/api/v1/research/personal/artifacts/skills/tasks/{task_id}/stocks/{market}/{stock_code}",
+    "/api/v1/research/personal/artifacts/skills/{execution_hash}",
+    "/api/v1/research/personal/artifacts/debate-reviews/{review_hash}",
+    "/api/v1/research/personal/artifacts/theses/by-signal/{decision_signal_id}",
+    "/api/v1/research/personal/artifacts/theses/latest",
+    "/api/v1/research/personal/artifacts/theses/{thesis_hash}",
+    "/api/v1/portfolio/accounts",
+    "/api/v1/portfolio/accounts/{account_id}",
+    "/api/v1/portfolio/accounts/{account_id}/reconciliations",
+    "/api/v1/portfolio/accounts/{account_id}/reconciliations/preview",
+    "/api/v1/portfolio/accounts/{account_id}/reconciliations/apply",
+    "/api/v1/portfolio/accounts/{account_id}/reconciliations/{reconciliation_id}",
+    "/api/v1/analysis/status/{task_id}",
+    "/api/v1/decision-signals/outcomes-v2/run",
+    "/api/v1/decision-signals/outcomes-v2",
+    "/api/v1/decision-signals/outcomes-v2/stats",
+    "/api/v1/decision-signals/{signal_id}/outcomes-v2",
+)
+AUTHENTICATED_PERSONAL_RESEARCH_PATHS = (
+    "/api/v1/research/personal/runs",
+    "/api/v1/research/personal/artifacts/skills/tasks/{task_id}/stocks/{market}/{stock_code}",
+    "/api/v1/research/personal/artifacts/skills/{execution_hash}",
+    "/api/v1/research/personal/artifacts/debate-reviews/{review_hash}",
+    "/api/v1/research/personal/artifacts/theses/by-signal/{decision_signal_id}",
+    "/api/v1/research/personal/artifacts/theses/latest",
+    "/api/v1/research/personal/artifacts/theses/{thesis_hash}",
+    "/api/v1/decision-signals/outcomes-v2/run",
+    "/api/v1/decision-signals/outcomes-v2",
+    "/api/v1/decision-signals/outcomes-v2/stats",
+    "/api/v1/decision-signals/{signal_id}/outcomes-v2",
+)
+PERSONAL_RESEARCH_SCHEMAS = (
+    "DecisionOutcomeV2BenchmarkItem",
+    "DecisionOutcomeV2Item",
+    "DecisionOutcomeV2ListResponse",
+    "DecisionOutcomeV2RunAccepted",
+    "DecisionOutcomeV2RunRequest",
+    "DecisionOutcomeV2StatsResponse",
+    "PersonalResearchDebateJudge",
+    "PersonalResearchDebateLineage",
+    "PersonalResearchDebateReviewResponse",
+    "PersonalResearchDebateVerifier",
+    "PersonalResearchRunAccepted",
+    "PersonalResearchRunRequest",
+    "PersonalResearchSkillContract",
+    "PersonalResearchSkillExecutionListResponse",
+    "PersonalResearchSkillExecutionResponse",
+    "PersonalResearchSkillLineage",
+    "PersonalResearchSkillResult",
+    "PersonalResearchStockLineage",
+    "PersonalResearchThesisLineage",
+    "PersonalResearchThesisResponse",
+    "PersonalResearchThesisScores",
+    "PersonalResearchThesisSkillLineage",
+    "PortfolioAccountCreateRequest",
+    "PortfolioAccountItem",
+    "PortfolioAccountListResponse",
+    "PortfolioAccountUpdateRequest",
+    "PortfolioReconciliationAdjustmentItem",
+    "PortfolioReconciliationApplyRequest",
+    "PortfolioReconciliationCashTarget",
+    "PortfolioReconciliationDetailResponse",
+    "PortfolioReconciliationItem",
+    "PortfolioReconciliationListResponse",
+    "PortfolioReconciliationPositionTarget",
+    "PortfolioReconciliationPreviewRequest",
+    "PortfolioReconciliationPreviewResponse",
+    "ResearchWatchlistDeleteResponse",
+    "ResearchWatchlistItem",
+    "ResearchWatchlistListResponse",
+    "ResearchWatchlistUpsertRequest",
+)
 
 
 def _collect_component_schema_refs(node: Any) -> set[str]:
@@ -306,6 +383,32 @@ def test_research_static_api_spec_matches_runtime_paths() -> None:
         assert static_spec["components"]["schemas"][schema_name] == runtime_spec[
             "components"
         ]["schemas"][schema_name]
+
+
+def test_personal_research_static_api_spec_matches_runtime_contracts() -> None:
+    static_spec_path = (
+        Path(__file__).resolve().parents[1]
+        / "docs"
+        / "architecture"
+        / "api_spec.json"
+    )
+    static_spec = json.loads(static_spec_path.read_text(encoding="utf-8"))
+    runtime_spec = create_app().openapi()
+
+    for path in PERSONAL_RESEARCH_PATHS:
+        assert static_spec["paths"][path] == runtime_spec["paths"][path]
+    for path in AUTHENTICATED_PERSONAL_RESEARCH_PATHS:
+        for operation in static_spec["paths"][path].values():
+            assert "401" in operation["responses"]
+            assert operation["security"] == [{"AdminSessionCookie": []}]
+    for schema_name in PERSONAL_RESEARCH_SCHEMAS:
+        assert static_spec["components"]["schemas"][schema_name] == runtime_spec[
+            "components"
+        ]["schemas"][schema_name]
+
+    assert static_spec["paths"][
+        "/api/v1/decision-signals/outcomes-v2/run"
+    ]["post"]["responses"].get("202") is not None
 
 
 def test_v1_prefix_is_applied_at_app_mount_level() -> None:

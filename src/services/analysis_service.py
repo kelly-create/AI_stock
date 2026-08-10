@@ -75,6 +75,11 @@ class AnalysisService:
         portfolio_context: Optional[Dict[str, Any]] = None,
         report_language: Optional[str] = None,
         source_message: Optional[Any] = None,
+        research_mode: str = "auto",
+        research_priority: int = 50,
+        research_manual_daily_override: bool = False,
+        policy_account_id: Optional[int] = None,
+        policy_target_weight_pct: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         执行股票分析
@@ -132,6 +137,11 @@ class AnalysisService:
                 analysis_phase=analysis_phase,
                 portfolio_context=portfolio_context,
                 source_message=source_message,
+                research_mode=research_mode,
+                research_priority=research_priority,
+                research_manual_daily_override=research_manual_daily_override,
+                policy_account_id=policy_account_id,
+                policy_target_weight_pct=policy_target_weight_pct,
             )
             
             # 确定报告类型 (API: simple/detailed/full/brief -> ReportType)
@@ -264,7 +274,7 @@ class AnalysisService:
             if isinstance(raw_result_payload, dict):
                 report["details"]["raw_result"] = raw_result_payload
 
-        return {
+        response = {
             "query_id": query_id,
             "trace_id": trace_id,
             "stock_code": result.code,
@@ -272,3 +282,22 @@ class AnalysisService:
             "report": report,
             "diagnostic_summary": diagnostic_summary,
         }
+        personal_artifacts = getattr(result, "_personal_research_artifacts", None)
+        thesis_hash = getattr(result, "personal_research_thesis_hash", None)
+        if personal_artifacts is not None:
+            response["personal_research"] = {
+                "contract_version": "personal-research-artifacts-v1",
+                "research_snapshot_hash": personal_artifacts.research_snapshot_hash,
+                "skill_execution_hashes": dict(
+                    personal_artifacts.skill_execution_hashes
+                ),
+                "debate_snapshot_hash": personal_artifacts.debate_snapshot_hash,
+                "debate_review_hash": personal_artifacts.debate_review_hash,
+                "thesis_hash": thesis_hash,
+                "decision_signal": getattr(
+                    result,
+                    "decision_signal_summary",
+                    None,
+                ),
+            }
+        return response

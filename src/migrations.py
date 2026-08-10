@@ -42,6 +42,12 @@ PR1_DURABLE_JOBS_SCHEMA_VERSION = "2026-08-08-pr1-durable-jobs"
 PR2_RESEARCH_DATA_SCHEMA_VERSION = "2026-08-08-pr2-research-data"
 PR3_RESEARCH_EVIDENCE_SCHEMA_VERSION = "2026-08-08-pr3-research-evidence"
 PR4_RESEARCH_DEBATE_SCHEMA_VERSION = "2026-08-08-pr4-research-debate"
+PERSONAL_RESEARCH_POLICY_SCHEMA_VERSION = "2026-08-10-personal-research-policy"
+PERSONAL_RESEARCH_SKILLS_SCHEMA_VERSION = "2026-08-10-personal-research-skills"
+DECISION_OUTCOME_V2_SCHEMA_VERSION = "2026-08-10-personal-research-v2-outcomes"
+PERSONAL_RESEARCH_POLICY_CONTEXT_SCHEMA_VERSION = (
+    "2026-08-10-personal-research-v3-policy-context"
+)
 
 
 class MigrationError(RuntimeError):
@@ -124,6 +130,38 @@ def _upgrade_pr4_research_debate_schema(engine: Engine) -> None:
     run_pr4_research_debate_schema_upgrade(engine)
 
 
+def _upgrade_personal_research_policy_schema(engine: Engine) -> None:
+    """Install original-plan PR3 watchlist, reconciliation, policy, and budget storage."""
+
+    from src.storage import run_personal_research_policy_schema_upgrade
+
+    run_personal_research_policy_schema_upgrade(engine)
+
+
+def _upgrade_personal_research_skills_schema(engine: Engine) -> None:
+    """Install immutable personal Skill, Debate-review, and Thesis storage."""
+
+    from src.storage import run_personal_research_skills_schema_upgrade
+
+    run_personal_research_skills_schema_upgrade(engine)
+
+
+def _upgrade_decision_outcome_v2_schema(engine: Engine) -> None:
+    """Install independent immutable personal-research outcome observations."""
+
+    from src.storage import run_decision_outcome_v2_schema_upgrade
+
+    run_decision_outcome_v2_schema_upgrade(engine)
+
+
+def _upgrade_personal_research_policy_context_schema(engine: Engine) -> None:
+    """Seal replayable Portfolio Policy context and immutable audit rows."""
+
+    from src.storage import run_personal_research_policy_context_schema_upgrade
+
+    run_personal_research_policy_context_schema_upgrade(engine)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=BASELINE_SCHEMA_VERSION,
@@ -169,6 +207,39 @@ MIGRATIONS: tuple[Migration, ...] = (
             "bind final debates to versioned research packs"
         ),
         apply=_upgrade_pr4_research_debate_schema,
+    ),
+    Migration(
+        version=PERSONAL_RESEARCH_POLICY_SCHEMA_VERSION,
+        description=(
+            "Add enhanced research watchlist metadata, append-only portfolio "
+            "reconciliation, deterministic policy audits, research budgets, "
+            "and the extended DecisionSignal contract"
+        ),
+        apply=_upgrade_personal_research_policy_schema,
+    ),
+    Migration(
+        version=PERSONAL_RESEARCH_SKILLS_SCHEMA_VERSION,
+        description=(
+            "Add immutable personal Skill executions, deterministic Debate "
+            "reviews, and versioned Research Theses"
+        ),
+        apply=_upgrade_personal_research_skills_schema,
+    ),
+    Migration(
+        version=DECISION_OUTCOME_V2_SCHEMA_VERSION,
+        description=(
+            "Add immutable Decision Outcome v2 observations with frozen "
+            "signal, policy, execution, benchmark, and dataset lineage"
+        ),
+        apply=_upgrade_decision_outcome_v2_schema,
+    ),
+    Migration(
+        version=PERSONAL_RESEARCH_POLICY_CONTEXT_SCHEMA_VERSION,
+        description=(
+            "Add canonical Portfolio Policy context payloads and database-level "
+            "immutability for policy evaluation audits"
+        ),
+        apply=_upgrade_personal_research_policy_context_schema,
     ),
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version

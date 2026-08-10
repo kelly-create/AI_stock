@@ -1,6 +1,7 @@
 import type { DecisionAction } from '../types/analysis';
 import type { DecisionSignalItem, DecisionSignalStatus } from '../types/decisionSignals';
 import { parseDecisionSignalDate } from './decisionSignalTime';
+import { getDecisionSignalPrimaryAction } from './decisionSignalPrimaryAction';
 
 const TERMINAL_STATUSES = new Set<DecisionSignalStatus>(['expired', 'invalidated', 'closed', 'archived']);
 const DEFAULT_RADIUS = 6;
@@ -72,10 +73,11 @@ export function getTimelinePointStyle(item: DecisionSignalItem): TimelinePointSt
   const normalizedScore = score === null ? null : clamp(score, 0, 100);
   const normalizedConfidence = confidence === null ? null : clamp(confidence, 0, 1);
   const terminal = TERMINAL_STATUSES.has(item.status);
-  const family = getActionFamily(item.action);
+  const primaryAction = getDecisionSignalPrimaryAction(item);
+  const family = getActionFamily(primaryAction);
   const color = getPointColor(family, terminal);
   return {
-    rank: ACTION_RANK[item.action],
+    rank: ACTION_RANK[primaryAction],
     family,
     radius: normalizedScore === null
       ? DEFAULT_RADIUS
@@ -84,7 +86,7 @@ export function getTimelinePointStyle(item: DecisionSignalItem): TimelinePointSt
       ? DEFAULT_STROKE_WIDTH
       : MIN_STROKE_WIDTH + ((MAX_STROKE_WIDTH - MIN_STROKE_WIDTH) * normalizedConfidence),
     terminal,
-    shape: item.action === 'alert' ? 'diamond' : 'circle',
+    shape: primaryAction === 'alert' ? 'diamond' : 'circle',
     fill: color,
     stroke: color,
     statusDasharray: getStatusDasharray(item.status),

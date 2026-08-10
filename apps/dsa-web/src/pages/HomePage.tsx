@@ -259,7 +259,7 @@ const HomePage: React.FC = () => {
   const [selectedStrategyId, setSelectedStrategyId] = useState('');
   const [strategyMenuOpen, setStrategyMenuOpen] = useState(false);
   const [runFlowDrawer, setRunFlowDrawer] = useState<RunFlowDrawerState>({ open: false });
-  const [duplicateBannerVisible, setDuplicateBannerVisible] = useState(false);
+  const [dismissedDuplicateError, setDismissedDuplicateError] = useState<unknown>(null);
   const [sidebarWorkspaceTab, setSidebarWorkspaceTab] = useState<HomeWorkspaceTab>('history');
   const [isTaskPanelCollapsed, setIsTaskPanelCollapsed] = useState<boolean>(() => (
     readTaskPanelCollapsedPreference() ?? false
@@ -362,6 +362,7 @@ const HomePage: React.FC = () => {
     loadStockBar,
     refreshStockBar,
   } = useHomeDashboardState();
+  const duplicateBannerVisible = Boolean(duplicateError && duplicateError !== dismissedDuplicateError);
 
   const clearDuplicateBannerTimer = useCallback(() => {
     if (duplicateBannerTimer.current !== null) {
@@ -372,21 +373,19 @@ const HomePage: React.FC = () => {
 
   const dismissDuplicateBanner = useCallback(() => {
     clearDuplicateBannerTimer();
-    setDuplicateBannerVisible(false);
-  }, [clearDuplicateBannerTimer]);
+    setDismissedDuplicateError(duplicateError);
+  }, [clearDuplicateBannerTimer, duplicateError]);
 
   useEffect(() => {
     if (!duplicateError) {
       clearDuplicateBannerTimer();
-      setDuplicateBannerVisible(false);
       return undefined;
     }
 
-    setDuplicateBannerVisible(true);
     clearDuplicateBannerTimer();
     duplicateBannerTimer.current = window.setTimeout(() => {
       duplicateBannerTimer.current = null;
-      setDuplicateBannerVisible(false);
+      setDismissedDuplicateError(duplicateError);
     }, DUPLICATE_BANNER_AUTO_DISMISS_MS);
 
     return clearDuplicateBannerTimer;
@@ -437,11 +436,15 @@ const HomePage: React.FC = () => {
       .then((response) => {
         if (active) {
           setAnalysisSkills(response.skills);
+          setSelectedStrategyId((current) => (
+            current && !response.skills.some((skill) => skill.id === current) ? '' : current
+          ));
         }
       })
       .catch(() => {
         if (active) {
           setAnalysisSkills([]);
+          setSelectedStrategyId('');
         }
       });
 
@@ -466,12 +469,6 @@ const HomePage: React.FC = () => {
     document.addEventListener('mousedown', handlePointerDown);
     return () => document.removeEventListener('mousedown', handlePointerDown);
   }, [strategyMenuOpen]);
-
-  useEffect(() => {
-    if (selectedStrategyId && !analysisSkills.some((skill) => skill.id === selectedStrategyId)) {
-      setSelectedStrategyId('');
-    }
-  }, [analysisSkills, selectedStrategyId]);
 
   const reportLanguage = normalizeReportLanguage(selectedReport?.meta.reportLanguage);
   const liveMarketReviewLanguage = normalizeReportLanguage(marketReviewPayload?.language);
@@ -673,7 +670,7 @@ const HomePage: React.FC = () => {
   const refreshWatchlist = watchlistState.refresh;
   const watchlistCodesByNormalized = useMemo(() => {
     const codesByNormalized = new Map<string, string>();
-    for (const code of watchlistState.watchlistCodes) {
+    for (const code of watchlistState.effectiveCodes) {
       const key = getStockCodeKey(code);
       if (!key || key === 'MARKET' || codesByNormalized.has(key)) {
         continue;
@@ -681,7 +678,7 @@ const HomePage: React.FC = () => {
       codesByNormalized.set(key, code);
     }
     return Array.from(codesByNormalized.entries());
-  }, [watchlistState.watchlistCodes]);
+  }, [watchlistState.effectiveCodes]);
 
   const stockBarItemByCode = useMemo(() => {
     const itemsByCode = new Map<string, StockBarItem>();
@@ -715,9 +712,15 @@ const HomePage: React.FC = () => {
 
   useEffect(() => {
     if (!canLookupWatchlistHistory) {
-      setWatchlistHistoryItemsByCode(new Map());
-      setWatchlistHistoryLookupState({ signature: '', settledKeys: new Set(), failedKeys: new Set() });
-      return undefined;
+      let active = true;
+      queueMicrotask(() => {
+        if (!active) return;
+        setWatchlistHistoryItemsByCode(new Map());
+        setWatchlistHistoryLookupState({ signature: '', settledKeys: new Set(), failedKeys: new Set() });
+      });
+      return () => {
+        active = false;
+      };
     }
 
     const missingCodes = watchlistMissingHistoryEntries.map(([, code]) => code);
@@ -725,58 +728,67 @@ const HomePage: React.FC = () => {
     const currentSignature = watchlistMissingHistorySignature;
 
     if (missingCodes.length === 0) {
-      setWatchlistHistoryItemsByCode(new Map());
-      setWatchlistHistoryLookupState({ signature: '', settledKeys: new Set(), failedKeys: new Set() });
-      return;
+      let active = true;
+      queueMicrotask(() => {
+        if (!active) return;
+        setWatchlistHistoryItemsByCode(new Map());
+        setWatchlistHistoryLookupState({ signature: '', settledKeys: new Set(), failedKeys: new Set() });
+      });
+      return () => {
+        active = false;
+      };
     }
 
     let isCanceled = false;
     const abortController = new AbortController();
-    setWatchlistHistoryLookupState({ signature: currentSignature, settledKeys: new Set(), failedKeys: new Set() });
-    void (async () => {
-      try {
-        const results = await lookupWatchlistHistory(
-          missingCodes,
-          () => isCanceled,
-          abortController.signal,
-        );
+    queueMicrotask(() => {
+      if (isCanceled) return;
+      setWatchlistHistoryLookupState({ signature: currentSignature, settledKeys: new Set(), failedKeys: new Set() });
+      void (async () => {
+        try {
+          const results = await lookupWatchlistHistory(
+            missingCodes,
+            () => isCanceled,
+            abortController.signal,
+          );
 
-        if (isCanceled) {
-          return;
-        }
+          if (isCanceled) {
+            return;
+          }
 
-        const next = new Map<string, StockBarItem>();
-        const failedKeys = new Set<string>();
-        for (const entry of results) {
-          const key = getStockCodeKey(entry.code);
-          if (!key) {
-            continue;
+          const next = new Map<string, StockBarItem>();
+          const failedKeys = new Set<string>();
+          for (const entry of results) {
+            const key = getStockCodeKey(entry.code);
+            if (!key) {
+              continue;
+            }
+            if (entry.failed) {
+              failedKeys.add(key);
+              continue;
+            }
+            if (entry.item) {
+              next.set(key, toStockBarItemFromHistoryItem(entry.item));
+            }
           }
-          if (entry.failed) {
-            failedKeys.add(key);
-            continue;
-          }
-          if (entry.item) {
-            next.set(key, toStockBarItemFromHistoryItem(entry.item));
-          }
-        }
-        setWatchlistHistoryItemsByCode(next);
-        setWatchlistHistoryLookupState({
-          signature: currentSignature,
-          settledKeys: new Set(missingKeys),
-          failedKeys,
-        });
-      } catch {
-        if (!isCanceled) {
-          setWatchlistHistoryItemsByCode(new Map());
+          setWatchlistHistoryItemsByCode(next);
           setWatchlistHistoryLookupState({
             signature: currentSignature,
             settledKeys: new Set(missingKeys),
-            failedKeys: new Set(missingKeys),
+            failedKeys,
           });
+        } catch {
+          if (!isCanceled) {
+            setWatchlistHistoryItemsByCode(new Map());
+            setWatchlistHistoryLookupState({
+              signature: currentSignature,
+              settledKeys: new Set(missingKeys),
+              failedKeys: new Set(missingKeys),
+            });
+          }
         }
-      }
-    })();
+      })();
+    });
 
     return () => {
       isCanceled = true;
@@ -1066,26 +1078,29 @@ const HomePage: React.FC = () => {
     }
 
     let active = true;
-    setIsLoadingTodayAnalysisItems(true);
-    setTodayAnalysisLoadFailed(false);
-    void getTodayAnalysisItems(todayDateKey)
-      .then((items) => {
-        if (active) {
-          setTodayHistoryItems(items);
-          setTodayAnalysisLoadFailed(false);
-        }
-      })
-      .catch(() => {
-        if (active) {
-          setTodayHistoryItems([]);
-          setTodayAnalysisLoadFailed(true);
-        }
-      })
-      .finally(() => {
-        if (active) {
-          setIsLoadingTodayAnalysisItems(false);
-        }
-      });
+    queueMicrotask(() => {
+      if (!active) return;
+      setIsLoadingTodayAnalysisItems(true);
+      setTodayAnalysisLoadFailed(false);
+      void getTodayAnalysisItems(todayDateKey)
+        .then((items) => {
+          if (active) {
+            setTodayHistoryItems(items);
+            setTodayAnalysisLoadFailed(false);
+          }
+        })
+        .catch(() => {
+          if (active) {
+            setTodayHistoryItems([]);
+            setTodayAnalysisLoadFailed(true);
+          }
+        })
+        .finally(() => {
+          if (active) {
+            setIsLoadingTodayAnalysisItems(false);
+          }
+        });
+    });
 
     return () => {
       active = false;
@@ -1110,7 +1125,8 @@ const HomePage: React.FC = () => {
   }, [activeTasks]);
 
   const watchlistRows = useMemo<HomeWatchlistRow[]>(() => (
-    watchlistState.watchlistCodes.map((code) => {
+    watchlistState.effectiveItems.map((watchlistItem) => {
+      const code = watchlistItem.stockCode;
       const key = getStockCodeKey(code);
       const latestItemCandidate = key
         ? stockBarItemByCode.get(key) ?? watchlistHistoryItemsByCode.get(key)
@@ -1145,6 +1161,13 @@ const HomePage: React.FC = () => {
         : latestItemCandidate;
       return {
         code,
+        market: watchlistItem.market,
+        sources: watchlistItem.sources,
+        reason: watchlistItem.reason,
+        priority: watchlistItem.market ? watchlistItem.priority : undefined,
+        analysisTier: watchlistItem.market ? watchlistItem.analysisTier : undefined,
+        nextReviewAt: watchlistItem.market ? watchlistItem.nextReviewAt : undefined,
+        isHolding: watchlistItem.isHolding,
         latestItem,
         analyzedToday: !isTodayStatusLoading && !isTodayStatusUnknown && getShanghaiDateKey(latestItem?.lastAnalysisTime) === todayDateKey,
         isTodayStatusLoading,
@@ -1163,7 +1186,7 @@ const HomePage: React.FC = () => {
     watchlistHistoryItemsByCode,
     watchlistHistoryLookupState,
     watchlistMissingHistorySignature,
-    watchlistState.watchlistCodes,
+    watchlistState.effectiveItems,
   ]);
 
   const watchlistAnalyzedTodayCount = useMemo(
@@ -1221,7 +1244,7 @@ const HomePage: React.FC = () => {
       return;
     }
 
-    const sourceCodes = mode === 'pending' ? pendingWatchlistCodes : watchlistState.watchlistCodes;
+    const sourceCodes = mode === 'pending' ? pendingWatchlistCodes : watchlistState.effectiveCodes;
     const seen = new Set<string>();
     const targetCodes = sourceCodes.filter((code) => {
       const key = getStockCodeKey(code);
@@ -1326,7 +1349,7 @@ const HomePage: React.FC = () => {
     selectedAnalysisSkills,
     t,
     watchlistTodayStatusBlocked,
-    watchlistState.watchlistCodes,
+    watchlistState.effectiveCodes,
   ]);
 
   const mergedStockBarItems = useMemo<StockBarItem[]>(() => {
@@ -1374,6 +1397,7 @@ const HomePage: React.FC = () => {
           watchlistMessage={watchlistState.actionMessage}
           onAddToWatchlist={watchlistState.addToWatchlist}
           onRemoveFromWatchlist={watchlistState.removeFromWatchlist}
+          onRemoveResearchWatchlist={watchlistState.removeEffectiveItem}
           onRefreshWatchlist={handleRefreshWatchlist}
           onAnalyzeWatchlist={handleAnalyzeWatchlist}
           isBatchAnalyzing={isBatchAnalyzingWatchlist}
@@ -1420,6 +1444,7 @@ const HomePage: React.FC = () => {
       watchlistState.isActioning,
       watchlistState.isLoading,
       watchlistState.removeFromWatchlist,
+      watchlistState.removeEffectiveItem,
     ],
   );
 

@@ -41,6 +41,7 @@ from src.config import (
     normalize_llm_channel_model,
     parse_env_bool,
     parse_env_int,
+    parse_research_budget_int,
     parse_tushare_quota_int,
     resolve_news_window_days,
     resolve_llm_channel_protocol,
@@ -2121,6 +2122,9 @@ class SystemConfigService:
             "DECISION_SIGNAL_OUTCOME_ENABLED",
             "DECISION_SIGNAL_OUTCOME_INTERVAL_MINUTES",
             "DECISION_SIGNAL_OUTCOME_BATCH_LIMIT",
+            "DECISION_OUTCOME_V2_ENABLED",
+            "DECISION_OUTCOME_V2_INTERVAL_MINUTES",
+            "DECISION_OUTCOME_V2_BATCH_LIMIT",
         }:
             try:
                 self._runtime_scheduler.reconcile_from_config(
@@ -4520,7 +4524,12 @@ class SystemConfigService:
             "RESEARCH_DEBATE_ENABLED",
             "RESEARCH_THESIS_ENABLED",
             "DECISION_OUTCOME_V2_ENABLED",
+            "DECISION_OUTCOME_V2_INTERVAL_MINUTES",
+            "DECISION_OUTCOME_V2_BATCH_LIMIT",
             "PORTFOLIO_POLICY_GATE_MODE",
+            "RESEARCH_QUICK_DAILY_BUDGET",
+            "RESEARCH_STANDARD_DEEP_DAILY_BUDGET",
+            "RESEARCH_DEBATE_DAILY_BUDGET",
         }
         if research_keys & updated_keys:
             try:
@@ -4530,6 +4539,31 @@ class SystemConfigService:
             except ValueError:
                 # Field-level JSON validation reports the actionable error.
                 endpoint_limits = {}
+            budget_values: Dict[str, int] = {}
+            for key, default in (
+                ("RESEARCH_QUICK_DAILY_BUDGET", 50),
+                ("RESEARCH_STANDARD_DEEP_DAILY_BUDGET", 20),
+                ("RESEARCH_DEBATE_DAILY_BUDGET", 8),
+                ("DECISION_OUTCOME_V2_INTERVAL_MINUTES", 60),
+                ("DECISION_OUTCOME_V2_BATCH_LIMIT", 100),
+            ):
+                try:
+                    budget_values[key] = parse_research_budget_int(
+                        effective_map.get(key),
+                        default,
+                        field_name=key,
+                        maximum=(
+                            1440
+                            if key == "DECISION_OUTCOME_V2_INTERVAL_MINUTES"
+                            else 500
+                            if key == "DECISION_OUTCOME_V2_BATCH_LIMIT"
+                            else 10_000
+                        ),
+                    )
+                except ValueError:
+                    # Integer/range validation already emits the field-level
+                    # issue.  Keep cross-field dependency evaluation total.
+                    budget_values[key] = default
             research_config = Config(
                 stock_list=[],
                 tushare_token=(effective_map.get("TUSHARE_TOKEN") or "").strip() or None,
@@ -4578,9 +4612,24 @@ class SystemConfigService:
                     effective_map.get("DECISION_OUTCOME_V2_ENABLED"),
                     default=False,
                 ),
+                decision_outcome_v2_interval_minutes=budget_values[
+                    "DECISION_OUTCOME_V2_INTERVAL_MINUTES"
+                ],
+                decision_outcome_v2_batch_limit=budget_values[
+                    "DECISION_OUTCOME_V2_BATCH_LIMIT"
+                ],
                 portfolio_policy_gate_mode=(
                     effective_map.get("PORTFOLIO_POLICY_GATE_MODE") or "off"
                 ).strip().lower(),
+                research_quick_daily_budget=budget_values[
+                    "RESEARCH_QUICK_DAILY_BUDGET"
+                ],
+                research_standard_deep_daily_budget=budget_values[
+                    "RESEARCH_STANDARD_DEEP_DAILY_BUDGET"
+                ],
+                research_debate_daily_budget=budget_values[
+                    "RESEARCH_DEBATE_DAILY_BUDGET"
+                ],
             )
             for issue in research_config.research_feature_dependency_issues():
                 issues.append(

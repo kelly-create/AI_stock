@@ -18,6 +18,12 @@ import type {
   PortfolioImportParseResponse,
   PortfolioPositionAnalysisRequest,
   PortfolioRiskResponse,
+  PortfolioReconciliationApplyRequest,
+  PortfolioReconciliationDetailResponse,
+  PortfolioReconciliationItem,
+  PortfolioReconciliationListResponse,
+  PortfolioReconciliationPreviewRequest,
+  PortfolioReconciliationPreviewResponse,
   PortfolioSnapshotResponse,
   PortfolioTradeCreateRequest,
   PortfolioTradeListResponse,
@@ -253,6 +259,65 @@ export const portfolioApi = {
     }
     const response = await apiClient.get<Record<string, unknown>>('/api/v1/portfolio/corporate-actions', { params });
     return toCamelCase<PortfolioCorporateActionListResponse>(response.data);
+  },
+
+  async previewReconciliation(
+    accountId: number,
+    payload: PortfolioReconciliationPreviewRequest,
+  ): Promise<PortfolioReconciliationPreviewResponse> {
+    const response = await apiClient.post<Record<string, unknown>>(
+      `/api/v1/portfolio/accounts/${accountId}/reconciliations/preview`,
+      {
+        event_type: payload.eventType,
+        effective_date: payload.effectiveDate,
+        cash: payload.cash,
+        positions: payload.positions.map((item) => ({
+          stock_code: item.stockCode,
+          market: item.market,
+          currency: item.currency,
+          quantity: item.quantity,
+          total_cost: item.totalCost,
+        })),
+        source: payload.source,
+        note: payload.note,
+      },
+    );
+    return toCamelCase<PortfolioReconciliationPreviewResponse>(response.data);
+  },
+
+  async applyReconciliation(
+    accountId: number,
+    payload: PortfolioReconciliationApplyRequest,
+  ): Promise<PortfolioReconciliationItem> {
+    const response = await apiClient.post<Record<string, unknown>>(
+      `/api/v1/portfolio/accounts/${accountId}/reconciliations/apply`,
+      {
+        preview_token: payload.previewToken,
+        idempotency_key: payload.idempotencyKey,
+      },
+    );
+    return toCamelCase<PortfolioReconciliationItem>(response.data);
+  },
+
+  async listReconciliations(
+    accountId: number,
+    includePreviews = false,
+  ): Promise<PortfolioReconciliationListResponse> {
+    const response = await apiClient.get<Record<string, unknown>>(
+      `/api/v1/portfolio/accounts/${accountId}/reconciliations`,
+      { params: { include_previews: includePreviews } },
+    );
+    return toCamelCase<PortfolioReconciliationListResponse>(response.data);
+  },
+
+  async getReconciliation(
+    accountId: number,
+    reconciliationId: number,
+  ): Promise<PortfolioReconciliationDetailResponse> {
+    const response = await apiClient.get<Record<string, unknown>>(
+      `/api/v1/portfolio/accounts/${accountId}/reconciliations/${reconciliationId}`,
+    );
+    return toCamelCase<PortfolioReconciliationDetailResponse>(response.data);
   },
 
   async listImportBrokers(): Promise<PortfolioImportBrokerListResponse> {

@@ -29,6 +29,16 @@ def test_default_backup_contract_includes_durable_and_research_tables() -> None:
         "research_debate_turns",
         "research_debate_snapshots",
         "research_snapshots",
+        "research_watchlist_items",
+        "portfolio_reconciliations",
+        "portfolio_reconciliation_adjustments",
+        "research_budget_reservations",
+        "portfolio_policy_evaluations",
+        "personal_research_skill_contracts",
+        "personal_research_skill_executions",
+        "personal_research_debate_reviews",
+        "personal_research_theses",
+        "decision_outcomes_v2",
     }.issubset(sqlite_backup.DEFAULT_BACKUP_CORE_TABLES)
 
 
@@ -166,6 +176,19 @@ def test_default_backup_round_trip_preserves_evidence_rows(tmp_path: Path) -> No
     assert manifest["database"]["core_table_counts"][
         "research_debate_snapshots"
     ] == 1
+    for table in (
+        "research_watchlist_items",
+        "portfolio_reconciliations",
+        "portfolio_reconciliation_adjustments",
+        "research_budget_reservations",
+        "portfolio_policy_evaluations",
+        "personal_research_skill_contracts",
+        "personal_research_skill_executions",
+        "personal_research_debate_reviews",
+        "personal_research_theses",
+        "decision_outcomes_v2",
+    ):
+        assert table in manifest["database"]["core_table_counts"]
     assert result["sha256"] == manifest["backup"]["sha256"]
     with closing(sqlite3.connect(restored)) as connection:
         row = connection.execute(

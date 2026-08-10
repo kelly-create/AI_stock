@@ -56,12 +56,16 @@ export const ReportNews: React.FC<ReportNewsProps> = ({ recordId, limit = 8, lan
   }, [recordId, limit]);
 
   useEffect(() => {
-    setItems([]);
-    setError(null);
-
-    if (recordId) {
-      fetchNews();
-    }
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      setItems([]);
+      setError(null);
+      if (recordId) void fetchNews();
+    });
+    return () => {
+      active = false;
+    };
   }, [recordId, fetchNews]);
 
   if (!recordId) {

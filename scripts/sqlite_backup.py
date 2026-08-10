@@ -49,6 +49,16 @@ DEFAULT_BACKUP_CORE_TABLES = DEFAULT_CORE_TABLES + (
     "research_debate_turns",
     "research_debate_snapshots",
     "research_snapshots",
+    "research_watchlist_items",
+    "portfolio_reconciliations",
+    "portfolio_reconciliation_adjustments",
+    "research_budget_reservations",
+    "portfolio_policy_evaluations",
+    "personal_research_skill_contracts",
+    "personal_research_skill_executions",
+    "personal_research_debate_reviews",
+    "personal_research_theses",
+    "decision_outcomes_v2",
 )
 
 

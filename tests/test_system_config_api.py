@@ -156,6 +156,8 @@ class SystemConfigApiTestCase(unittest.TestCase):
             "RESEARCH_DEBATE_ENABLED",
             "RESEARCH_THESIS_ENABLED",
             "DECISION_OUTCOME_V2_ENABLED",
+            "DECISION_OUTCOME_V2_INTERVAL_MINUTES",
+            "DECISION_OUTCOME_V2_BATCH_LIMIT",
             "PORTFOLIO_POLICY_GATE_MODE",
         }
         self.assertTrue(research_keys.issubset(item_map))
@@ -340,6 +342,10 @@ class SystemConfigApiTestCase(unittest.TestCase):
             return SimpleNamespace(returncode=0, stdout="")
 
         with (
+            patch(
+                "src.services.agent_backend_status_service.is_native_windows",
+                return_value=False,
+            ),
             patch(
                 "src.services.agent_backend_status_service.resolve_command",
                 return_value=["/test/codex"],

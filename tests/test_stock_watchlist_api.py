@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
 """Watchlist API regressions for stock-code variant matching."""
 
+import pytest
+from fastapi import HTTPException
+
 from api.v1.endpoints.stocks import add_to_watchlist, get_watchlist, remove_from_watchlist
 from api.v1.schemas.history import WatchlistRequest
+from src.services.system_config_service import ConfigConflictError
 
 
 class FakeSystemConfigService:
@@ -21,6 +25,16 @@ class FakeSystemConfigService:
         items = kwargs["items"]
         self.stock_list = items[0]["value"]
         self.update_calls.append(self.stock_list)
+
+
+class ConflictingSystemConfigService(FakeSystemConfigService):
+    def __init__(self, stock_list: str) -> None:
+        super().__init__(stock_list)
+        self.submitted_version: str | None = None
+
+    def update(self, **kwargs) -> None:
+        self.submitted_version = kwargs["config_version"]
+        raise ConfigConflictError("concurrent-write")
 
 
 def test_watchlist_add_deduplicates_raw_hk_code_against_prefixed_variant() -> None:
@@ -85,3 +99,29 @@ def test_watchlist_add_normalizes_existing_mixed_separators_on_write() -> None:
     assert response.stock_codes == ["600519", "300750", "AAPL"]
     assert service.stock_list == "600519,300750,AAPL"
     assert service.update_calls == ["600519,300750,AAPL"]
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "stock_list"),
+    [
+        (add_to_watchlist, ""),
+        (remove_from_watchlist, "AAPL"),
+    ],
+)
+def test_legacy_watchlist_write_maps_stale_config_version_to_409(
+    endpoint,
+    stock_list: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ConflictingSystemConfigService(stock_list)
+    monkeypatch.setattr(
+        "api.v1.endpoints.stocks._sync_research_watchlist_overlay",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        endpoint(WatchlistRequest(stock_code="AAPL"), service=service)
+
+    assert raised.value.status_code == 409
+    assert raised.value.detail["error"] == "config_conflict"
+    assert service.submitted_version == "cfg-v1"

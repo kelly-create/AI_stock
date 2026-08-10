@@ -6,9 +6,13 @@ import type { UiLanguage, UiTextKey } from '../../i18n/uiText';
 import type {
   DecisionSignalFeedbackItem,
   DecisionSignalFeedbackValue,
+  DecisionSignalAccountAction,
   DecisionSignalItem,
   DecisionSignalOutcomeItem,
   DecisionSignalOutcomeValue,
+  DecisionSignalPolicyDecision,
+  DecisionSignalPolicyMode,
+  DecisionSignalResearchStance,
   DecisionSignalStatus,
 } from '../../types/decisionSignals';
 import {
@@ -50,6 +54,53 @@ const ACTION_VARIANTS: Record<DecisionActionTone, BadgeVariant> = {
   warning: 'warning',
   danger: 'danger',
   default: 'default',
+};
+
+const ACCOUNT_ACTION_LABEL_KEYS: Record<DecisionSignalAccountAction, UiTextKey> = {
+  observe: 'decisionSignals.accountAction.observe',
+  open_candidate: 'decisionSignals.accountAction.openCandidate',
+  add_candidate: 'decisionSignals.accountAction.addCandidate',
+  hold: 'decisionSignals.accountAction.hold',
+  reduce_candidate: 'decisionSignals.accountAction.reduceCandidate',
+  exit_candidate: 'decisionSignals.accountAction.exitCandidate',
+};
+
+const ACCOUNT_ACTION_VARIANTS: Record<DecisionSignalAccountAction, BadgeVariant> = {
+  observe: 'warning',
+  open_candidate: 'success',
+  add_candidate: 'success',
+  hold: 'info',
+  reduce_candidate: 'warning',
+  exit_candidate: 'danger',
+};
+
+const POLICY_DECISION_LABEL_KEYS: Record<DecisionSignalPolicyDecision, UiTextKey> = {
+  allow: 'decisionSignals.policyDecision.allow',
+  downgrade: 'decisionSignals.policyDecision.downgrade',
+  block: 'decisionSignals.policyDecision.block',
+  no_action: 'decisionSignals.policyDecision.noAction',
+};
+
+const POLICY_DECISION_VARIANTS: Record<DecisionSignalPolicyDecision, BadgeVariant> = {
+  allow: 'success',
+  downgrade: 'warning',
+  block: 'danger',
+  no_action: 'default',
+};
+
+const POLICY_MODE_LABEL_KEYS: Record<DecisionSignalPolicyMode, UiTextKey> = {
+  off: 'decisionSignals.policyMode.off',
+  shadow: 'decisionSignals.policyMode.shadow',
+  enforce: 'decisionSignals.policyMode.enforce',
+};
+
+const RESEARCH_STANCE_LABEL_KEYS: Record<DecisionSignalResearchStance, UiTextKey> = {
+  strong_bullish: 'decisionSignals.researchStance.strongBullish',
+  bullish: 'decisionSignals.researchStance.bullish',
+  watch: 'decisionSignals.researchStance.watch',
+  neutral: 'decisionSignals.researchStance.neutral',
+  bearish: 'decisionSignals.researchStance.bearish',
+  avoid: 'decisionSignals.researchStance.avoid',
 };
 
 const OUTCOME_VARIANTS: Record<DecisionSignalOutcomeValue, BadgeVariant> = {
@@ -134,6 +185,21 @@ function getActionVariant(item: DecisionSignalItem): BadgeVariant {
   return ACTION_VARIANTS[getDecisionActionTone(item.action, item.actionLabel, null)];
 }
 
+function getPrimaryDecisionLabel(
+  item: DecisionSignalItem,
+  t: (key: UiTextKey) => string,
+): string {
+  return item.accountAction
+    ? t(ACCOUNT_ACTION_LABEL_KEYS[item.accountAction])
+    : getActionLabel(item, t);
+}
+
+function getPrimaryDecisionVariant(item: DecisionSignalItem): BadgeVariant {
+  return item.accountAction
+    ? ACCOUNT_ACTION_VARIANTS[item.accountAction]
+    : getActionVariant(item);
+}
+
 function getOutcomeLabel(value: DecisionSignalOutcomeValue | null | undefined, t: (key: UiTextKey) => string): string {
   if (!value) return '-';
   const key = `decisionSignals.outcome.${value}` as UiTextKey;
@@ -209,7 +275,7 @@ type DecisionSignalCardProps = {
 
 export const DecisionSignalCard: React.FC<DecisionSignalCardProps> = ({ item, onSelect, selected = false }) => {
   const { language, t } = useUiLanguage();
-  const actionLabel = getActionLabel(item, t);
+  const primaryDecisionLabel = getPrimaryDecisionLabel(item, t);
   const profileLabel = getDecisionSignalProfileLabel(item, t);
   const interactive = Boolean(onSelect);
   const entryRange = formatEntryRange(item);
@@ -228,7 +294,12 @@ export const DecisionSignalCard: React.FC<DecisionSignalCardProps> = ({ item, on
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <Badge variant={getActionVariant(item)}>{actionLabel}</Badge>
+            <Badge variant={getPrimaryDecisionVariant(item)}>{primaryDecisionLabel}</Badge>
+            {item.policyDecision ? (
+              <Badge variant={POLICY_DECISION_VARIANTS[item.policyDecision]}>
+                {t('decisionSignals.policyVerdict')}: {t(POLICY_DECISION_LABEL_KEYS[item.policyDecision])}
+              </Badge>
+            ) : null}
             <Badge variant={STATUS_VARIANTS[item.status]}>{t(STATUS_LABEL_KEYS[item.status])}</Badge>
             <Badge variant="info">{t('decisionSignals.profile')}: {profileLabel}</Badge>
             <span className="font-mono text-sm text-secondary-text">{item.stockCode}</span>
@@ -341,7 +412,8 @@ export const DecisionSignalDetails: React.FC<DecisionSignalDetailsProps> = ({
   onFeedbackSubmit,
 }) => {
   const { language, t } = useUiLanguage();
-  const actionLabel = getActionLabel(item, t);
+  const upstreamActionLabel = getActionLabel(item, t);
+  const primaryDecisionLabel = getPrimaryDecisionLabel(item, t);
   const profileLabel = getDecisionSignalProfileLabel(item, t);
   const entryRange = formatEntryRange(item);
   const evidenceData = asJsonViewerData(item.evidence);
@@ -353,7 +425,12 @@ export const DecisionSignalDetails: React.FC<DecisionSignalDetailsProps> = ({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="flex flex-wrap items-center gap-2">
-            <Badge variant={getActionVariant(item)} size="md">{actionLabel}</Badge>
+            <Badge variant={getPrimaryDecisionVariant(item)} size="md">{primaryDecisionLabel}</Badge>
+            {item.policyDecision ? (
+              <Badge variant={POLICY_DECISION_VARIANTS[item.policyDecision]} size="md">
+                {t('decisionSignals.policyVerdict')}: {t(POLICY_DECISION_LABEL_KEYS[item.policyDecision])}
+              </Badge>
+            ) : null}
             <Badge variant={STATUS_VARIANTS[item.status]} size="md">{t(STATUS_LABEL_KEYS[item.status])}</Badge>
             <Badge variant="info" size="md">{t('decisionSignals.profile')}: {profileLabel}</Badge>
           </div>
@@ -374,6 +451,39 @@ export const DecisionSignalDetails: React.FC<DecisionSignalDetailsProps> = ({
         <DetailRow label={t('decisionSignals.createdAt')} value={formatDateTime(item.createdAt, language)} />
         <DetailRow label={t('decisionSignals.expiresAt')} value={formatDateTime(item.expiresAt, language)} />
       </div>
+
+      {item.accountAction || item.researchStance || item.policyDecision || item.policyMode ? (
+        <Card title={t('decisionSignals.personalResearchDecision')} padding="sm" className="rounded-xl">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <DetailRow label={t('decisionSignals.accountAction')} value={primaryDecisionLabel} />
+            <DetailRow label={t('decisionSignals.upstreamAction')} value={upstreamActionLabel} />
+            <DetailRow
+              label={t('decisionSignals.policyVerdict')}
+              value={item.policyDecision ? t(POLICY_DECISION_LABEL_KEYS[item.policyDecision]) : '-'}
+            />
+            <DetailRow
+              label={t('decisionSignals.policyMode')}
+              value={item.policyMode ? t(POLICY_MODE_LABEL_KEYS[item.policyMode]) : '-'}
+            />
+            <DetailRow
+              label={t('decisionSignals.researchStance')}
+              value={item.researchStance ? t(RESEARCH_STANCE_LABEL_KEYS[item.researchStance]) : '-'}
+            />
+            <DetailRow
+              label={t('decisionSignals.wouldBlock')}
+              value={item.wouldBlock ? t('decisionSignals.yes') : t('decisionSignals.no')}
+            />
+          </div>
+          {item.policyReasons && item.policyReasons.length > 0 ? (
+            <div className="mt-3 rounded-xl border border-warning/25 bg-warning/10 px-3 py-2">
+              <p className="text-xs font-medium text-warning">{t('decisionSignals.policyReasons')}</p>
+              <ul className="mt-1 list-disc space-y-1 pl-5 text-xs text-warning">
+                {item.policyReasons.map((reason) => <li key={reason}>{reason}</li>)}
+              </ul>
+            </div>
+          ) : null}
+        </Card>
+      ) : null}
 
       <Card title={t('decisionSignals.pricePlan')} padding="sm" className="rounded-xl">
         <div className="grid gap-3 sm:grid-cols-3">
@@ -494,11 +604,11 @@ export const PortfolioSignalSummary: React.FC<PortfolioSignalSummaryProps> = ({ 
   if (!item) {
     return <span className="text-xs text-muted-text">{t('decisionSignals.portfolioEmpty')}</span>;
   }
-  const actionLabel = getActionLabel(item, t);
+  const actionLabel = getPrimaryDecisionLabel(item, t);
   return (
     <div className="min-w-[11rem] max-w-[18rem] text-left">
       <div className="flex flex-wrap items-center justify-end gap-1.5">
-        <Badge variant={getActionVariant(item)}>{actionLabel}</Badge>
+        <Badge variant={getPrimaryDecisionVariant(item)}>{actionLabel}</Badge>
         {item.horizon ? <span className="text-[11px] text-secondary-text">{getDecisionSignalHorizonLabel(item.horizon, t)}</span> : null}
       </div>
       {item.riskSummary ? <p className="mt-1 line-clamp-2 text-[11px] text-warning">{item.riskSummary}</p> : null}

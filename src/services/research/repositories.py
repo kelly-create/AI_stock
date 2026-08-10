@@ -629,6 +629,8 @@ class ResearchSnapshotRepository:
             "research",
             "research-collector",
             "stock_analysis",
+            "personal_research",
+            "decision_outcomes_v2",
             "scheduled_analysis",
         }:
             raise StaleLeaseError(
@@ -3877,6 +3879,88 @@ class ResearchSnapshotRepository:
             if row is None:
                 return None
             self._validate_stored_research_snapshot(session, row)
+            return _research_record_dict(row)
+
+    def get_job_research_snapshot(
+        self,
+        *,
+        job_id: str,
+        stock_code: str,
+    ) -> Optional[dict[str, Any]]:
+        """Recover the one final Research snapshot bound to a durable stock task.
+
+        ``origin_job_id`` only identifies the first writer of a content-addressed
+        row, so it is not consumer authority.  Resume must follow the immutable
+        job-event binding written in the same transaction as the snapshot.
+        Multiple distinct bindings for one task/stock are a contract violation
+        and fail closed instead of picking the newest row.
+        """
+
+        normalized_job = _required_text(job_id, "job_id", max_length=64)
+        normalized_stock = _required_text(
+            stock_code,
+            "stock_code",
+            max_length=16,
+        )
+        with self.db.get_session() as session:
+            payloads = self._job_artifact_event_payloads(
+                session,
+                job_id=normalized_job,
+                event_type="research_snapshot",
+            )
+            self._validate_job_artifact_stock_scopes(
+                session,
+                job_id=normalized_job,
+                event_type="research_snapshot",
+                payloads=payloads,
+            )
+            bound_hashes = {
+                _sha256(payload.get("snapshot_hash"), "snapshot_hash")
+                for payload in payloads
+                if payload.get("stock_code") == normalized_stock
+            }
+            if not bound_hashes:
+                return None
+            if len(bound_hashes) != 1:
+                raise ValueError(
+                    "durable job contains ambiguous final Research snapshots "
+                    f"for stock {normalized_stock!r}"
+                )
+            digest = next(iter(bound_hashes))
+            row = session.execute(
+                select(ResearchSnapshotRecord).where(
+                    ResearchSnapshotRecord.snapshot_hash == digest
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                raise ValueError(
+                    "Research snapshot binding references a missing immutable row"
+                )
+            self._validate_stored_research_snapshot(session, row)
+            if row.stock_code != normalized_stock:
+                raise ValueError(
+                    "Research snapshot binding stock differs from its immutable row"
+                )
+            matched = [
+                payload
+                for payload in payloads
+                if payload.get("stock_code") == normalized_stock
+                and payload.get("snapshot_hash") == digest
+            ]
+            expected = {
+                "stock_code": row.stock_code,
+                "as_of": row.as_of.isoformat(timespec="microseconds") + "Z",
+                "snapshot_hash": row.snapshot_hash,
+                "status": row.status,
+            }
+            if row.evidence_snapshot_hash is not None:
+                expected["evidence_snapshot_hash"] = row.evidence_snapshot_hash
+            if row.debate_snapshot_hash is not None:
+                expected["debate_snapshot_hash"] = row.debate_snapshot_hash
+            if not matched or any(dict(payload) != expected for payload in matched):
+                raise ValueError(
+                    "Research snapshot binding conflicts with its immutable row"
+                )
             return _research_record_dict(row)
 
     def get_evidence(self, evidence_hash: str) -> Optional[dict[str, Any]]:

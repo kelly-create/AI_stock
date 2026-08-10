@@ -6,6 +6,7 @@ import {
   getDecisionSignalReassessBlockedError,
 } from '../../api/decisionSignals';
 import { historyApi } from '../../api/history';
+import { researchApi } from '../../api/research';
 import { UiLanguageProvider } from '../../contexts/UiLanguageContext';
 import type { StockBarResponse } from '../../types/analysis';
 import type {
@@ -47,8 +48,36 @@ vi.mock('../../api/history', () => ({
   },
 }));
 
+vi.mock('../../api/research', () => ({
+  researchApi: {
+    getLatestPersonalResearchThesisBySignal: vi.fn(),
+    listPersonalResearchSkillExecutions: vi.fn(),
+    getPersonalResearchDebateReview: vi.fn(),
+  },
+}));
+
 vi.mock('../../hooks/useStockIndex', () => ({
   useStockIndex: () => stockIndexState,
+}));
+
+vi.mock('../../hooks/useDecisionOutcomesV2', () => ({
+  useDecisionOutcomesV2: () => ({
+    items: [],
+    total: 0,
+    stats: {
+      contract: 'decision-outcome-v2-stats',
+      version: 'v1',
+      engineVersion: 'personal-research-outcome-v2',
+      horizons: ['5d', '10d', '20d'],
+      bucketDimensions: ['engine', 'horizon', 'profile', 'final_action_family'],
+      minimumCompletedSampleSize: 30,
+      calibrationBinCount: 5,
+      buckets: [],
+    },
+    isLoading: false,
+    error: null,
+    refetch: vi.fn(),
+  }),
 }));
 
 vi.mock('recharts', () => ({
@@ -423,6 +452,12 @@ beforeEach(() => {
   vi.mocked(decisionSignalsApi.updateStatus).mockResolvedValue({ ...signal, status: 'invalidated' });
   vi.mocked(decisionSignalsApi.reassess).mockResolvedValue(reassessResponse);
   vi.mocked(getDecisionSignalReassessBlockedError).mockReturnValue(null);
+  vi.mocked(researchApi.getLatestPersonalResearchThesisBySignal).mockRejectedValue({
+    response: {
+      status: 404,
+      data: { detail: { error: 'not_found', message: 'missing' } },
+    },
+  });
 });
 
 describe('DecisionSignalsPage', () => {
@@ -1599,6 +1634,20 @@ describe('DecisionSignalsPage', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(screen.queryByRole('button', { name: '查看 贵州茅台 AI 建议详情' })).not.toBeInTheDocument();
     expect(screen.getByText('共 0 条信号')).toBeInTheDocument();
+  });
+
+  it('loads the independent formal Personal Research Thesis section by signal id', async () => {
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: '查看 贵州茅台 AI 建议详情' }));
+    const dialog = await screen.findByRole('dialog');
+
+    await waitFor(() => {
+      expect(researchApi.getLatestPersonalResearchThesisBySignal).toHaveBeenCalledWith(7);
+    });
+    expect(within(dialog).getByText('Personal Research Thesis')).toBeInTheDocument();
+    expect(within(dialog).getByText('尚无正式 Thesis')).toBeInTheDocument();
+    expect(within(dialog).getByText(/legacy Skill Outcome \/ Decision Outcome v1/)).toBeInTheDocument();
   });
 
   it('opens details and confirms terminal status updates', async () => {

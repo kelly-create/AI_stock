@@ -257,6 +257,10 @@ def test_extract_and_sanitize_handle_json_snapshot_strings() -> None:
             "daily_market_context_summary": "根快照大盘摘要（应清理）",
             "analysis_context_pack_overview": overview,
             "market_phase_summary": {"phase": "intraday", "market": "cn"},
+            "_personal_research_policy_replay": {
+                "contract": {"contract_hash": "a" * 64},
+                "policy_context": {"private": True},
+            },
         },
         ensure_ascii=False,
     )

@@ -24,6 +24,7 @@ from src.services.runtime_scheduler import (
     RUNTIME_SCHEDULER_SUPPRESS_START_ENV,
     RuntimeSchedulerService,
     build_agent_event_monitor_background_tasks,
+    build_decision_outcome_v2_background_tasks,
     build_decision_signal_outcome_background_tasks,
     wait_for_durable_worker,
 )
@@ -265,6 +266,61 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         self.assertTrue(tasks[0]["run_immediately"])
         tasks[0]["task"]()
         service.run_outcomes.assert_called_once_with(limit=37)
+
+    def test_outcome_v2_scheduler_only_submits_one_durable_worker_job(self) -> None:
+        config = SimpleNamespace(
+            durable_jobs_enabled=True,
+            decision_outcome_v2_enabled=True,
+            decision_outcome_v2_interval_minutes=75,
+            decision_outcome_v2_batch_limit=37,
+        )
+        queue = MagicMock(durable_enabled=True)
+        queue.submit_typed_job.return_value = SimpleNamespace(
+            task_id="outcome-v2-job",
+            status=SimpleNamespace(value="pending"),
+        )
+
+        tasks = build_decision_outcome_v2_background_tasks(
+            config,
+            config_provider=lambda: config,
+        )
+
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0]["name"], "decision_outcomes_v2")
+        self.assertEqual(tasks[0]["interval_seconds"], 75 * 60)
+        with patch("src.services.task_queue.get_task_queue", return_value=queue):
+            tasks[0]["task"]()
+
+        queue.submit_typed_job.assert_called_once_with(
+            "decision_outcomes_v2",
+            {
+                "signal_id": None,
+                "horizons": ["5d", "10d", "20d"],
+                "stock_code": None,
+                "decision_profile": None,
+                "limit": 37,
+                "notify": False,
+            },
+            stock_code="decision-outcome-v2",
+            query_source="scheduler",
+            notify=False,
+            message="Decision Outcome v2 maintenance queued",
+            stage="queued",
+            dedupe_key="scheduler:decision_outcomes_v2",
+        )
+
+    def test_outcome_v2_scheduler_never_runs_provider_work_without_durable_mode(self) -> None:
+        config = SimpleNamespace(
+            durable_jobs_enabled=False,
+            decision_outcome_v2_enabled=True,
+            decision_outcome_v2_interval_minutes=60,
+            decision_outcome_v2_batch_limit=100,
+        )
+
+        self.assertEqual(
+            build_decision_outcome_v2_background_tasks(config),
+            [],
+        )
 
     def test_reconcile_reuses_outcome_task_and_only_runs_immediately_once(self) -> None:
         outcome_service = MagicMock()

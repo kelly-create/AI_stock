@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -18,7 +19,14 @@ from enum import Enum
 from types import SimpleNamespace
 from typing import Annotated, Any, Dict, Iterator, List, Literal, Mapping, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from src.services.durable_jobs import (
     JOB_STATUS_CANCEL_REQUESTED,
@@ -30,6 +38,9 @@ from src.services.durable_jobs import (
 )
 from src.services.run_diagnostics import update_current_diagnostic_stage
 from src.utils.market_review_region import normalize_market_review_region_strict
+
+
+logger = logging.getLogger(__name__)
 
 
 class DurableJobCancelled(RuntimeError):
@@ -240,6 +251,36 @@ class StockAnalysisPayload(_StrictPayload):
         return cleaned
 
 
+class PersonalResearchPayload(_StrictPayload):
+    """One stock-scoped personal research run with an explicit budget mode."""
+
+    stock_code: str = Field(min_length=1, max_length=32)
+    requested_mode: Literal["auto", "quick", "standard", "deep", "debate"] = "auto"
+    priority: int = Field(50, ge=0, le=100)
+    manual_daily_override: bool = False
+    report_type: Optional[Literal["brief", "detailed", "full"]] = None
+    notify: bool = True
+    query_source: str = Field(
+        "personal_research_api", min_length=1, max_length=64
+    )
+    policy_account_id: Optional[int] = Field(None, gt=0)
+    target_weight_pct: Optional[float] = Field(
+        None,
+        ge=0.0,
+        le=100.0,
+        allow_inf_nan=False,
+    )
+    report_language: Optional[str] = Field(None, max_length=16)
+
+    @model_validator(mode="after")
+    def validate_policy_request(self) -> "PersonalResearchPayload":
+        if (self.policy_account_id is None) != (self.target_weight_pct is None):
+            raise ValueError(
+                "policy_account_id and target_weight_pct must be supplied together"
+            )
+        return self
+
+
 class ScreeningScreenPayload(_StrictPayload):
     strategy: str = Field("dual_low", min_length=1, max_length=64)
     market: str = Field("cn", min_length=1, max_length=16)
@@ -369,6 +410,31 @@ class DecisionSignalOutcomesPayload(_StrictPayload):
         return cleaned
 
 
+class DecisionOutcomesV2Payload(_StrictPayload):
+    """Immutable personal-research Outcome v2 candidate selection."""
+
+    signal_id: Optional[int] = Field(None, gt=0)
+    horizons: List[Literal["5d", "10d", "20d"]] = Field(
+        default_factory=lambda: ["5d", "10d", "20d"],
+        min_length=1,
+        max_length=3,
+    )
+    stock_code: Optional[str] = Field(None, min_length=1, max_length=16)
+    decision_profile: Optional[str] = Field(None, min_length=1, max_length=16)
+    limit: int = Field(100, ge=1, le=500)
+    notify: bool = False
+
+    @field_validator("horizons")
+    @classmethod
+    def _validate_v2_horizons(
+        cls,
+        value: List[Literal["5d", "10d", "20d"]],
+    ) -> List[Literal["5d", "10d", "20d"]]:
+        if len(value) != len(set(value)):
+            raise ValueError("horizons must not contain duplicates")
+        return value
+
+
 class BotAskPayload(_StrictPayload):
     target: BotTargetPayload
     stock_codes: List[str] = Field(min_length=1, max_length=5)
@@ -426,6 +492,118 @@ def _stock_analysis_handler(payload: StockAnalysisPayload) -> Dict[str, Any]:
     if result is None:
         raise DurableHandlerExecutionError(service.last_error or "Stock analysis returned no result")
     return _json_ready(result)
+
+
+def _capture_personal_research_sw1_snapshots(
+    payload: PersonalResearchPayload,
+    context: DurableExecutionContext,
+) -> Optional[Dict[str, Any]]:
+    """Best-effort optional SW1 freeze before the formal signal boundary."""
+
+    from src.config import get_config
+
+    config = get_config()
+    if not bool(getattr(config, "decision_outcome_v2_enabled", False)):
+        return None
+
+    from src.services.decision_outcome_v2_service import DecisionOutcomeV2Service
+
+    try:
+        capture = DecisionOutcomeV2Service(config=config).capture_sw1_membership_snapshots(
+            payload.stock_code
+        )
+    except (StaleLeaseError, DurableJobCancelled):
+        raise
+    except Exception as exc:
+        # SW1 is an optional benchmark. Preserve the base personal-research
+        # result while recording a typed, non-secret reason. Cancellation and
+        # lease loss are re-checked and can never be swallowed by this path.
+        context.checkpoint()
+        reason = f"sw1_snapshot_capture_failed_{type(exc).__name__}"
+        logger.warning(
+            "Optional personal-research SW1 snapshot capture failed (%s)",
+            type(exc).__name__,
+        )
+        context.progress(
+            8,
+            f"Optional SW1 snapshot unavailable: {reason}",
+            stage="personal_research",
+            detail={"status": "unavailable", "reason": reason},
+        )
+        return {"status": "unavailable", "reason": reason}
+
+    summary = capture.to_dict()
+    if capture.status == "available":
+        message = "Point-in-time SW1 snapshots frozen"
+    else:
+        message = f"Optional SW1 snapshot unavailable: {capture.reason}"
+        logger.warning(
+            "Optional personal-research SW1 snapshot unavailable (%s)",
+            capture.reason,
+        )
+    context.progress(
+        8,
+        message,
+        stage="personal_research",
+        detail=summary,
+    )
+    return summary
+
+
+def _personal_research_handler(payload: PersonalResearchPayload) -> Dict[str, Any]:
+    context = get_durable_execution_context()
+    context.stage(
+        "personal_research",
+        progress=5,
+        message="Personal research started",
+    )
+
+    from src.services.analysis_service import AnalysisService
+    from src.services.research_budget_service import ResearchBudgetService
+
+    _capture_personal_research_sw1_snapshots(payload, context)
+    resolved_mode = ResearchBudgetService.resolve_mode(
+        payload.requested_mode,
+        priority=payload.priority,
+    )
+    report_type = payload.report_type or {
+        "quick": "brief",
+        "standard": "detailed",
+        "deep": "full",
+        "debate": "full",
+    }[resolved_mode]
+    service = AnalysisService()
+
+    def report_progress(progress: int, message: str) -> None:
+        context.progress(progress, message, stage="personal_research")
+
+    result = service.analyze_stock(
+        stock_code=payload.stock_code,
+        report_type=report_type,
+        query_id=context.query_id,
+        trace_id=context.trace_id,
+        send_notification=payload.notify,
+        progress_callback=report_progress,
+        query_source=payload.query_source,
+        policy_account_id=payload.policy_account_id,
+        policy_target_weight_pct=payload.target_weight_pct,
+        report_language=payload.report_language,
+        research_mode=payload.requested_mode,
+        research_priority=payload.priority,
+        research_manual_daily_override=payload.manual_daily_override,
+    )
+    context.checkpoint()
+    if result is None:
+        raise DurableHandlerExecutionError(
+            service.last_error or "Personal research returned no result"
+        )
+    return _json_ready(
+        {
+            **result,
+            "research_mode": resolved_mode,
+            "research_priority": payload.priority,
+        }
+    )
 
 
 def _screening_screen_handler(payload: ScreeningScreenPayload) -> Dict[str, Any]:
@@ -707,6 +885,82 @@ def _decision_signal_outcomes_handler(payload: DecisionSignalOutcomesPayload) ->
     return _json_ready(result)
 
 
+def _decision_outcomes_v2_handler(payload: DecisionOutcomesV2Payload) -> Dict[str, Any]:
+    context = get_durable_execution_context()
+    context.stage(
+        "decision_outcomes_v2",
+        progress=5,
+        message="Decision Outcome v2 evaluation started",
+    )
+
+    from src.services.decision_outcome_v2_service import DecisionOutcomeV2Service
+
+    result = DecisionOutcomeV2Service().run_outcomes(
+        signal_id=payload.signal_id,
+        horizons=payload.horizons,
+        stock_code=payload.stock_code,
+        decision_profile=payload.decision_profile,
+        limit=payload.limit,
+    )
+    context.checkpoint()
+    notification_status = "notification_disabled"
+    if payload.notify:
+        try:
+            from src.notification import NotificationService
+
+            dispatch = NotificationService().send_with_results(
+                _decision_outcomes_v2_summary(result, job_id=context.job_id),
+                route_type="report",
+                dedup_key=f"decision-outcome-v2:{context.job_id}",
+            )
+            notification_status = dispatch.status
+        except Exception as exc:
+            notification_status = "failed"
+            logger.warning(
+                "Decision Outcome v2 summary notification failed (%s)",
+                type(exc).__name__,
+            )
+    context.checkpoint()
+    return _json_ready({**result, "notification_status": notification_status})
+
+
+def _decision_outcomes_v2_summary(
+    result: Mapping[str, Any],
+    *,
+    job_id: str,
+) -> str:
+    status_order = (
+        "pending",
+        "evaluated",
+        "observational",
+        "unexecutable",
+        "unable",
+    )
+    status_counts = {status: 0 for status in status_order}
+    for item in result.get("items", ()):
+        if not isinstance(item, Mapping):
+            continue
+        status = str(item.get("eval_status") or "").strip().lower()
+        if status in status_counts:
+            status_counts[status] += 1
+    counts = ", ".join(
+        f"{status}={status_counts[status]}" for status in status_order
+    )
+    return "\n".join(
+        (
+            "# Decision Outcome v2 job summary",
+            "",
+            f"- Job: `{job_id}`",
+            f"- Selected: {int(result.get('selected', 0) or 0)}",
+            f"- Created: {int(result.get('created', 0) or 0)}",
+            f"- Transitioned: {int(result.get('transitioned', 0) or 0)}",
+            f"- Updated: {int(result.get('updated', 0) or 0)}",
+            f"- Unchanged: {int(result.get('unchanged', 0) or 0)}",
+            f"- Status counts: {counts}",
+        )
+    )
+
+
 def _deliver_bot_response(
     target: BotTargetPayload,
     content: str,
@@ -803,6 +1057,12 @@ def build_default_durable_job_registry() -> DurableJobHandlerRegistry:
 
     registry = DurableJobHandlerRegistry()
     registry.register("stock_analysis", 1, StockAnalysisPayload, _stock_analysis_handler)
+    registry.register(
+        "personal_research",
+        1,
+        PersonalResearchPayload,
+        _personal_research_handler,
+    )
     registry.register("screening_screen", 1, ScreeningScreenPayload, _screening_screen_handler)
     registry.register("market_review", 1, MarketReviewPayload, _market_review_handler)
     registry.register("scheduled_analysis", 1, ScheduledAnalysisPayload, _scheduled_analysis_handler)
@@ -812,6 +1072,12 @@ def build_default_durable_job_registry() -> DurableJobHandlerRegistry:
         1,
         DecisionSignalOutcomesPayload,
         _decision_signal_outcomes_handler,
+    )
+    registry.register(
+        "decision_outcomes_v2",
+        1,
+        DecisionOutcomesV2Payload,
+        _decision_outcomes_v2_handler,
     )
     registry.register("bot_ask", 1, BotAskPayload, _bot_ask_handler)
     registry.register("bot_research", 1, BotResearchPayload, _bot_research_handler)
@@ -857,6 +1123,7 @@ __all__ = [
     "BotResearchPayload",
     "BotTargetPayload",
     "DecisionSignalOutcomesPayload",
+    "DecisionOutcomesV2Payload",
     "DurableExecutionContext",
     "DurableHandlerBusyError",
     "DurableHandlerExecutionError",
@@ -864,6 +1131,7 @@ __all__ = [
     "DurableJobCancelled",
     "EventMonitorPayload",
     "MarketReviewPayload",
+    "PersonalResearchPayload",
     "ScheduledAnalysisPayload",
     "ScreeningScreenPayload",
     "StockAnalysisPayload",

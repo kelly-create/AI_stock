@@ -327,6 +327,34 @@ def parse_tushare_quota_int(
     return parsed
 
 
+def parse_research_budget_int(
+    value: Any,
+    default: int,
+    *,
+    field_name: str,
+    maximum: int = 10_000,
+) -> int:
+    """Parse a positive, bounded daily research budget without fallback.
+
+    These counters are admission controls.  A typo must not silently widen or
+    replace the configured limit, so their contract is stricter than the
+    compatibility-oriented ``parse_env_int`` helper.
+    """
+
+    raw_value = default if value is None or not str(value).strip() else value
+    if isinstance(raw_value, bool):
+        raise ValueError(f"{field_name} must be an integer between 1 and {maximum}")
+    try:
+        parsed = int(str(raw_value).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{field_name} must be an integer between 1 and {maximum}"
+        ) from exc
+    if str(parsed) != str(raw_value).strip() or not 1 <= parsed <= maximum:
+        raise ValueError(f"{field_name} must be an integer between 1 and {maximum}")
+    return parsed
+
+
 def normalize_tushare_endpoint_limits(value: Any) -> Dict[str, int]:
     """Return a strict, stable endpoint-per-minute limit mapping.
 
@@ -1302,7 +1330,12 @@ class Config:
     research_debate_enabled: bool = False
     research_thesis_enabled: bool = False
     decision_outcome_v2_enabled: bool = False
+    decision_outcome_v2_interval_minutes: int = 60
+    decision_outcome_v2_batch_limit: int = 100
     portfolio_policy_gate_mode: str = "off"
+    research_quick_daily_budget: int = 50
+    research_standard_deep_daily_budget: int = 20
+    research_debate_daily_budget: int = 8
 
     # 是否保存分析上下文快照（用于历史回溯）
     save_context_snapshot: bool = True
@@ -2386,9 +2419,36 @@ class Config:
                 default=False,
                 field_name='DECISION_OUTCOME_V2_ENABLED',
             ),
+            decision_outcome_v2_interval_minutes=parse_research_budget_int(
+                os.getenv('DECISION_OUTCOME_V2_INTERVAL_MINUTES'),
+                60,
+                field_name='DECISION_OUTCOME_V2_INTERVAL_MINUTES',
+                maximum=1440,
+            ),
+            decision_outcome_v2_batch_limit=parse_research_budget_int(
+                os.getenv('DECISION_OUTCOME_V2_BATCH_LIMIT'),
+                100,
+                field_name='DECISION_OUTCOME_V2_BATCH_LIMIT',
+                maximum=500,
+            ),
             portfolio_policy_gate_mode=(
                 os.getenv('PORTFOLIO_POLICY_GATE_MODE', 'off') or 'off'
             ).strip().lower(),
+            research_quick_daily_budget=parse_research_budget_int(
+                os.getenv('RESEARCH_QUICK_DAILY_BUDGET'),
+                50,
+                field_name='RESEARCH_QUICK_DAILY_BUDGET',
+            ),
+            research_standard_deep_daily_budget=parse_research_budget_int(
+                os.getenv('RESEARCH_STANDARD_DEEP_DAILY_BUDGET'),
+                20,
+                field_name='RESEARCH_STANDARD_DEEP_DAILY_BUDGET',
+            ),
+            research_debate_daily_budget=parse_research_budget_int(
+                os.getenv('RESEARCH_DEBATE_DAILY_BUDGET'),
+                8,
+                field_name='RESEARCH_DEBATE_DAILY_BUDGET',
+            ),
             save_context_snapshot=os.getenv('SAVE_CONTEXT_SNAPSHOT', 'true').lower() == 'true',
             backtest_enabled=os.getenv('BACKTEST_ENABLED', 'true').lower() == 'true',
             backtest_eval_window_days=parse_env_int(os.getenv('BACKTEST_EVAL_WINDOW_DAYS'), 10, field_name='BACKTEST_EVAL_WINDOW_DAYS', minimum=1),

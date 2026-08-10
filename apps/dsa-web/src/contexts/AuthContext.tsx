@@ -74,7 +74,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    void fetchStatus();
+    let active = true;
+    queueMicrotask(() => {
+      if (active) void fetchStatus();
+    });
+    return () => {
+      active = false;
+    };
   }, [fetchStatus]);
 
   const login = useCallback(

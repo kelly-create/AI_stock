@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 新增独立 Decision Outcome v2：按 T+1 可执行性与 5/10/20 交易日计算方向收益、MFE/MAE、CSI 300/申万一级行业超额，保存冻结 lineage，并以 durable job 支持手工及唯一 Scheduler owner 入队。
+- [改进] “AI 建议”页新增与 v1 完全隔离的 Outcome v2 面板，展示最近结果、原因码和 engine/horizon/profile/action 四维校准；样本少于 30 时保留 `n/30` 计数且所有推断指标保持不可用，不伪造零值。
+- [修复] 正式个人投研 DecisionSignal 的 Web 主决策优先显示 `account_action` 与 Policy verdict，legacy `action` 明确标为上游研究动作，避免 Enforce 已阻断为观察时仍把上游 `buy` 显示为最终账户决策。
+- [修复] Portfolio 风险摘要保留正式 `account_action` 与 Policy verdict，并按 Policy 调整后的 `primary_action` 筛选、计数和展示；无正式字段的历史信号继续回退 legacy `action`。
+- [修复] 显式 `mode=debate` 在 Evidence 可引用且质量分非空时不再误套自动 promotion 的 70 分门槛；自动触发仍严格要求 Evidence Quality 至少 70。
+- [修复] 正式个人投研在 Analysis History 提交前冻结私有最小 Policy 重放合同；即使关闭完整上下文持久化，history-only retry 也不再重跑上游阶段或按当前 Portfolio/Policy 漂移 Signal 与 Thesis。
+- [文档] 新增 Decision Outcome v2 API、调度、通知、校准、Web、验收与回滚专题，并同步个人投研 PR0–PR6 进度、配置默认值和文档索引。
+- [文档] 新增个人投研 PR0–PR6 生产验收记录，分离代码、迁移、备份恢复、Docker、flag-off、canary 与 7 个真实交易日 Policy Shadow 门禁，并固定 Go/No-Go 和回滚证据要求。
+- [新功能] 原始个人投研 PR3/PR4 新增增强关注池与持仓 union、期初/两阶段对账、研究模式与日预算、五项确定性 Skill、按需 Debate、Verifier/Judge、Portfolio Policy Gate、不可变 Thesis、只读 Artifact API 及 Web 展示；全部新增研究开关默认关闭。
+- [改进] DecisionSignal 以追加字段承载正式研究 stance/account action、五项分数及 Research/Policy/Portfolio lineage；Policy Gate 支持 `off`、审计型 `shadow` 和仅降级增风险动作的 `enforce`，缺失组合事实时不伪造零值。
+- [测试] 静态 OpenAPI 与 runtime Pydantic 契约同步覆盖个人投研 run、watchlist、reconciliation、Policy、Skill、Verifier/Judge、Thesis 和独立 Outcome v2 路由，并以 schema 回归测试保持后端与客户端字段一致。
+- [文档] 恢复个人 A 股投研原始 PR0–PR6 交付编号和验收边界，明确所有 flags 默认关闭、Thesis 独立开关、Debate 按条件触发而非全量运行，以及 Decision Outcome v1/v2 相互独立。
 - [修复] PR2 冻结研究路径以 `prepared.as_of` 为唯一知识边界：不再混入当前实时报价、未版本化搜索/社交/本地资讯、当前组合状态或 AkShare 辅助补洞；日线 ContextPack 拒绝未来日期，模型网关路径凭据不落快照，传统与 Agent 提示统一隔离并转义不可信外部内容。
 - [改进] 新增研究原始数据分级保留与显式清理工具：行情保留 30 日、搜索/新闻保留 90 日、财务/事件及未知数据集长期保留；默认 dry-run，停写 apply 绑定 active `DATABASE_PATH`、数据库相邻 raw root 与单 Worker owner 锁，并对重复抓取、共享内容哈希、缺失/损坏引用、路径穿越及 staging 清理失败执行保守保护。
 - [新功能] 新增与 SQLite 备份哈希及研究引用集合绑定的 `research/raw` 完整归档、严格校验与隔离恢复工具；恢复演练覆盖 SQLite 异名恢复、raw 抽样回读和总耗时记录，以可执行流程验证 15 分钟恢复目标。

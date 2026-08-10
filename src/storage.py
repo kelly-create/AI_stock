@@ -34,6 +34,7 @@ from sqlalchemy import (
     DateTime,
     Integer,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     UniqueConstraint,
     CheckConstraint,
@@ -733,6 +734,171 @@ class PortfolioFxRate(Base):
             'to_currency',
             'rate_date',
             name='uix_portfolio_fx_pair_date',
+        ),
+    )
+
+
+class ResearchWatchlistItemRecord(Base):
+    """Versioned metadata layered on the legacy ``STOCK_LIST`` watchlist.
+
+    Portfolio holdings are deliberately not copied into this table.  The
+    effective research universe is resolved at read time from active rows,
+    the legacy setting, and the current Portfolio source of truth.
+    """
+
+    __tablename__ = 'research_watchlist_items'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    stock_code = Column(String(16), nullable=False, index=True)
+    market = Column(String(8), nullable=False, default='cn', index=True)
+    source = Column(String(32), nullable=False, default='manual', index=True)
+    reason = Column(Text)
+    priority = Column(Integer, nullable=False, default=50, index=True)
+    analysis_tier = Column(String(16), nullable=False, default='quick', index=True)
+    next_review_at = Column(DateTime, index=True)
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
+    created_at = Column(DateTime, default=utc_naive_now, index=True)
+    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, index=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            'market',
+            'stock_code',
+            name='uix_research_watchlist_market_stock',
+        ),
+        CheckConstraint(
+            'priority >= 0 AND priority <= 100',
+            name='ck_research_watchlist_priority',
+        ),
+        CheckConstraint(
+            "analysis_tier IN ('quick','standard','deep')",
+            name='ck_research_watchlist_analysis_tier',
+        ),
+        Index(
+            'ix_research_watchlist_active_priority_review',
+            'is_active',
+            'priority',
+            'next_review_at',
+        ),
+    )
+
+
+class PortfolioReconciliationRecord(Base):
+    """Append-only opening/reconciliation preview and applied event header."""
+
+    __tablename__ = 'portfolio_reconciliations'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(
+        Integer,
+        ForeignKey('portfolio_accounts.id', ondelete='CASCADE'),
+        nullable=False,
+        index=True,
+    )
+    event_type = Column(String(16), nullable=False, index=True)
+    status = Column(String(16), nullable=False, default='preview', index=True)
+    event_version = Column(Integer)
+    effective_date = Column(Date, nullable=False, index=True)
+    preview_token = Column(String(64), nullable=False, unique=True)
+    idempotency_key = Column(String(128))
+    input_hash = Column(String(64), nullable=False)
+    request_json = Column(Text, nullable=False)
+    diff_json = Column(Text, nullable=False)
+    note = Column(String(255))
+    expires_at = Column(DateTime, nullable=False, index=True)
+    applied_at = Column(DateTime, index=True)
+    created_at = Column(DateTime, default=utc_naive_now, index=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            'account_id',
+            'event_version',
+            name='uix_portfolio_reconciliation_account_version',
+        ),
+        UniqueConstraint(
+            'account_id',
+            'idempotency_key',
+            name='uix_portfolio_reconciliation_account_idempotency',
+        ),
+        CheckConstraint(
+            "event_type IN ('opening','adjustment')",
+            name='ck_portfolio_reconciliation_event_type',
+        ),
+        CheckConstraint(
+            "status IN ('preview','applied','expired','cancelled')",
+            name='ck_portfolio_reconciliation_status',
+        ),
+        CheckConstraint(
+            "(status = 'applied' AND event_version IS NOT NULL AND applied_at IS NOT NULL) "
+            "OR (status <> 'applied' AND event_version IS NULL AND applied_at IS NULL)",
+            name='ck_portfolio_reconciliation_applied_fields',
+        ),
+        Index(
+            'ix_portfolio_reconciliation_account_status_created',
+            'account_id',
+            'status',
+            'created_at',
+        ),
+        Index(
+            'uix_portfolio_reconciliation_applied_opening',
+            'account_id',
+            unique=True,
+            sqlite_where=text(
+                "status = 'applied' AND event_type = 'opening'"
+            ),
+        ),
+    )
+
+
+class PortfolioReconciliationAdjustmentRecord(Base):
+    """Immutable deltas consumed by Portfolio replay without forging trades."""
+
+    __tablename__ = 'portfolio_reconciliation_adjustments'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    reconciliation_id = Column(
+        Integer,
+        ForeignKey('portfolio_reconciliations.id', ondelete='CASCADE'),
+        nullable=False,
+        index=True,
+    )
+    account_id = Column(
+        Integer,
+        ForeignKey('portfolio_accounts.id', ondelete='CASCADE'),
+        nullable=False,
+        index=True,
+    )
+    identity_key = Column(String(128), nullable=False)
+    adjustment_type = Column(String(16), nullable=False, index=True)
+    stock_code = Column(String(16), index=True)
+    market = Column(String(8))
+    currency = Column(String(8), nullable=False, default='CNY')
+    quantity_delta = Column(Float, nullable=False, default=0.0)
+    total_cost_delta = Column(Float, nullable=False, default=0.0)
+    cash_delta = Column(Float, nullable=False, default=0.0)
+    before_json = Column(Text, nullable=False)
+    after_json = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=utc_naive_now, index=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            'reconciliation_id',
+            'identity_key',
+            name='uix_portfolio_reconciliation_adjustment_identity',
+        ),
+        CheckConstraint(
+            "adjustment_type IN ('position','cash')",
+            name='ck_portfolio_reconciliation_adjustment_type',
+        ),
+        CheckConstraint(
+            "(adjustment_type = 'position' AND stock_code IS NOT NULL AND market IS NOT NULL) "
+            "OR (adjustment_type = 'cash' AND stock_code IS NULL AND market IS NULL)",
+            name='ck_portfolio_reconciliation_adjustment_identity',
+        ),
+        Index(
+            'ix_portfolio_reconciliation_adjustment_account_stock',
+            'account_id',
+            'stock_code',
         ),
     )
 
@@ -1928,6 +2094,33 @@ class DecisionSignalRecord(Base):
     catalyst_summary = Column(Text)
     evidence_json = Column(Text)
     data_quality_summary_json = Column(Text)
+    research_stance = Column(String(24), index=True)
+    account_action = Column(String(24), index=True)
+    value_quality_score = Column(Float)
+    trend_timing_score = Column(Float)
+    catalyst_score = Column(Float)
+    risk_score = Column(Float)
+    evidence_quality_score = Column(Float)
+    research_snapshot_hash = Column(String(64), index=True)
+    policy_version = Column(String(64), index=True)
+    policy_hash = Column(String(64), index=True)
+    policy_evaluation_hash = Column(String(64), index=True)
+    portfolio_snapshot_ref = Column(String(128), index=True)
+    prompt_version = Column(String(64))
+    catalysts_json = Column(Text)
+    invalidators_json = Column(Text)
+    unknowns_json = Column(Text)
+    evidence_refs_json = Column(Text)
+    policy_mode = Column(String(16), index=True)
+    policy_decision = Column(String(16), index=True)
+    would_block = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text('0'),
+        index=True,
+    )
+    policy_reasons_json = Column(Text)
     plan_quality = Column(String(16), nullable=False, default='unknown', index=True)
     status = Column(String(16), nullable=False, default='active', index=True)
     expires_at = Column(DateTime, index=True)
@@ -1996,6 +2189,664 @@ class DecisionSignalRecord(Base):
     )
 
 
+class PortfolioPolicyEvaluationRecord(Base):
+    """Immutable deterministic Portfolio/Research policy decision audit."""
+
+    __tablename__ = 'portfolio_policy_evaluations'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    evaluation_hash = Column(String(64), nullable=False, unique=True)
+    job_id = Column(
+        String(64),
+        ForeignKey('analysis_jobs.task_id', ondelete='SET NULL'),
+        index=True,
+    )
+    signal_id = Column(
+        Integer,
+        ForeignKey('decision_signals.id', ondelete='RESTRICT'),
+        index=True,
+    )
+    stock_code = Column(String(16), nullable=False, index=True)
+    market = Column(String(8), nullable=False, index=True)
+    mode = Column(String(16), nullable=False, index=True)
+    policy_version = Column(String(64), nullable=False, index=True)
+    policy_hash = Column(String(64), nullable=False, index=True)
+    research_snapshot_hash = Column(String(64), index=True)
+    portfolio_snapshot_ref = Column(String(128), index=True)
+    portfolio_context_json = Column(
+        Text,
+        nullable=False,
+        default='{}',
+        server_default=text("'{}'"),
+    )
+    input_hash = Column(String(64), nullable=False)
+    output_hash = Column(String(64), nullable=False)
+    research_stance = Column(String(24), nullable=False, index=True)
+    proposed_account_action = Column(String(24), nullable=False, index=True)
+    final_account_action = Column(String(24), nullable=False, index=True)
+    verdict = Column(String(16), nullable=False, index=True)
+    allowed = Column(Boolean, nullable=False, index=True)
+    would_block = Column(Boolean, nullable=False, index=True)
+    reasons_json = Column(Text, nullable=False)
+    component_scores_json = Column(Text, nullable=False)
+    limits_json = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=utc_naive_now, index=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "mode IN ('off','shadow','enforce')",
+            name='ck_portfolio_policy_evaluation_mode',
+        ),
+        CheckConstraint(
+            "json_valid(portfolio_context_json) "
+            "AND json_type(portfolio_context_json) = 'object'",
+            name='ck_portfolio_policy_context_json',
+        ),
+        CheckConstraint(
+            "research_stance IN ('strong_bullish','bullish','watch','neutral','bearish','avoid')",
+            name='ck_portfolio_policy_research_stance',
+        ),
+        CheckConstraint(
+            "proposed_account_action IN ('observe','open_candidate','add_candidate','hold','reduce_candidate','exit_candidate')",
+            name='ck_portfolio_policy_proposed_action',
+        ),
+        CheckConstraint(
+            "final_account_action IN ('observe','open_candidate','add_candidate','hold','reduce_candidate','exit_candidate')",
+            name='ck_portfolio_policy_final_action',
+        ),
+        CheckConstraint(
+            "verdict IN ('allow','downgrade','block','no_action')",
+            name='ck_portfolio_policy_verdict',
+        ),
+        CheckConstraint(
+            "(mode = 'enforce' AND allowed = 0 AND would_block = 1 AND final_account_action = 'observe') "
+            "OR mode <> 'enforce' OR allowed = 1",
+            name='ck_portfolio_policy_enforce_block',
+        ),
+        CheckConstraint(
+            "would_block = (NOT allowed)",
+            name='ck_portfolio_policy_would_block_matches_allowed',
+        ),
+        CheckConstraint(
+            "mode = 'enforce' OR final_account_action = proposed_account_action",
+            name='ck_portfolio_policy_shadow_does_not_mutate_action',
+        ),
+        Index(
+            'ix_portfolio_policy_stock_created',
+            'market',
+            'stock_code',
+            'created_at',
+        ),
+    )
+
+
+class ResearchBudgetReservationRecord(Base):
+    """Durable daily research-budget reservation bound to one task."""
+
+    __tablename__ = 'research_budget_reservations'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_id = Column(String(64), nullable=False, index=True)
+    budget_date = Column(Date, nullable=False, index=True)
+    stock_code = Column(String(16), nullable=False, index=True)
+    market = Column(String(8), nullable=False, default='cn', index=True)
+    mode = Column(String(16), nullable=False, index=True)
+    bucket = Column(String(24), nullable=False, index=True)
+    trigger_source = Column(String(64), nullable=False, index=True)
+    priority = Column(Integer, nullable=False, default=50, index=True)
+    manual_daily_override = Column(Boolean, nullable=False, default=False)
+    status = Column(String(16), nullable=False, default='reserved', index=True)
+    created_at = Column(DateTime, default=utc_naive_now, index=True)
+    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, index=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            'task_id',
+            'market',
+            'stock_code',
+            'bucket',
+            name='uix_research_budget_task_stock_bucket',
+        ),
+        CheckConstraint(
+            "mode IN ('auto','quick','standard','deep','debate')",
+            name='ck_research_budget_mode',
+        ),
+        CheckConstraint(
+            "bucket IN ('quick','standard_deep','debate')",
+            name='ck_research_budget_bucket',
+        ),
+        CheckConstraint(
+            "status IN ('reserved','consumed','released')",
+            name='ck_research_budget_status',
+        ),
+        CheckConstraint(
+            'priority >= 0 AND priority <= 100',
+            name='ck_research_budget_priority',
+        ),
+        Index(
+            'ix_research_budget_date_bucket_status',
+            'budget_date',
+            'bucket',
+            'status',
+        ),
+    )
+
+
+_PERSONAL_RESEARCH_SKILL_CONTRACT_ROWS = (
+    (
+        'personal-value-quality',
+        '1.0.0',
+        'value_quality_score',
+    ),
+    (
+        'personal-trend-timing',
+        '1.0.0',
+        'trend_timing_score',
+    ),
+    (
+        'personal-catalyst',
+        '1.0.0',
+        'catalyst_score',
+    ),
+    (
+        'personal-risk',
+        '1.0.0',
+        'risk_score',
+    ),
+    (
+        'personal-evidence-quality',
+        '1.0.0',
+        'evidence_quality_score',
+    ),
+)
+_PERSONAL_RESEARCH_SKILL_CONTRACT_SQL = ' OR '.join(
+    '('
+    f"skill_id = '{skill_id}' AND skill_version = '{skill_version}' "
+    f"AND score_field = '{score_field}'"
+    ')'
+    for skill_id, skill_version, score_field
+    in _PERSONAL_RESEARCH_SKILL_CONTRACT_ROWS
+)
+_PERSONAL_RESEARCH_SCORE_FIELD_SQL = ' OR '.join(
+    f"(skill_id = '{skill_id}' AND score_field = '{score_field}')"
+    for skill_id, _skill_version, score_field
+    in _PERSONAL_RESEARCH_SKILL_CONTRACT_ROWS
+)
+
+
+class PersonalResearchSkillContractRecord(Base):
+    """Seeded, immutable registry for the five approved Skill contracts."""
+
+    __tablename__ = 'personal_research_skill_contracts'
+
+    skill_id = Column(String(64), primary_key=True)
+    skill_version = Column(String(64), primary_key=True)
+    contract_hash = Column(CHAR(64), primary_key=True)
+    score_field = Column(String(64), nullable=False)
+    canonical_json = Column(Text, nullable=False)
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=text('CURRENT_TIMESTAMP'),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            _PERSONAL_RESEARCH_SKILL_CONTRACT_SQL,
+            name='ck_personal_research_skill_contract_exact',
+        ),
+        CheckConstraint(
+            "length(contract_hash) = 64 AND contract_hash NOT GLOB '*[^0-9a-f]*'",
+            name='ck_personal_research_skill_contract_hash',
+        ),
+        CheckConstraint(
+            "json_valid(canonical_json) = 1 AND json_type(canonical_json) = 'object'",
+            name='ck_personal_research_skill_contract_json',
+        ),
+        Index(
+            'uix_personal_research_skill_contract_hash',
+            'contract_hash',
+            unique=True,
+        ),
+        Index(
+            'uix_personal_research_skill_contract_version',
+            'skill_id',
+            'skill_version',
+            unique=True,
+        ),
+    )
+
+
+class PersonalResearchSkillExecutionRecord(Base):
+    """One terminal, immutable execution of an approved personal Skill."""
+
+    __tablename__ = 'personal_research_skill_executions'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    execution_hash = Column(CHAR(64), nullable=False)
+    task_id = Column(
+        String(64),
+        ForeignKey('analysis_jobs.task_id', ondelete='RESTRICT'),
+        nullable=False,
+    )
+    stock_code = Column(String(16), nullable=False)
+    market = Column(String(16), nullable=False)
+    skill_id = Column(String(64), nullable=False)
+    skill_version = Column(String(64), nullable=False)
+    contract_hash = Column(CHAR(64), nullable=False)
+    score_field = Column(String(64), nullable=False)
+    research_snapshot_hash = Column(
+        String(64),
+        ForeignKey('research_snapshots.snapshot_hash', ondelete='RESTRICT'),
+        nullable=False,
+    )
+    factor_snapshot_hash = Column(
+        String(64),
+        ForeignKey('research_factor_snapshots.content_hash', ondelete='RESTRICT'),
+        nullable=False,
+    )
+    evidence_snapshot_hash = Column(
+        String(64),
+        ForeignKey('research_evidence_snapshots.evidence_hash', ondelete='RESTRICT'),
+        nullable=False,
+    )
+    dataset_snapshot_hashes_json = Column(Text, nullable=False)
+    dataset_lineage_hash = Column(CHAR(64), nullable=False)
+    canonical_input_json = Column(Text, nullable=False)
+    input_hash = Column(CHAR(64), nullable=False)
+    result_status = Column(String(16), nullable=False)
+    canonical_output_json = Column(Text, nullable=False)
+    output_hash = Column(CHAR(64), nullable=False)
+    score = Column(Float, nullable=True)
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=text('CURRENT_TIMESTAMP'),
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ('skill_id', 'skill_version', 'contract_hash'),
+            (
+                'personal_research_skill_contracts.skill_id',
+                'personal_research_skill_contracts.skill_version',
+                'personal_research_skill_contracts.contract_hash',
+            ),
+            ondelete='RESTRICT',
+        ),
+        CheckConstraint(
+            _PERSONAL_RESEARCH_SCORE_FIELD_SQL,
+            name='ck_personal_research_skill_execution_score_field',
+        ),
+        CheckConstraint(
+            "result_status IN ('succeeded', 'failed')",
+            name='ck_personal_research_skill_execution_status',
+        ),
+        CheckConstraint(
+            "(result_status = 'succeeded' AND score IS NOT NULL "
+            "AND score >= 0 AND score <= 100) OR "
+            "(result_status = 'failed' AND score IS NULL)",
+            name='ck_personal_research_skill_execution_result',
+        ),
+        CheckConstraint(
+            "json_valid(dataset_snapshot_hashes_json) = 1 "
+            "AND json_type(dataset_snapshot_hashes_json) = 'array' "
+            "AND json_array_length(dataset_snapshot_hashes_json) > 0 "
+            "AND json_valid(canonical_input_json) = 1 "
+            "AND json_type(canonical_input_json) = 'object' "
+            "AND json_valid(canonical_output_json) = 1 "
+            "AND json_type(canonical_output_json) = 'object'",
+            name='ck_personal_research_skill_execution_json',
+        ),
+        CheckConstraint(
+            "length(execution_hash) = 64 AND execution_hash NOT GLOB '*[^0-9a-f]*' "
+            "AND length(contract_hash) = 64 AND contract_hash NOT GLOB '*[^0-9a-f]*' "
+            "AND length(research_snapshot_hash) = 64 "
+            "AND research_snapshot_hash NOT GLOB '*[^0-9a-f]*' "
+            "AND length(factor_snapshot_hash) = 64 "
+            "AND factor_snapshot_hash NOT GLOB '*[^0-9a-f]*' "
+            "AND length(evidence_snapshot_hash) = 64 "
+            "AND evidence_snapshot_hash NOT GLOB '*[^0-9a-f]*' "
+            "AND length(dataset_lineage_hash) = 64 "
+            "AND dataset_lineage_hash NOT GLOB '*[^0-9a-f]*' "
+            "AND length(input_hash) = 64 AND input_hash NOT GLOB '*[^0-9a-f]*' "
+            "AND length(output_hash) = 64 AND output_hash NOT GLOB '*[^0-9a-f]*'",
+            name='ck_personal_research_skill_execution_hashes',
+        ),
+        UniqueConstraint(
+            'task_id',
+            'market',
+            'stock_code',
+            'skill_id',
+            name='uix_personal_research_skill_execution_task_skill',
+        ),
+        Index(
+            'uix_personal_research_skill_execution_hash',
+            'execution_hash',
+            unique=True,
+        ),
+        Index(
+            'ix_personal_research_skill_execution_snapshot',
+            'research_snapshot_hash',
+            'skill_id',
+        ),
+        Index(
+            'ix_personal_research_skill_execution_stock_created',
+            'market',
+            'stock_code',
+            'created_at',
+        ),
+    )
+
+
+class PersonalResearchDebateReviewRecord(Base):
+    """Immutable deterministic Verifier/Judge review of one Debate snapshot."""
+
+    __tablename__ = 'personal_research_debate_reviews'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    review_hash = Column(CHAR(64), nullable=False)
+    task_id = Column(
+        String(64),
+        ForeignKey('analysis_jobs.task_id', ondelete='RESTRICT'),
+        nullable=False,
+    )
+    stock_code = Column(String(16), nullable=False)
+    market = Column(String(16), nullable=False)
+    debate_snapshot_hash = Column(
+        String(64),
+        ForeignKey('research_debate_snapshots.debate_hash', ondelete='RESTRICT'),
+        nullable=False,
+    )
+    evidence_snapshot_hash = Column(
+        String(64),
+        ForeignKey('research_evidence_snapshots.evidence_hash', ondelete='RESTRICT'),
+        nullable=False,
+    )
+    verifier_version = Column(String(64), nullable=False)
+    verifier_input_json = Column(Text, nullable=False)
+    verifier_input_hash = Column(CHAR(64), nullable=False)
+    verifier_output_json = Column(Text, nullable=False)
+    verifier_output_hash = Column(CHAR(64), nullable=False)
+    verifier_valid = Column(Boolean, nullable=False)
+    verifier_fail_closed = Column(Boolean, nullable=False)
+    verifier_reason_codes_json = Column(Text, nullable=False)
+    judge_version = Column(String(64), nullable=False)
+    judge_policy_hash = Column(CHAR(64), nullable=False)
+    judge_input_json = Column(Text, nullable=False)
+    judge_input_hash = Column(CHAR(64), nullable=False)
+    judge_output_json = Column(Text, nullable=False)
+    judge_output_hash = Column(CHAR(64), nullable=False)
+    judge_fail_closed = Column(Boolean, nullable=False)
+    judge_reason_codes_json = Column(Text, nullable=False)
+    verdict = Column(String(16), nullable=False)
+    winner = Column(String(16), nullable=True)
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=text('CURRENT_TIMESTAMP'),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "verdict IN ('bull', 'bear', 'balanced', 'fail_closed')",
+            name='ck_personal_research_debate_review_verdict',
+        ),
+        CheckConstraint(
+            "(verdict IN ('bull', 'bear') AND winner = verdict "
+            "AND judge_fail_closed = 0) OR "
+            "(verdict = 'balanced' AND winner IS NULL AND judge_fail_closed = 0) OR "
+            "(verdict = 'fail_closed' AND winner IS NULL AND judge_fail_closed = 1)",
+            name='ck_personal_research_debate_review_winner',
+        ),
+        CheckConstraint(
+            "(verifier_valid = 1 AND verifier_fail_closed = 0) OR "
+            "(verifier_valid = 0 AND verifier_fail_closed = 1)",
+            name='ck_personal_research_debate_review_verifier_state',
+        ),
+        CheckConstraint(
+            "json_valid(verifier_input_json) = 1 "
+            "AND json_type(verifier_input_json) = 'object' "
+            "AND json_valid(verifier_output_json) = 1 "
+            "AND json_type(verifier_output_json) = 'object' "
+            "AND json_valid(verifier_reason_codes_json) = 1 "
+            "AND json_type(verifier_reason_codes_json) = 'array' "
+            "AND json_valid(judge_input_json) = 1 "
+            "AND json_type(judge_input_json) = 'object' "
+            "AND json_valid(judge_output_json) = 1 "
+            "AND json_type(judge_output_json) = 'object' "
+            "AND json_valid(judge_reason_codes_json) = 1 "
+            "AND json_type(judge_reason_codes_json) = 'array'",
+            name='ck_personal_research_debate_review_json',
+        ),
+        CheckConstraint(
+            "length(review_hash) = 64 AND review_hash NOT GLOB '*[^0-9a-f]*' "
+            "AND length(debate_snapshot_hash) = 64 "
+            "AND debate_snapshot_hash NOT GLOB '*[^0-9a-f]*' "
+            "AND length(evidence_snapshot_hash) = 64 "
+            "AND evidence_snapshot_hash NOT GLOB '*[^0-9a-f]*' "
+            "AND length(verifier_input_hash) = 64 "
+            "AND verifier_input_hash NOT GLOB '*[^0-9a-f]*' "
+            "AND length(verifier_output_hash) = 64 "
+            "AND verifier_output_hash NOT GLOB '*[^0-9a-f]*' "
+            "AND length(judge_policy_hash) = 64 "
+            "AND judge_policy_hash NOT GLOB '*[^0-9a-f]*' "
+            "AND length(judge_input_hash) = 64 "
+            "AND judge_input_hash NOT GLOB '*[^0-9a-f]*' "
+            "AND length(judge_output_hash) = 64 "
+            "AND judge_output_hash NOT GLOB '*[^0-9a-f]*'",
+            name='ck_personal_research_debate_review_hashes',
+        ),
+        UniqueConstraint(
+            'task_id',
+            'market',
+            'stock_code',
+            'debate_snapshot_hash',
+            'verifier_version',
+            'judge_version',
+            'judge_policy_hash',
+            name='uix_personal_research_debate_review_identity',
+        ),
+        Index(
+            'uix_personal_research_debate_review_hash',
+            'review_hash',
+            unique=True,
+        ),
+        Index(
+            'ix_personal_research_debate_review_stock_created',
+            'market',
+            'stock_code',
+            'created_at',
+        ),
+    )
+
+
+class PersonalResearchThesisRecord(Base):
+    """Immutable personal Research Thesis with complete upstream lineage."""
+
+    __tablename__ = 'personal_research_theses'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    thesis_hash = Column(CHAR(64), nullable=False)
+    thesis_version = Column(String(64), nullable=False)
+    task_id = Column(
+        String(64),
+        ForeignKey('analysis_jobs.task_id', ondelete='RESTRICT'),
+        nullable=False,
+    )
+    stock_code = Column(String(16), nullable=False)
+    market = Column(String(16), nullable=False)
+    research_snapshot_hash = Column(
+        String(64),
+        ForeignKey('research_snapshots.snapshot_hash', ondelete='RESTRICT'),
+        nullable=False,
+    )
+    value_quality_execution_hash = Column(
+        String(64),
+        ForeignKey('personal_research_skill_executions.execution_hash', ondelete='RESTRICT'),
+        nullable=False,
+    )
+    trend_timing_execution_hash = Column(
+        String(64),
+        ForeignKey('personal_research_skill_executions.execution_hash', ondelete='RESTRICT'),
+        nullable=False,
+    )
+    catalyst_execution_hash = Column(
+        String(64),
+        ForeignKey('personal_research_skill_executions.execution_hash', ondelete='RESTRICT'),
+        nullable=False,
+    )
+    risk_execution_hash = Column(
+        String(64),
+        ForeignKey('personal_research_skill_executions.execution_hash', ondelete='RESTRICT'),
+        nullable=False,
+    )
+    evidence_quality_execution_hash = Column(
+        String(64),
+        ForeignKey('personal_research_skill_executions.execution_hash', ondelete='RESTRICT'),
+        nullable=False,
+    )
+    debate_snapshot_hash = Column(
+        String(64),
+        ForeignKey('research_debate_snapshots.debate_hash', ondelete='RESTRICT'),
+        nullable=True,
+    )
+    debate_review_hash = Column(
+        String(64),
+        ForeignKey('personal_research_debate_reviews.review_hash', ondelete='RESTRICT'),
+        nullable=True,
+    )
+    decision_signal_id = Column(
+        Integer,
+        ForeignKey('decision_signals.id', ondelete='RESTRICT'),
+        nullable=True,
+    )
+    policy_evaluation_hash = Column(
+        String(64),
+        ForeignKey('portfolio_policy_evaluations.evaluation_hash', ondelete='RESTRICT'),
+        nullable=True,
+    )
+    policy_version = Column(String(64), nullable=True)
+    policy_hash = Column(String(64), nullable=True)
+    portfolio_snapshot_ref = Column(String(128), nullable=True)
+    stance = Column(String(24), nullable=False)
+    account_action = Column(String(24), nullable=False)
+    scores_json = Column(Text, nullable=False)
+    catalysts_json = Column(Text, nullable=False)
+    invalidators_json = Column(Text, nullable=False)
+    unknowns_json = Column(Text, nullable=False)
+    evidence_refs_json = Column(Text, nullable=False)
+    canonical_content_json = Column(Text, nullable=False)
+    content_hash = Column(CHAR(64), nullable=False)
+    supersedes_thesis_hash = Column(
+        String(64),
+        ForeignKey('personal_research_theses.thesis_hash', ondelete='RESTRICT'),
+        nullable=True,
+    )
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=text('CURRENT_TIMESTAMP'),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "stance IN ('strong_bullish', 'bullish', 'watch', 'neutral', 'bearish', 'avoid')",
+            name='ck_personal_research_thesis_stance',
+        ),
+        CheckConstraint(
+            "account_action IN ('observe', 'open_candidate', 'add_candidate', 'hold', "
+            "'reduce_candidate', 'exit_candidate')",
+            name='ck_personal_research_thesis_account_action',
+        ),
+        CheckConstraint(
+            "(debate_snapshot_hash IS NULL AND debate_review_hash IS NULL) OR "
+            "(debate_snapshot_hash IS NOT NULL AND debate_review_hash IS NOT NULL)",
+            name='ck_personal_research_thesis_debate_lineage',
+        ),
+        CheckConstraint(
+            "(policy_evaluation_hash IS NULL AND policy_version IS NULL "
+            "AND policy_hash IS NULL AND portfolio_snapshot_ref IS NULL) OR "
+            "(decision_signal_id IS NOT NULL AND policy_evaluation_hash IS NOT NULL "
+            "AND policy_version IS NOT NULL AND policy_hash IS NOT NULL "
+            "AND portfolio_snapshot_ref IS NOT NULL)",
+            name='ck_personal_research_thesis_policy_lineage',
+        ),
+        CheckConstraint(
+            "json_valid(scores_json) = 1 AND json_type(scores_json) = 'object' "
+            "AND json_type(scores_json, '$.value_quality_score') IN ('integer', 'real') "
+            "AND json_extract(scores_json, '$.value_quality_score') BETWEEN 0 AND 100 "
+            "AND json_type(scores_json, '$.trend_timing_score') IN ('integer', 'real') "
+            "AND json_extract(scores_json, '$.trend_timing_score') BETWEEN 0 AND 100 "
+            "AND json_type(scores_json, '$.catalyst_score') IN ('integer', 'real') "
+            "AND json_extract(scores_json, '$.catalyst_score') BETWEEN 0 AND 100 "
+            "AND json_type(scores_json, '$.risk_score') IN ('integer', 'real') "
+            "AND json_extract(scores_json, '$.risk_score') BETWEEN 0 AND 100 "
+            "AND json_type(scores_json, '$.evidence_quality_score') IN ('integer', 'real') "
+            "AND json_extract(scores_json, '$.evidence_quality_score') BETWEEN 0 AND 100 "
+            "AND json_valid(catalysts_json) = 1 AND json_type(catalysts_json) = 'array' "
+            "AND json_valid(invalidators_json) = 1 AND json_type(invalidators_json) = 'array' "
+            "AND json_valid(unknowns_json) = 1 AND json_type(unknowns_json) = 'array' "
+            "AND json_valid(evidence_refs_json) = 1 "
+            "AND json_type(evidence_refs_json) = 'array' "
+            "AND json_array_length(evidence_refs_json) > 0 "
+            "AND json_valid(canonical_content_json) = 1 "
+            "AND json_type(canonical_content_json) = 'object'",
+            name='ck_personal_research_thesis_json',
+        ),
+        CheckConstraint(
+            "length(thesis_hash) = 64 AND thesis_hash NOT GLOB '*[^0-9a-f]*' "
+            "AND length(research_snapshot_hash) = 64 "
+            "AND research_snapshot_hash NOT GLOB '*[^0-9a-f]*' "
+            "AND length(value_quality_execution_hash) = 64 "
+            "AND value_quality_execution_hash NOT GLOB '*[^0-9a-f]*' "
+            "AND length(trend_timing_execution_hash) = 64 "
+            "AND trend_timing_execution_hash NOT GLOB '*[^0-9a-f]*' "
+            "AND length(catalyst_execution_hash) = 64 "
+            "AND catalyst_execution_hash NOT GLOB '*[^0-9a-f]*' "
+            "AND length(risk_execution_hash) = 64 "
+            "AND risk_execution_hash NOT GLOB '*[^0-9a-f]*' "
+            "AND length(evidence_quality_execution_hash) = 64 "
+            "AND evidence_quality_execution_hash NOT GLOB '*[^0-9a-f]*' "
+            "AND (debate_snapshot_hash IS NULL OR (length(debate_snapshot_hash) = 64 "
+            "AND debate_snapshot_hash NOT GLOB '*[^0-9a-f]*')) "
+            "AND (debate_review_hash IS NULL OR (length(debate_review_hash) = 64 "
+            "AND debate_review_hash NOT GLOB '*[^0-9a-f]*')) "
+            "AND (policy_evaluation_hash IS NULL OR (length(policy_evaluation_hash) = 64 "
+            "AND policy_evaluation_hash NOT GLOB '*[^0-9a-f]*')) "
+            "AND (policy_hash IS NULL OR (length(policy_hash) = 64 "
+            "AND policy_hash NOT GLOB '*[^0-9a-f]*')) "
+            "AND length(content_hash) = 64 AND content_hash NOT GLOB '*[^0-9a-f]*' "
+            "AND (supersedes_thesis_hash IS NULL OR (length(supersedes_thesis_hash) = 64 "
+            "AND supersedes_thesis_hash NOT GLOB '*[^0-9a-f]*')) "
+            "AND (supersedes_thesis_hash IS NULL OR supersedes_thesis_hash <> thesis_hash)",
+            name='ck_personal_research_thesis_hashes',
+        ),
+        Index(
+            'uix_personal_research_thesis_hash',
+            'thesis_hash',
+            unique=True,
+        ),
+        Index(
+            'uix_personal_research_thesis_supersedes',
+            'supersedes_thesis_hash',
+            unique=True,
+            sqlite_where=text('supersedes_thesis_hash IS NOT NULL'),
+        ),
+        Index(
+            'ix_personal_research_thesis_stock_created',
+            'market',
+            'stock_code',
+            'created_at',
+        ),
+        Index(
+            'ix_personal_research_thesis_snapshot',
+            'research_snapshot_hash',
+            'created_at',
+        ),
+    )
+
+
 class DecisionSignalOutcomeRecord(Base):
     """Signal-level forward outcome for Issue #1390 P5."""
 
@@ -2034,6 +2885,366 @@ class DecisionSignalOutcomeRecord(Base):
         UniqueConstraint('signal_id', 'horizon', 'engine_version', name='uix_decision_signal_outcome_key'),
         Index('ix_decision_signal_outcome_stats_action', 'engine_version', 'action', 'horizon'),
         Index('ix_decision_signal_outcome_stats_market', 'engine_version', 'market', 'horizon'),
+    )
+
+
+class DecisionOutcomeV2Record(Base):
+    """Immutable personal-research Decision Outcome v2 observation."""
+
+    __tablename__ = 'decision_outcomes_v2'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    signal_id = Column(
+        Integer,
+        ForeignKey('decision_signals.id', ondelete='RESTRICT'),
+        nullable=False,
+        index=True,
+    )
+    outcome_contract = Column(String(32), nullable=False)
+    horizon = Column(String(16), nullable=False, index=True)
+    engine_version = Column(String(64), nullable=False, index=True)
+    eval_status = Column(String(24), nullable=False, index=True)
+    final_action_family = Column(String(16), nullable=False, index=True)
+    outcome = Column(String(16), index=True)
+    direction_correct = Column(Boolean)
+    reason_code = Column(String(128), index=True)
+
+    # Frozen DecisionSignal and Portfolio Policy facts.  These columns are
+    # deliberately duplicated: later profile/policy edits must not rewrite the
+    # historical population used for calibration.
+    signal_created_at = Column(DateTime, nullable=False)
+    signal_session = Column(Date)
+    stock_code = Column(String(16), nullable=False, index=True)
+    market = Column(String(8), nullable=False, index=True)
+    source_type = Column(String(32), nullable=False)
+    signal_action = Column(String(16), nullable=False)
+    signal_horizon = Column(String(16))
+    signal_status = Column(String(16), nullable=False)
+    decision_profile = Column(String(16), nullable=False, index=True)
+    research_snapshot_hash = Column(String(64), nullable=False, index=True)
+    policy_version = Column(String(64), nullable=False)
+    policy_hash = Column(CHAR(64), nullable=False)
+    policy_evaluation_hash = Column(CHAR(64), nullable=False, index=True)
+    portfolio_snapshot_ref = Column(String(128), nullable=False)
+    prompt_version = Column(String(64))
+    research_stance = Column(String(24), nullable=False, index=True)
+    proposed_account_action = Column(String(24), nullable=False)
+    final_account_action = Column(String(24), nullable=False, index=True)
+    policy_mode = Column(String(16), nullable=False)
+    policy_verdict = Column(String(16), nullable=False)
+    policy_allowed = Column(Boolean, nullable=False)
+    would_block = Column(Boolean, nullable=False)
+    confidence = Column(Float)
+    signal_score = Column(Float)
+    value_quality_score = Column(Float, nullable=False)
+    trend_timing_score = Column(Float, nullable=False)
+    catalyst_score = Column(Float, nullable=False)
+    risk_score = Column(Float, nullable=False)
+    evidence_quality_score = Column(Float, nullable=False)
+
+    # Frozen T+1 execution and forward-observation facts.
+    execution_status = Column(String(24), nullable=False, index=True)
+    entry_trade_date = Column(Date, index=True)
+    entry_raw_open = Column(Float)
+    entry_adj_factor = Column(Float)
+    end_trade_date = Column(Date, index=True)
+    trading_day_count = Column(Integer)
+    end_adjusted_close = Column(Float)
+    stock_return_pct = Column(Float)
+    directional_return_pct = Column(Float)
+    mfe_pct = Column(Float)
+    mae_pct = Column(Float)
+
+    csi300_code = Column(String(32), nullable=False)
+    csi300_name = Column(String(128))
+    csi300_status = Column(String(16), nullable=False)
+    csi300_reason_code = Column(String(128))
+    csi300_return_pct = Column(Float)
+    csi300_stock_excess_return_pct = Column(Float)
+    csi300_directional_excess_return_pct = Column(Float)
+
+    sw1_code = Column(String(32))
+    sw1_name = Column(String(128))
+    sw1_status = Column(String(16), nullable=False)
+    sw1_reason_code = Column(String(128))
+    sw1_return_pct = Column(Float)
+    sw1_stock_excess_return_pct = Column(Float)
+    sw1_directional_excess_return_pct = Column(Float)
+
+    dataset_hashes_json = Column(Text, nullable=False)
+    observation_json = Column(Text, nullable=False)
+    observation_hash = Column(CHAR(64), nullable=False, index=True)
+    evaluated_at = Column(DateTime, index=True)
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=text('CURRENT_TIMESTAMP'),
+        index=True,
+    )
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=text('CURRENT_TIMESTAMP'),
+        index=True,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            'signal_id',
+            'horizon',
+            'engine_version',
+            name='uix_decision_outcome_v2_identity',
+        ),
+        CheckConstraint(
+            "outcome_contract = 'decision-outcome-v2'",
+            name='ck_decision_outcome_v2_contract',
+        ),
+        CheckConstraint(
+            "horizon IN ('5d', '10d', '20d')",
+            name='ck_decision_outcome_v2_horizon',
+        ),
+        CheckConstraint(
+            "length(engine_version) BETWEEN 1 AND 64 "
+            "AND length(stock_code) BETWEEN 1 AND 16 "
+            "AND length(market) BETWEEN 1 AND 8 "
+            "AND length(decision_profile) BETWEEN 1 AND 16",
+            name='ck_decision_outcome_v2_identifiers',
+        ),
+        CheckConstraint(
+            "eval_status IN ('pending', 'evaluated', 'observational', "
+            "'unexecutable', 'unable')",
+            name='ck_decision_outcome_v2_eval_status',
+        ),
+        CheckConstraint(
+            "final_action_family IN ('long', 'defensive', 'observational')",
+            name='ck_decision_outcome_v2_action_family',
+        ),
+        CheckConstraint(
+            "execution_status IN ('pending', 'executable', 'unexecutable', "
+            "'unavailable')",
+            name='ck_decision_outcome_v2_execution_status',
+        ),
+        CheckConstraint(
+            "(final_account_action IN ('open_candidate', 'add_candidate') "
+            "AND final_action_family = 'long') OR "
+            "(final_account_action IN ('reduce_candidate', 'exit_candidate') "
+            "AND final_action_family = 'defensive') OR "
+            "(final_account_action IN ('observe', 'hold') "
+            "AND final_action_family = 'observational')",
+            name='ck_decision_outcome_v2_final_action_family',
+        ),
+        CheckConstraint(
+            "policy_mode IN ('off', 'shadow', 'enforce') "
+            "AND policy_verdict IN ('allow', 'downgrade', 'block', 'no_action') "
+            "AND would_block = (NOT policy_allowed)",
+            name='ck_decision_outcome_v2_policy',
+        ),
+        CheckConstraint(
+            "research_stance IN ('strong_bullish', 'bullish', 'watch', "
+            "'neutral', 'bearish', 'avoid')",
+            name='ck_decision_outcome_v2_stance',
+        ),
+        CheckConstraint(
+            "proposed_account_action IN ('observe', 'open_candidate', "
+            "'add_candidate', 'hold', 'reduce_candidate', 'exit_candidate')",
+            name='ck_decision_outcome_v2_proposed_action',
+        ),
+        CheckConstraint(
+            "(confidence IS NULL OR (confidence >= 0 AND confidence <= 1)) "
+            "AND (signal_score IS NULL OR "
+            "(signal_score >= 0 AND signal_score <= 100)) "
+            "AND value_quality_score BETWEEN 0 AND 100 "
+            "AND trend_timing_score BETWEEN 0 AND 100 "
+            "AND catalyst_score BETWEEN 0 AND 100 "
+            "AND risk_score BETWEEN 0 AND 100 "
+            "AND evidence_quality_score BETWEEN 0 AND 100",
+            name='ck_decision_outcome_v2_scores',
+        ),
+        CheckConstraint(
+            "length(research_snapshot_hash) = 64 "
+            "AND research_snapshot_hash NOT GLOB '*[^0-9a-f]*' "
+            "AND length(policy_hash) = 64 "
+            "AND policy_hash NOT GLOB '*[^0-9a-f]*' "
+            "AND length(policy_evaluation_hash) = 64 "
+            "AND policy_evaluation_hash NOT GLOB '*[^0-9a-f]*' "
+            "AND length(observation_hash) = 64 "
+            "AND observation_hash NOT GLOB '*[^0-9a-f]*'",
+            name='ck_decision_outcome_v2_hashes',
+        ),
+        CheckConstraint(
+            "json_valid(dataset_hashes_json) = 1 "
+            "AND json_type(dataset_hashes_json) = 'array' "
+            "AND json_array_length(dataset_hashes_json) <= 128 "
+            "AND json_valid(observation_json) = 1 "
+            "AND json_type(observation_json) = 'object'",
+            name='ck_decision_outcome_v2_json',
+        ),
+        CheckConstraint(
+            "(trading_day_count IS NULL OR "
+            "(horizon = '5d' AND trading_day_count = 5) OR "
+            "(horizon = '10d' AND trading_day_count = 10) OR "
+            "(horizon = '20d' AND trading_day_count = 20)) "
+            "AND (signal_session IS NULL OR entry_trade_date IS NULL "
+            "OR entry_trade_date > signal_session) "
+            "AND (entry_trade_date IS NULL OR end_trade_date IS NULL "
+            "OR end_trade_date >= entry_trade_date) "
+            "AND (entry_raw_open IS NULL OR entry_raw_open > 0) "
+            "AND (entry_adj_factor IS NULL OR entry_adj_factor > 0) "
+            "AND (end_adjusted_close IS NULL OR end_adjusted_close > 0) "
+            "AND (mfe_pct IS NULL OR mfe_pct >= 0) "
+            "AND (mae_pct IS NULL OR mae_pct >= 0)",
+            name='ck_decision_outcome_v2_metrics',
+        ),
+        CheckConstraint(
+            "(eval_status = 'pending' AND execution_status = 'pending' "
+            "AND outcome IS NULL AND direction_correct IS NULL "
+            "AND end_adjusted_close IS NULL "
+            "AND stock_return_pct IS NULL "
+            "AND directional_return_pct IS NULL "
+            "AND mfe_pct IS NULL AND mae_pct IS NULL "
+            "AND evaluated_at IS NULL AND reason_code IS NOT NULL) OR "
+            "(eval_status = 'evaluated' "
+            "AND final_action_family IN ('long', 'defensive') "
+            "AND execution_status = 'executable' "
+            "AND ((outcome = 'hit' AND direction_correct = 1) "
+            "OR (outcome = 'miss' AND direction_correct = 0)) "
+            "AND reason_code IS NULL AND signal_session IS NOT NULL "
+            "AND entry_trade_date IS NOT NULL AND entry_raw_open IS NOT NULL "
+            "AND entry_adj_factor IS NOT NULL AND end_trade_date IS NOT NULL "
+            "AND trading_day_count IS NOT NULL "
+            "AND end_adjusted_close IS NOT NULL "
+            "AND stock_return_pct IS NOT NULL "
+            "AND directional_return_pct IS NOT NULL "
+            "AND mfe_pct IS NOT NULL AND mae_pct IS NOT NULL "
+            "AND json_array_length(dataset_hashes_json) > 0 "
+            "AND evaluated_at IS NOT NULL) OR "
+            "(eval_status = 'observational' "
+            "AND final_action_family = 'observational' "
+            "AND execution_status = 'executable' "
+            "AND outcome IS NULL AND direction_correct IS NULL "
+            "AND reason_code IS NULL AND signal_session IS NOT NULL "
+            "AND entry_trade_date IS NOT NULL AND entry_raw_open IS NOT NULL "
+            "AND entry_adj_factor IS NOT NULL AND end_trade_date IS NOT NULL "
+            "AND trading_day_count IS NOT NULL "
+            "AND end_adjusted_close IS NOT NULL "
+            "AND stock_return_pct IS NOT NULL "
+            "AND directional_return_pct IS NULL "
+            "AND mfe_pct IS NULL AND mae_pct IS NULL "
+            "AND json_array_length(dataset_hashes_json) > 0 "
+            "AND evaluated_at IS NOT NULL) OR "
+            "(eval_status = 'unexecutable' "
+            "AND final_action_family IN ('long', 'defensive') "
+            "AND execution_status = 'unexecutable' "
+            "AND outcome IS NULL AND direction_correct IS NULL "
+            "AND reason_code IN ('entry_suspended', "
+            "'entry_one_price_limit_up', 'entry_one_price_limit_down') "
+            "AND signal_session IS NOT NULL "
+            "AND entry_trade_date IS NOT NULL "
+            "AND end_trade_date IS NOT NULL "
+            "AND trading_day_count IS NOT NULL "
+            "AND end_adjusted_close IS NULL "
+            "AND stock_return_pct IS NULL "
+            "AND directional_return_pct IS NULL "
+            "AND mfe_pct IS NULL AND mae_pct IS NULL "
+            "AND json_array_length(dataset_hashes_json) > 0 "
+            "AND evaluated_at IS NOT NULL) OR "
+            "(eval_status = 'unable' "
+            "AND execution_status IN ('executable', 'unavailable') "
+            "AND outcome IS NULL AND direction_correct IS NULL "
+            "AND reason_code IS NOT NULL "
+            "AND end_adjusted_close IS NULL "
+            "AND stock_return_pct IS NULL "
+            "AND directional_return_pct IS NULL "
+            "AND mfe_pct IS NULL AND mae_pct IS NULL "
+            "AND evaluated_at IS NOT NULL)",
+            name='ck_decision_outcome_v2_state',
+        ),
+        CheckConstraint(
+            "(eval_status NOT IN ('evaluated', 'observational') OR "
+            "abs(stock_return_pct - "
+            "(((end_adjusted_close / entry_raw_open) - 1) * 100)) <= 0.00000001) "
+            "AND (eval_status <> 'evaluated' OR "
+            "abs(directional_return_pct - "
+            "(CASE WHEN final_action_family = 'long' THEN stock_return_pct "
+            "ELSE -stock_return_pct END)) <= 0.00000001) "
+            "AND (eval_status <> 'evaluated' OR "
+            "(directional_return_pct > 0 AND outcome = 'hit' "
+            "AND direction_correct = 1) OR "
+            "(directional_return_pct <= 0 AND outcome = 'miss' "
+            "AND direction_correct = 0))",
+            name='ck_decision_outcome_v2_result_math',
+        ),
+        CheckConstraint(
+            "csi300_code = '000300.SH' "
+            "AND csi300_status IN ('available', 'unavailable') "
+            "AND sw1_status IN ('available', 'unavailable')",
+            name='ck_decision_outcome_v2_benchmark_status',
+        ),
+        CheckConstraint(
+            "(csi300_status = 'available' "
+            "AND eval_status IN ('evaluated', 'observational') "
+            "AND csi300_reason_code IS NULL "
+            "AND csi300_return_pct IS NOT NULL "
+            "AND csi300_stock_excess_return_pct IS NOT NULL "
+            "AND abs(csi300_stock_excess_return_pct - "
+            "(stock_return_pct - csi300_return_pct)) <= 0.00000001 "
+            "AND ((eval_status = 'evaluated' "
+            "AND csi300_directional_excess_return_pct IS NOT NULL "
+            "AND abs(csi300_directional_excess_return_pct - "
+            "(directional_return_pct - (csi300_return_pct * "
+            "(CASE WHEN final_action_family = 'long' THEN 1 ELSE -1 END)))) "
+            "<= 0.00000001) "
+            "OR (eval_status <> 'evaluated' "
+            "AND csi300_directional_excess_return_pct IS NULL))) OR "
+            "(csi300_status = 'unavailable' "
+            "AND csi300_reason_code IS NOT NULL "
+            "AND csi300_return_pct IS NULL "
+            "AND csi300_stock_excess_return_pct IS NULL "
+            "AND csi300_directional_excess_return_pct IS NULL)",
+            name='ck_decision_outcome_v2_csi300',
+        ),
+        CheckConstraint(
+            "(sw1_status = 'available' "
+            "AND eval_status IN ('evaluated', 'observational') "
+            "AND sw1_code IS NOT NULL "
+            "AND sw1_reason_code IS NULL AND sw1_return_pct IS NOT NULL "
+            "AND sw1_stock_excess_return_pct IS NOT NULL "
+            "AND abs(sw1_stock_excess_return_pct - "
+            "(stock_return_pct - sw1_return_pct)) <= 0.00000001 "
+            "AND ((eval_status = 'evaluated' "
+            "AND sw1_directional_excess_return_pct IS NOT NULL "
+            "AND abs(sw1_directional_excess_return_pct - "
+            "(directional_return_pct - (sw1_return_pct * "
+            "(CASE WHEN final_action_family = 'long' THEN 1 ELSE -1 END)))) "
+            "<= 0.00000001) "
+            "OR (eval_status <> 'evaluated' "
+            "AND sw1_directional_excess_return_pct IS NULL))) OR "
+            "(sw1_status = 'unavailable' "
+            "AND sw1_reason_code IS NOT NULL "
+            "AND sw1_return_pct IS NULL "
+            "AND sw1_stock_excess_return_pct IS NULL "
+            "AND sw1_directional_excess_return_pct IS NULL)",
+            name='ck_decision_outcome_v2_sw1',
+        ),
+        Index(
+            'ix_decision_outcome_v2_candidates',
+            'engine_version',
+            'eval_status',
+            'updated_at',
+        ),
+        Index(
+            'ix_decision_outcome_v2_calibration',
+            'engine_version',
+            'horizon',
+            'decision_profile',
+            'final_action_family',
+            'eval_status',
+        ),
+        Index(
+            'ix_decision_outcome_v2_signal_engine',
+            'signal_id',
+            'engine_version',
+        ),
     )
 
 
@@ -3781,12 +4992,19 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             if not existing_ids:
                 return 0
 
+            # Formal personal-research signals are immutable lineage assets.
+            # ``source_report_id`` is a weak provenance reference, so deleting
+            # an old rendered report must preserve the signal and its Policy,
+            # Thesis, and Outcome v2 descendants. Legacy report-bound signals
+            # retain the historical cleanup behavior.
             linked_signal_ids = sorted(
                 session.execute(
                     select(DecisionSignalRecord.id).where(
                         and_(
                             DecisionSignalRecord.source_type == "analysis",
                             DecisionSignalRecord.source_report_id.in_(existing_ids),
+                            DecisionSignalRecord.research_snapshot_hash.is_(None),
+                            DecisionSignalRecord.policy_evaluation_hash.is_(None),
                         )
                     )
                 ).scalars().all()
@@ -5002,6 +6220,684 @@ _PR4_RESEARCH_DEBATE_TABLES = (
     ResearchDebateTurnRecord.__table__,
     ResearchDebateSnapshotRecord.__table__,
 )
+_PERSONAL_RESEARCH_POLICY_TABLES = (
+    ResearchWatchlistItemRecord.__table__,
+    PortfolioReconciliationRecord.__table__,
+    PortfolioReconciliationAdjustmentRecord.__table__,
+    PortfolioPolicyEvaluationRecord.__table__,
+    ResearchBudgetReservationRecord.__table__,
+)
+_PERSONAL_RESEARCH_SKILL_TABLES = (
+    PersonalResearchSkillContractRecord.__table__,
+    PersonalResearchSkillExecutionRecord.__table__,
+    PersonalResearchDebateReviewRecord.__table__,
+    PersonalResearchThesisRecord.__table__,
+)
+_DECISION_OUTCOME_V2_TABLES = (
+    DecisionOutcomeV2Record.__table__,
+)
+_PERSONAL_RESEARCH_DECISION_SIGNAL_COLUMN_SQL: Dict[str, str] = {
+    'research_stance': 'VARCHAR(24)',
+    'account_action': 'VARCHAR(24)',
+    'value_quality_score': 'FLOAT',
+    'trend_timing_score': 'FLOAT',
+    'catalyst_score': 'FLOAT',
+    'risk_score': 'FLOAT',
+    'evidence_quality_score': 'FLOAT',
+    'research_snapshot_hash': 'VARCHAR(64)',
+    'policy_version': 'VARCHAR(64)',
+    'policy_hash': 'VARCHAR(64)',
+    'policy_evaluation_hash': 'VARCHAR(64)',
+    'portfolio_snapshot_ref': 'VARCHAR(128)',
+    'prompt_version': 'VARCHAR(64)',
+    'catalysts_json': 'TEXT',
+    'invalidators_json': 'TEXT',
+    'unknowns_json': 'TEXT',
+    'evidence_refs_json': 'TEXT',
+    'policy_mode': 'VARCHAR(16)',
+    'policy_decision': 'VARCHAR(16)',
+    'would_block': 'BOOLEAN NOT NULL DEFAULT 0',
+    'policy_reasons_json': 'TEXT',
+}
+_PERSONAL_RESEARCH_DECISION_SIGNAL_INDEX_NAMES = {
+    'ix_decision_signals_research_stance',
+    'ix_decision_signals_account_action',
+    'ix_decision_signals_research_snapshot_hash',
+    'ix_decision_signals_policy_version',
+    'ix_decision_signals_policy_hash',
+    'ix_decision_signals_policy_evaluation_hash',
+    'ix_decision_signals_portfolio_snapshot_ref',
+    'ix_decision_signals_policy_mode',
+    'ix_decision_signals_policy_decision',
+    'ix_decision_signals_would_block',
+}
+_PERSONAL_RESEARCH_ACCOUNT_TRIGGER_SQL = {
+    'trg_portfolio_reconciliation_header_account_update': """
+        CREATE TRIGGER IF NOT EXISTS trg_portfolio_reconciliation_header_account_update
+        BEFORE UPDATE OF account_id ON portfolio_reconciliations
+        FOR EACH ROW
+        WHEN NEW.account_id <> OLD.account_id
+        BEGIN
+            SELECT RAISE(ABORT, 'reconciliation header account is immutable');
+        END
+    """,
+    'trg_portfolio_reconciliation_applied_update': """
+        CREATE TRIGGER IF NOT EXISTS trg_portfolio_reconciliation_applied_update
+        BEFORE UPDATE ON portfolio_reconciliations
+        FOR EACH ROW
+        WHEN OLD.status = 'applied'
+        BEGIN
+            SELECT RAISE(ABORT, 'applied reconciliation is immutable');
+        END
+    """,
+    'trg_portfolio_reconciliation_applied_delete': """
+        CREATE TRIGGER IF NOT EXISTS trg_portfolio_reconciliation_applied_delete
+        BEFORE DELETE ON portfolio_reconciliations
+        FOR EACH ROW
+        WHEN OLD.status = 'applied'
+        BEGIN
+            SELECT RAISE(ABORT, 'applied reconciliation is immutable');
+        END
+    """,
+    'trg_portfolio_reconciliation_adjustment_account_insert': """
+        CREATE TRIGGER IF NOT EXISTS trg_portfolio_reconciliation_adjustment_account_insert
+        BEFORE INSERT ON portfolio_reconciliation_adjustments
+        FOR EACH ROW
+        WHEN NOT EXISTS (
+            SELECT 1 FROM portfolio_reconciliations
+            WHERE id = NEW.reconciliation_id AND account_id = NEW.account_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'reconciliation adjustment account mismatch');
+        END
+    """,
+    'trg_portfolio_reconciliation_adjustment_closed_insert': """
+        CREATE TRIGGER IF NOT EXISTS trg_portfolio_reconciliation_adjustment_closed_insert
+        BEFORE INSERT ON portfolio_reconciliation_adjustments
+        FOR EACH ROW
+        WHEN EXISTS (
+            SELECT 1 FROM portfolio_reconciliations
+            WHERE id = NEW.reconciliation_id AND status = 'applied'
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'applied reconciliation adjustments are closed');
+        END
+    """,
+    'trg_portfolio_reconciliation_adjustment_account_update': """
+        CREATE TRIGGER IF NOT EXISTS trg_portfolio_reconciliation_adjustment_account_update
+        BEFORE UPDATE OF reconciliation_id, account_id
+        ON portfolio_reconciliation_adjustments
+        FOR EACH ROW
+        WHEN NOT EXISTS (
+            SELECT 1 FROM portfolio_reconciliations
+            WHERE id = NEW.reconciliation_id AND account_id = NEW.account_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'reconciliation adjustment account mismatch');
+        END
+    """,
+    'trg_portfolio_reconciliation_adjustment_immutable_update': """
+        CREATE TRIGGER IF NOT EXISTS trg_portfolio_reconciliation_adjustment_immutable_update
+        BEFORE UPDATE ON portfolio_reconciliation_adjustments
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'reconciliation adjustment is immutable');
+        END
+    """,
+    'trg_portfolio_reconciliation_adjustment_immutable_delete': """
+        CREATE TRIGGER IF NOT EXISTS trg_portfolio_reconciliation_adjustment_immutable_delete
+        BEFORE DELETE ON portfolio_reconciliation_adjustments
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'reconciliation adjustment is immutable');
+        END
+    """,
+}
+_PERSONAL_RESEARCH_POLICY_CONTEXT_COLUMN_SQL = (
+    "TEXT NOT NULL DEFAULT '{}' "
+    "CHECK (json_valid(portfolio_context_json) "
+    "AND json_type(portfolio_context_json) = 'object')"
+)
+_PERSONAL_RESEARCH_POLICY_CONTEXT_TRIGGER_SQL = {
+    'trg_portfolio_policy_evaluation_update': """
+        CREATE TRIGGER IF NOT EXISTS trg_portfolio_policy_evaluation_update
+        BEFORE UPDATE ON portfolio_policy_evaluations
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'portfolio policy evaluation is immutable');
+        END
+    """,
+    'trg_portfolio_policy_evaluation_delete': """
+        CREATE TRIGGER IF NOT EXISTS trg_portfolio_policy_evaluation_delete
+        BEFORE DELETE ON portfolio_policy_evaluations
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'portfolio policy evaluation is immutable');
+        END
+    """,
+}
+_RESEARCH_BUDGET_TRIGGER_SQL = {
+    'trg_research_budget_update_contract': """
+        CREATE TRIGGER IF NOT EXISTS trg_research_budget_update_contract
+        BEFORE UPDATE ON research_budget_reservations
+        FOR EACH ROW
+        WHEN OLD.task_id IS NOT NEW.task_id
+          OR OLD.budget_date IS NOT NEW.budget_date
+          OR OLD.stock_code IS NOT NEW.stock_code
+          OR OLD.market IS NOT NEW.market
+          OR OLD.mode IS NOT NEW.mode
+          OR OLD.bucket IS NOT NEW.bucket
+          OR OLD.trigger_source IS NOT NEW.trigger_source
+          OR OLD.priority IS NOT NEW.priority
+          OR OLD.manual_daily_override IS NOT NEW.manual_daily_override
+          OR OLD.created_at IS NOT NEW.created_at
+          OR NOT (
+              (
+                  NEW.status = OLD.status
+                  AND NEW.updated_at IS OLD.updated_at
+              )
+              OR (
+                  OLD.status = 'reserved'
+                  AND NEW.status IN ('consumed', 'released')
+                  AND OLD.updated_at IS NOT NULL
+                  AND NEW.updated_at IS NOT NULL
+                  AND julianday(NEW.updated_at) > julianday(OLD.updated_at)
+              )
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'research budget reservation is immutable');
+        END
+    """,
+    'trg_research_budget_delete': """
+        CREATE TRIGGER IF NOT EXISTS trg_research_budget_delete
+        BEFORE DELETE ON research_budget_reservations
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'research budget reservation is immutable');
+        END
+    """,
+}
+_PERSONAL_RESEARCH_SKILL_TRIGGER_SQL = {
+    'trg_personal_research_skill_contract_update': """
+        CREATE TRIGGER IF NOT EXISTS trg_personal_research_skill_contract_update
+        BEFORE UPDATE ON personal_research_skill_contracts
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'personal research skill contract is immutable');
+        END
+    """,
+    'trg_personal_research_skill_contract_delete': """
+        CREATE TRIGGER IF NOT EXISTS trg_personal_research_skill_contract_delete
+        BEFORE DELETE ON personal_research_skill_contracts
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'personal research skill contract is immutable');
+        END
+    """,
+    'trg_personal_research_skill_execution_lineage': """
+        CREATE TRIGGER IF NOT EXISTS trg_personal_research_skill_execution_lineage
+        BEFORE INSERT ON personal_research_skill_executions
+        FOR EACH ROW
+        WHEN NOT EXISTS (
+            SELECT 1 FROM analysis_jobs WHERE task_id = NEW.task_id
+        ) OR NOT EXISTS (
+            SELECT 1 FROM personal_research_skill_contracts
+            WHERE skill_id = NEW.skill_id
+              AND skill_version = NEW.skill_version
+              AND contract_hash = NEW.contract_hash
+              AND score_field = NEW.score_field
+        ) OR NOT EXISTS (
+            SELECT 1 FROM research_snapshots
+            WHERE snapshot_hash = NEW.research_snapshot_hash
+              AND stock_code = NEW.stock_code
+              AND lower(market) = lower(NEW.market)
+              AND factor_snapshot_hash = NEW.factor_snapshot_hash
+              AND evidence_snapshot_hash = NEW.evidence_snapshot_hash
+        ) OR NOT EXISTS (
+            SELECT 1 FROM research_factor_snapshots
+            WHERE content_hash = NEW.factor_snapshot_hash
+              AND stock_code = NEW.stock_code
+              AND lower(market) = lower(NEW.market)
+              AND input_dataset_hashes_json = NEW.dataset_snapshot_hashes_json
+        ) OR NOT EXISTS (
+            SELECT 1 FROM research_evidence_snapshots
+            WHERE evidence_hash = NEW.evidence_snapshot_hash
+              AND stock_code = NEW.stock_code
+              AND lower(market) = lower(NEW.market)
+              AND factor_snapshot_hash = NEW.factor_snapshot_hash
+              AND input_dataset_hashes_json = NEW.dataset_snapshot_hashes_json
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'personal research skill lineage mismatch');
+        END
+    """,
+    'trg_personal_research_skill_execution_update': """
+        CREATE TRIGGER IF NOT EXISTS trg_personal_research_skill_execution_update
+        BEFORE UPDATE ON personal_research_skill_executions
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'personal research skill execution is immutable');
+        END
+    """,
+    'trg_personal_research_skill_execution_delete': """
+        CREATE TRIGGER IF NOT EXISTS trg_personal_research_skill_execution_delete
+        BEFORE DELETE ON personal_research_skill_executions
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'personal research skill execution is immutable');
+        END
+    """,
+    'trg_personal_research_debate_review_lineage': """
+        CREATE TRIGGER IF NOT EXISTS trg_personal_research_debate_review_lineage
+        BEFORE INSERT ON personal_research_debate_reviews
+        FOR EACH ROW
+        WHEN NOT EXISTS (
+            SELECT 1 FROM analysis_jobs WHERE task_id = NEW.task_id
+        ) OR NOT EXISTS (
+            SELECT 1 FROM research_debate_snapshots
+            WHERE debate_hash = NEW.debate_snapshot_hash
+              AND stock_code = NEW.stock_code
+              AND lower(market) = lower(NEW.market)
+              AND evidence_snapshot_hash = NEW.evidence_snapshot_hash
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'personal research debate review lineage mismatch');
+        END
+    """,
+    'trg_personal_research_debate_review_update': """
+        CREATE TRIGGER IF NOT EXISTS trg_personal_research_debate_review_update
+        BEFORE UPDATE ON personal_research_debate_reviews
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'personal research debate review is immutable');
+        END
+    """,
+    'trg_personal_research_debate_review_delete': """
+        CREATE TRIGGER IF NOT EXISTS trg_personal_research_debate_review_delete
+        BEFORE DELETE ON personal_research_debate_reviews
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'personal research debate review is immutable');
+        END
+    """,
+    'trg_personal_research_thesis_skill_lineage': """
+        CREATE TRIGGER IF NOT EXISTS trg_personal_research_thesis_skill_lineage
+        BEFORE INSERT ON personal_research_theses
+        FOR EACH ROW
+        WHEN NOT EXISTS (
+            SELECT 1 FROM personal_research_skill_executions
+            WHERE execution_hash = NEW.value_quality_execution_hash
+              AND task_id = NEW.task_id AND stock_code = NEW.stock_code
+              AND lower(market) = lower(NEW.market)
+              AND research_snapshot_hash = NEW.research_snapshot_hash
+              AND skill_id = 'personal-value-quality'
+              AND result_status = 'succeeded'
+        ) OR NOT EXISTS (
+            SELECT 1 FROM personal_research_skill_executions
+            WHERE execution_hash = NEW.trend_timing_execution_hash
+              AND task_id = NEW.task_id AND stock_code = NEW.stock_code
+              AND lower(market) = lower(NEW.market)
+              AND research_snapshot_hash = NEW.research_snapshot_hash
+              AND skill_id = 'personal-trend-timing'
+              AND result_status = 'succeeded'
+        ) OR NOT EXISTS (
+            SELECT 1 FROM personal_research_skill_executions
+            WHERE execution_hash = NEW.catalyst_execution_hash
+              AND task_id = NEW.task_id AND stock_code = NEW.stock_code
+              AND lower(market) = lower(NEW.market)
+              AND research_snapshot_hash = NEW.research_snapshot_hash
+              AND skill_id = 'personal-catalyst'
+              AND result_status = 'succeeded'
+        ) OR NOT EXISTS (
+            SELECT 1 FROM personal_research_skill_executions
+            WHERE execution_hash = NEW.risk_execution_hash
+              AND task_id = NEW.task_id AND stock_code = NEW.stock_code
+              AND lower(market) = lower(NEW.market)
+              AND research_snapshot_hash = NEW.research_snapshot_hash
+              AND skill_id = 'personal-risk'
+              AND result_status = 'succeeded'
+        ) OR NOT EXISTS (
+            SELECT 1 FROM personal_research_skill_executions
+            WHERE execution_hash = NEW.evidence_quality_execution_hash
+              AND task_id = NEW.task_id AND stock_code = NEW.stock_code
+              AND lower(market) = lower(NEW.market)
+              AND research_snapshot_hash = NEW.research_snapshot_hash
+              AND skill_id = 'personal-evidence-quality'
+              AND result_status = 'succeeded'
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'personal research thesis skill lineage mismatch');
+        END
+    """,
+    'trg_personal_research_thesis_debate_lineage': """
+        CREATE TRIGGER IF NOT EXISTS trg_personal_research_thesis_debate_lineage
+        BEFORE INSERT ON personal_research_theses
+        FOR EACH ROW
+        WHEN NEW.debate_review_hash IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM personal_research_debate_reviews
+            WHERE review_hash = NEW.debate_review_hash
+              AND debate_snapshot_hash = NEW.debate_snapshot_hash
+              AND task_id = NEW.task_id
+              AND stock_code = NEW.stock_code
+              AND lower(market) = lower(NEW.market)
+              AND verifier_fail_closed = 0
+              AND judge_fail_closed = 0
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'personal research thesis debate lineage mismatch');
+        END
+    """,
+    'trg_personal_research_thesis_policy_lineage': """
+        CREATE TRIGGER IF NOT EXISTS trg_personal_research_thesis_policy_lineage
+        BEFORE INSERT ON personal_research_theses
+        FOR EACH ROW
+        WHEN NEW.decision_signal_id IS NOT NULL AND (
+            NOT EXISTS (
+                SELECT 1 FROM decision_signals AS signal
+                WHERE signal.id = NEW.decision_signal_id
+                  AND signal.trace_id = NEW.task_id
+                  AND signal.stock_code = NEW.stock_code
+                  AND lower(signal.market) = lower(NEW.market)
+                  AND signal.research_snapshot_hash = NEW.research_snapshot_hash
+                  AND signal.research_stance = NEW.stance
+                  AND signal.account_action = NEW.account_action
+                  AND signal.value_quality_score = json_extract(
+                      NEW.scores_json, '$.value_quality_score'
+                  )
+                  AND signal.trend_timing_score = json_extract(
+                      NEW.scores_json, '$.trend_timing_score'
+                  )
+                  AND signal.catalyst_score = json_extract(
+                      NEW.scores_json, '$.catalyst_score'
+                  )
+                  AND signal.risk_score = json_extract(
+                      NEW.scores_json, '$.risk_score'
+                  )
+                  AND signal.evidence_quality_score = json_extract(
+                      NEW.scores_json, '$.evidence_quality_score'
+                  )
+            ) OR (
+                NEW.policy_evaluation_hash IS NOT NULL AND NOT EXISTS (
+                    SELECT 1
+                    FROM portfolio_policy_evaluations AS policy
+                    JOIN decision_signals AS signal
+                      ON signal.id = NEW.decision_signal_id
+                    WHERE policy.evaluation_hash = NEW.policy_evaluation_hash
+                      AND policy.signal_id = NEW.decision_signal_id
+                      AND policy.job_id = NEW.task_id
+                      AND policy.stock_code = NEW.stock_code
+                      AND lower(policy.market) = lower(NEW.market)
+                      AND policy.research_snapshot_hash = NEW.research_snapshot_hash
+                      AND policy.research_stance = NEW.stance
+                      AND policy.final_account_action = NEW.account_action
+                      AND policy.policy_version = NEW.policy_version
+                      AND policy.policy_hash = NEW.policy_hash
+                      AND policy.portfolio_snapshot_ref = NEW.portfolio_snapshot_ref
+                      AND signal.policy_evaluation_hash = NEW.policy_evaluation_hash
+                      AND signal.policy_version = NEW.policy_version
+                      AND signal.policy_hash = NEW.policy_hash
+                      AND signal.portfolio_snapshot_ref = NEW.portfolio_snapshot_ref
+                )
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'personal research thesis policy lineage mismatch');
+        END
+    """,
+    'trg_personal_research_thesis_supersedes_lineage': """
+        CREATE TRIGGER IF NOT EXISTS trg_personal_research_thesis_supersedes_lineage
+        BEFORE INSERT ON personal_research_theses
+        FOR EACH ROW
+        WHEN NEW.supersedes_thesis_hash IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM personal_research_theses
+            WHERE thesis_hash = NEW.supersedes_thesis_hash
+              AND stock_code = NEW.stock_code
+              AND lower(market) = lower(NEW.market)
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'personal research thesis supersedes lineage mismatch');
+        END
+    """,
+    'trg_personal_research_thesis_update': """
+        CREATE TRIGGER IF NOT EXISTS trg_personal_research_thesis_update
+        BEFORE UPDATE ON personal_research_theses
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'personal research thesis is immutable');
+        END
+    """,
+    'trg_personal_research_thesis_delete': """
+        CREATE TRIGGER IF NOT EXISTS trg_personal_research_thesis_delete
+        BEFORE DELETE ON personal_research_theses
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'personal research thesis is immutable');
+        END
+    """,
+}
+_DECISION_OUTCOME_V2_LINEAGE_SQL = """
+    SELECT 1
+    FROM decision_signals AS signal
+    JOIN portfolio_policy_evaluations AS policy
+      ON policy.signal_id = signal.id
+     AND policy.evaluation_hash = signal.policy_evaluation_hash
+    WHERE signal.id = NEW.signal_id
+      AND signal.stock_code = NEW.stock_code
+      AND lower(signal.market) = lower(NEW.market)
+      AND signal.source_type = NEW.source_type
+      AND signal.action = NEW.signal_action
+      AND signal.horizon IS NEW.signal_horizon
+      AND signal.status = NEW.signal_status
+      AND signal.decision_profile = NEW.decision_profile
+      AND signal.research_snapshot_hash = NEW.research_snapshot_hash
+      AND signal.policy_version = NEW.policy_version
+      AND signal.policy_hash = NEW.policy_hash
+      AND signal.policy_evaluation_hash = NEW.policy_evaluation_hash
+      AND signal.portfolio_snapshot_ref = NEW.portfolio_snapshot_ref
+      AND signal.prompt_version IS NEW.prompt_version
+      AND signal.research_stance = NEW.research_stance
+      AND signal.account_action = NEW.final_account_action
+      AND signal.policy_mode = NEW.policy_mode
+      AND signal.policy_decision = NEW.policy_verdict
+      AND signal.would_block = NEW.would_block
+      AND signal.confidence IS NEW.confidence
+      AND signal.score IS NEW.signal_score
+      AND signal.value_quality_score = NEW.value_quality_score
+      AND signal.trend_timing_score = NEW.trend_timing_score
+      AND signal.catalyst_score = NEW.catalyst_score
+      AND signal.risk_score = NEW.risk_score
+      AND signal.evidence_quality_score = NEW.evidence_quality_score
+      AND policy.stock_code = NEW.stock_code
+      AND lower(policy.market) = lower(NEW.market)
+      AND policy.mode = NEW.policy_mode
+      AND policy.policy_version = NEW.policy_version
+      AND policy.policy_hash = NEW.policy_hash
+      AND policy.research_snapshot_hash = NEW.research_snapshot_hash
+      AND policy.portfolio_snapshot_ref = NEW.portfolio_snapshot_ref
+      AND policy.research_stance = NEW.research_stance
+      AND policy.proposed_account_action = NEW.proposed_account_action
+      AND policy.final_account_action = NEW.final_account_action
+      AND policy.verdict = NEW.policy_verdict
+      AND policy.allowed = NEW.policy_allowed
+      AND policy.would_block = NEW.would_block
+"""
+_DECISION_OUTCOME_V2_DATASET_INVALID_SQL = """
+    EXISTS (
+        SELECT 1 FROM json_each(NEW.dataset_hashes_json)
+        WHERE type <> 'text'
+           OR length(value) <> 64
+           OR value GLOB '*[^0-9a-f]*'
+    )
+    OR (
+        SELECT count(*) FROM json_each(NEW.dataset_hashes_json)
+    ) <> (
+        SELECT count(DISTINCT value) FROM json_each(NEW.dataset_hashes_json)
+    )
+    OR EXISTS (
+        SELECT 1
+        FROM json_each(NEW.dataset_hashes_json) AS current_item
+        JOIN json_each(NEW.dataset_hashes_json) AS next_item
+          ON CAST(next_item.key AS INTEGER) = CAST(current_item.key AS INTEGER) + 1
+        WHERE current_item.value >= next_item.value
+    )
+    OR EXISTS (
+        SELECT 1
+        FROM json_each(NEW.dataset_hashes_json) AS dataset_item
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM research_dataset_snapshots AS dataset_snapshot
+            WHERE dataset_snapshot.content_hash = dataset_item.value
+        )
+    )
+"""
+_DECISION_OUTCOME_V2_FROZEN_UPDATE_SQL = " OR ".join(
+    f"NEW.{column_name} IS NOT OLD.{column_name}"
+    for column_name in (
+        'signal_id',
+        'outcome_contract',
+        'horizon',
+        'engine_version',
+        'final_action_family',
+        'signal_created_at',
+        'signal_session',
+        'stock_code',
+        'market',
+        'source_type',
+        'signal_action',
+        'signal_horizon',
+        'signal_status',
+        'decision_profile',
+        'research_snapshot_hash',
+        'policy_version',
+        'policy_hash',
+        'policy_evaluation_hash',
+        'portfolio_snapshot_ref',
+        'prompt_version',
+        'research_stance',
+        'proposed_account_action',
+        'final_account_action',
+        'policy_mode',
+        'policy_verdict',
+        'policy_allowed',
+        'would_block',
+        'confidence',
+        'signal_score',
+        'value_quality_score',
+        'trend_timing_score',
+        'catalyst_score',
+        'risk_score',
+        'evidence_quality_score',
+        'created_at',
+    )
+)
+_DECISION_OUTCOME_V2_TRIGGER_SQL = {
+    'trg_decision_outcome_v2_lineage_insert': f"""
+        CREATE TRIGGER IF NOT EXISTS trg_decision_outcome_v2_lineage_insert
+        BEFORE INSERT ON decision_outcomes_v2
+        FOR EACH ROW
+        WHEN NOT EXISTS ({_DECISION_OUTCOME_V2_LINEAGE_SQL})
+        BEGIN
+            SELECT RAISE(ABORT, 'decision outcome v2 lineage mismatch');
+        END
+    """,
+    'trg_decision_outcome_v2_dataset_insert': f"""
+        CREATE TRIGGER IF NOT EXISTS trg_decision_outcome_v2_dataset_insert
+        BEFORE INSERT ON decision_outcomes_v2
+        FOR EACH ROW
+        WHEN {_DECISION_OUTCOME_V2_DATASET_INVALID_SQL}
+        BEGIN
+            SELECT RAISE(ABORT, 'decision outcome v2 dataset lineage invalid');
+        END
+    """,
+    'trg_decision_outcome_v2_terminal_update': """
+        CREATE TRIGGER IF NOT EXISTS trg_decision_outcome_v2_terminal_update
+        BEFORE UPDATE ON decision_outcomes_v2
+        FOR EACH ROW
+        WHEN OLD.eval_status <> 'pending'
+        BEGIN
+            SELECT RAISE(ABORT, 'terminal decision outcome v2 is immutable');
+        END
+    """,
+    'trg_decision_outcome_v2_frozen_update': f"""
+        CREATE TRIGGER IF NOT EXISTS trg_decision_outcome_v2_frozen_update
+        BEFORE UPDATE ON decision_outcomes_v2
+        FOR EACH ROW
+        WHEN OLD.eval_status = 'pending' AND (
+            {_DECISION_OUTCOME_V2_FROZEN_UPDATE_SQL}
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'decision outcome v2 frozen fields are immutable');
+        END
+    """,
+    'trg_decision_outcome_v2_lineage_update': f"""
+        CREATE TRIGGER IF NOT EXISTS trg_decision_outcome_v2_lineage_update
+        BEFORE UPDATE ON decision_outcomes_v2
+        FOR EACH ROW
+        WHEN OLD.eval_status = 'pending'
+         AND NOT EXISTS ({_DECISION_OUTCOME_V2_LINEAGE_SQL})
+        BEGIN
+            SELECT RAISE(ABORT, 'decision outcome v2 lineage mismatch');
+        END
+    """,
+    'trg_decision_outcome_v2_dataset_update': f"""
+        CREATE TRIGGER IF NOT EXISTS trg_decision_outcome_v2_dataset_update
+        BEFORE UPDATE ON decision_outcomes_v2
+        FOR EACH ROW
+        WHEN OLD.eval_status = 'pending'
+         AND ({_DECISION_OUTCOME_V2_DATASET_INVALID_SQL})
+        BEGIN
+            SELECT RAISE(ABORT, 'decision outcome v2 dataset lineage invalid');
+        END
+    """,
+    'trg_decision_outcome_v2_delete': """
+        CREATE TRIGGER IF NOT EXISTS trg_decision_outcome_v2_delete
+        BEFORE DELETE ON decision_outcomes_v2
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'decision outcome v2 is immutable');
+        END
+    """,
+    'trg_decision_outcome_v2_signal_delete_restrict': """
+        CREATE TRIGGER IF NOT EXISTS trg_decision_outcome_v2_signal_delete_restrict
+        BEFORE DELETE ON decision_signals
+        FOR EACH ROW
+        WHEN EXISTS (
+            SELECT 1 FROM decision_outcomes_v2 WHERE signal_id = OLD.id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'decision outcome v2 signal is restricted');
+        END
+    """,
+    'trg_decision_outcome_v2_dataset_snapshot_update_restrict': """
+        CREATE TRIGGER IF NOT EXISTS trg_decision_outcome_v2_dataset_snapshot_update_restrict
+        BEFORE UPDATE OF content_hash ON research_dataset_snapshots
+        FOR EACH ROW
+        WHEN OLD.content_hash IS NOT NEW.content_hash
+         AND EXISTS (
+            SELECT 1
+            FROM decision_outcomes_v2 AS outcome,
+                 json_each(outcome.dataset_hashes_json) AS dataset_item
+            WHERE dataset_item.value = OLD.content_hash
+         )
+        BEGIN
+            SELECT RAISE(ABORT, 'decision outcome v2 dataset snapshot is restricted');
+        END
+    """,
+    'trg_decision_outcome_v2_dataset_snapshot_delete_restrict': """
+        CREATE TRIGGER IF NOT EXISTS trg_decision_outcome_v2_dataset_snapshot_delete_restrict
+        BEFORE DELETE ON research_dataset_snapshots
+        FOR EACH ROW
+        WHEN EXISTS (
+            SELECT 1
+            FROM decision_outcomes_v2 AS outcome,
+                 json_each(outcome.dataset_hashes_json) AS dataset_item
+            WHERE dataset_item.value = OLD.content_hash
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'decision outcome v2 dataset snapshot is restricted');
+        END
+    """,
+}
 _PR1_EXTENSION_INDEX_NAMES = {
     'ix_llm_usage_job_stage_called_at',
     'ix_llm_usage_trace_called_at',
@@ -5382,16 +7278,37 @@ def _verify_research_schema_tables_contract(
             expected_columns_for_index = tuple(
                 column.name for column in index.columns
             )
+            expected_where = index.dialect_options['sqlite'].get('where')
             if (
                 actual_columns_for_index != expected_columns_for_index
                 or bool(actual[2]) != bool(index.unique)
-                or bool(actual[4])
+                or bool(actual[4]) != (expected_where is not None)
             ):
                 raise RuntimeError(
                     f'{contract_name} research schema index {index_name} is incompatible: '
                     f'columns={actual_columns_for_index}, unique={bool(actual[2])}, '
                     f'partial={bool(actual[4])}'
                 )
+            if expected_where is not None:
+                actual_sql_row = connection.exec_driver_sql(
+                    "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+                    (index_name,),
+                ).first()
+                actual_sql = actual_sql_row[0] if actual_sql_row else ''
+                expected_sql = str(
+                    CreateIndex(index).compile(dialect=connection.dialect)
+                )
+                actual_predicate = _normalize_sql_contract(actual_sql).split(
+                    ' where ', 1
+                )[-1]
+                expected_predicate = _normalize_sql_contract(expected_sql).split(
+                    ' where ', 1
+                )[-1]
+                if actual_predicate != expected_predicate:
+                    raise RuntimeError(
+                        f'{contract_name} research schema index {index_name} '
+                        'has incompatible predicate'
+                    )
 
         table_sql_row = connection.exec_driver_sql(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
@@ -5632,6 +7549,532 @@ def _apply_pr4_research_debate_schema(connection) -> None:
         table.create(bind=connection, checkfirst=True)
 
     _verify_pr4_research_debate_schema_contract(connection)
+
+
+def _verify_personal_research_policy_schema_contract(connection) -> None:
+    """Verify original-plan PR3 watchlist, reconciliation, policy, and budget storage."""
+
+    _verify_pr4_research_debate_schema_contract(connection)
+    _verify_research_schema_tables_contract(
+        connection,
+        _PERSONAL_RESEARCH_POLICY_TABLES,
+        contract_name='PersonalResearchPolicy',
+    )
+
+    actual_triggers = {
+        row[0]: row[1]
+        for row in connection.exec_driver_sql(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'trigger'"
+        ).all()
+    }
+    for trigger_name, expected_sql in _PERSONAL_RESEARCH_ACCOUNT_TRIGGER_SQL.items():
+        actual_sql = actual_triggers.get(trigger_name)
+        if actual_sql is None:
+            raise RuntimeError(
+                f'PersonalResearchPolicy trigger is missing: {trigger_name}'
+            )
+        normalized_actual = _normalize_sql_contract(actual_sql).replace(
+            'create trigger if not exists',
+            'create trigger',
+            1,
+        )
+        normalized_expected = _normalize_sql_contract(expected_sql).replace(
+            'create trigger if not exists',
+            'create trigger',
+            1,
+        )
+        if normalized_actual != normalized_expected:
+            raise RuntimeError(
+                f'PersonalResearchPolicy trigger is incompatible: {trigger_name}'
+            )
+
+    actual_columns = {
+        row[1]: row
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info('decision_signals')"
+        ).all()
+    }
+    missing_columns = sorted(
+        set(_PERSONAL_RESEARCH_DECISION_SIGNAL_COLUMN_SQL).difference(actual_columns)
+    )
+    if missing_columns:
+        raise RuntimeError(
+            'Personal research DecisionSignal schema is incomplete: missing='
+            + ','.join(missing_columns)
+        )
+    for column_name, ddl in _PERSONAL_RESEARCH_DECISION_SIGNAL_COLUMN_SQL.items():
+        actual = actual_columns[column_name]
+        expected_type = _normalize_sql_contract(ddl.split(' NOT NULL', 1)[0])
+        actual_type = _normalize_sql_contract(actual[2])
+        if actual_type != expected_type:
+            raise RuntimeError(
+                'Personal research DecisionSignal column '
+                f'{column_name} has type {actual[2]!r}; expected {expected_type!r}'
+            )
+        expected_not_null = ' NOT NULL' in ddl
+        if bool(actual[3]) != expected_not_null:
+            raise RuntimeError(
+                'Personal research DecisionSignal column '
+                f'{column_name} has incompatible nullability'
+            )
+        expected_default = '0' if ' DEFAULT 0' in ddl else None
+        if _normalize_sql_default(actual[4]) != expected_default:
+            raise RuntimeError(
+                'Personal research DecisionSignal column '
+                f'{column_name} has incompatible default {actual[4]!r}'
+            )
+
+    actual_indexes = {
+        row[1]: row
+        for row in connection.exec_driver_sql(
+            "PRAGMA index_list('decision_signals')"
+        ).all()
+    }
+    missing_indexes = sorted(
+        _PERSONAL_RESEARCH_DECISION_SIGNAL_INDEX_NAMES.difference(actual_indexes)
+    )
+    if missing_indexes:
+        raise RuntimeError(
+            'Personal research DecisionSignal indexes are incomplete: missing='
+            + ','.join(missing_indexes)
+        )
+    expected_index_columns = {
+        index.name: tuple(column.name for column in index.columns)
+        for index in DecisionSignalRecord.__table__.indexes
+        if index.name in _PERSONAL_RESEARCH_DECISION_SIGNAL_INDEX_NAMES
+    }
+    for index_name, expected_columns in expected_index_columns.items():
+        actual = actual_indexes[index_name]
+        actual_columns_for_index = tuple(
+            row[2]
+            for row in connection.exec_driver_sql(
+                f"PRAGMA index_info('{index_name}')"
+            ).all()
+        )
+        if (
+            actual_columns_for_index != expected_columns
+            or bool(actual[2])
+            or bool(actual[4])
+        ):
+            raise RuntimeError(
+                'Personal research DecisionSignal index '
+                f'{index_name} is incompatible: columns={actual_columns_for_index}, '
+                f'unique={bool(actual[2])}, partial={bool(actual[4])}'
+            )
+
+
+def run_personal_research_policy_schema_upgrade(engine) -> None:
+    """Create and verify the original-plan PR3 storage contract atomically."""
+
+    if engine.url.get_backend_name() != 'sqlite':
+        raise RuntimeError('Personal research policy migration only supports SQLite')
+
+    with engine.connect() as connection:
+        connection.exec_driver_sql('BEGIN IMMEDIATE')
+        try:
+            _apply_personal_research_policy_schema(connection)
+        except BaseException:
+            connection.rollback()
+            raise
+        else:
+            connection.commit()
+
+
+def _apply_personal_research_policy_schema(connection) -> None:
+    """Apply original-plan PR3 DDL on a caller-owned SQLite transaction."""
+
+    required_tables = {
+        'analysis_jobs',
+        'decision_signals',
+        'portfolio_accounts',
+        'research_debate_snapshots',
+    }
+    existing_tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).all()
+    }
+    missing_tables = sorted(required_tables.difference(existing_tables))
+    if missing_tables:
+        raise RuntimeError(
+            'Personal research policy migration prerequisites are missing='
+            + ','.join(missing_tables)
+        )
+
+    for table in _PERSONAL_RESEARCH_POLICY_TABLES:
+        table.create(bind=connection, checkfirst=True)
+
+    for trigger_sql in _PERSONAL_RESEARCH_ACCOUNT_TRIGGER_SQL.values():
+        connection.exec_driver_sql(trigger_sql)
+
+    existing_signal_columns = {
+        row[1]
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info('decision_signals')"
+        ).all()
+    }
+    for column_name, ddl in _PERSONAL_RESEARCH_DECISION_SIGNAL_COLUMN_SQL.items():
+        if column_name in existing_signal_columns:
+            continue
+        connection.exec_driver_sql(
+            f'ALTER TABLE decision_signals ADD COLUMN {column_name} {ddl}'
+        )
+        existing_signal_columns.add(column_name)
+
+    for index in DecisionSignalRecord.__table__.indexes:
+        if index.name in _PERSONAL_RESEARCH_DECISION_SIGNAL_INDEX_NAMES:
+            index.create(bind=connection, checkfirst=True)
+
+    _verify_personal_research_policy_schema_contract(connection)
+
+
+def _expected_personal_research_skill_contract_rows() -> list[tuple[str, ...]]:
+    """Project the code contracts into the exact immutable seed rows."""
+
+    from src.services.research.canonical import canonical_json
+    from src.services.research.personal_skill_contract import (
+        PERSONAL_RESEARCH_SKILL_CONTRACTS,
+    )
+
+    actual_contract_identity = tuple(
+        (
+            contract.skill_id,
+            contract.version,
+            contract.score_field,
+        )
+        for contract in PERSONAL_RESEARCH_SKILL_CONTRACTS.values()
+    )
+    if actual_contract_identity != _PERSONAL_RESEARCH_SKILL_CONTRACT_ROWS:
+        raise RuntimeError(
+            'Personal research Skill storage constants drift from the code contracts'
+        )
+    return [
+        (
+            contract.skill_id,
+            contract.version,
+            contract.content_hash,
+            contract.score_field,
+            canonical_json(contract.content_payload(), exclude_volatile=False),
+        )
+        for contract in PERSONAL_RESEARCH_SKILL_CONTRACTS.values()
+    ]
+
+
+def _verify_personal_research_skills_schema_contract(connection) -> None:
+    """Verify immutable Skill execution, Debate review, and Thesis storage."""
+
+    _verify_personal_research_policy_schema_contract(connection)
+    _verify_research_schema_tables_contract(
+        connection,
+        _PERSONAL_RESEARCH_SKILL_TABLES,
+        contract_name='PersonalResearchSkills',
+    )
+
+    expected_contract_rows = _expected_personal_research_skill_contract_rows()
+    actual_contract_rows = [
+        tuple(row)
+        for row in connection.exec_driver_sql(
+            'SELECT skill_id, skill_version, contract_hash, score_field, canonical_json '
+            'FROM personal_research_skill_contracts '
+            'ORDER BY rowid'
+        ).all()
+    ]
+    if actual_contract_rows != expected_contract_rows:
+        raise RuntimeError(
+            'Personal research Skill contract registry is incompatible'
+        )
+
+    actual_triggers = {
+        row[0]: row[1]
+        for row in connection.exec_driver_sql(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'trigger'"
+        ).all()
+    }
+    for trigger_name, expected_sql in _PERSONAL_RESEARCH_SKILL_TRIGGER_SQL.items():
+        actual_sql = actual_triggers.get(trigger_name)
+        if actual_sql is None:
+            raise RuntimeError(
+                f'PersonalResearchSkills trigger is missing: {trigger_name}'
+            )
+        normalized_actual = _normalize_sql_contract(actual_sql).replace(
+            'create trigger if not exists',
+            'create trigger',
+            1,
+        )
+        normalized_expected = _normalize_sql_contract(expected_sql).replace(
+            'create trigger if not exists',
+            'create trigger',
+            1,
+        )
+        if normalized_actual != normalized_expected:
+            raise RuntimeError(
+                f'PersonalResearchSkills trigger is incompatible: {trigger_name}'
+            )
+
+
+def run_personal_research_skills_schema_upgrade(engine) -> None:
+    """Create and verify immutable personal-research PR4 storage atomically."""
+
+    if engine.url.get_backend_name() != 'sqlite':
+        raise RuntimeError('Personal research Skills migration only supports SQLite')
+
+    with engine.connect() as connection:
+        connection.exec_driver_sql('BEGIN IMMEDIATE')
+        try:
+            _apply_personal_research_skills_schema(connection)
+        except BaseException:
+            connection.rollback()
+            raise
+        else:
+            connection.commit()
+
+
+def _apply_personal_research_skills_schema(connection) -> None:
+    """Apply personal-research PR4 DDL on a caller-owned transaction."""
+
+    required_tables = {
+        'analysis_jobs',
+        'decision_signals',
+        'portfolio_policy_evaluations',
+        'research_dataset_snapshots',
+        'research_factor_snapshots',
+        'research_evidence_snapshots',
+        'research_debate_snapshots',
+        'research_snapshots',
+    }
+    existing_tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).all()
+    }
+    missing_tables = sorted(required_tables.difference(existing_tables))
+    if missing_tables:
+        raise RuntimeError(
+            'Personal research Skills migration prerequisites are missing='
+            + ','.join(missing_tables)
+        )
+
+    for table in _PERSONAL_RESEARCH_SKILL_TABLES:
+        table.create(bind=connection, checkfirst=True)
+
+    for row in _expected_personal_research_skill_contract_rows():
+        connection.exec_driver_sql(
+            'INSERT OR IGNORE INTO personal_research_skill_contracts '
+            '(skill_id, skill_version, contract_hash, score_field, canonical_json) '
+            'VALUES (?, ?, ?, ?, ?)',
+            row,
+        )
+
+    for trigger_sql in _PERSONAL_RESEARCH_SKILL_TRIGGER_SQL.values():
+        connection.exec_driver_sql(trigger_sql)
+
+    _verify_personal_research_skills_schema_contract(connection)
+
+
+def _verify_decision_outcome_v2_schema_contract(connection) -> None:
+    """Verify the independent, immutable Decision Outcome v2 schema."""
+
+    _verify_personal_research_skills_schema_contract(connection)
+    _verify_research_schema_tables_contract(
+        connection,
+        _DECISION_OUTCOME_V2_TABLES,
+        contract_name='DecisionOutcomeV2',
+    )
+
+    actual_triggers = {
+        row[0]: row[1]
+        for row in connection.exec_driver_sql(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'trigger'"
+        ).all()
+    }
+    for trigger_name, expected_sql in _DECISION_OUTCOME_V2_TRIGGER_SQL.items():
+        actual_sql = actual_triggers.get(trigger_name)
+        if actual_sql is None:
+            raise RuntimeError(
+                f'DecisionOutcomeV2 trigger is missing: {trigger_name}'
+            )
+        normalized_actual = _normalize_sql_contract(actual_sql).replace(
+            'create trigger if not exists',
+            'create trigger',
+            1,
+        )
+        normalized_expected = _normalize_sql_contract(expected_sql).replace(
+            'create trigger if not exists',
+            'create trigger',
+            1,
+        )
+        if normalized_actual != normalized_expected:
+            raise RuntimeError(
+                f'DecisionOutcomeV2 trigger is incompatible: {trigger_name}'
+            )
+
+
+def run_decision_outcome_v2_schema_upgrade(engine) -> None:
+    """Create and verify Decision Outcome v2 storage atomically."""
+
+    if engine.url.get_backend_name() != 'sqlite':
+        raise RuntimeError('Decision Outcome v2 migration only supports SQLite')
+
+    with engine.connect() as connection:
+        connection.exec_driver_sql('BEGIN IMMEDIATE')
+        try:
+            _apply_decision_outcome_v2_schema(connection)
+        except BaseException:
+            connection.rollback()
+            raise
+        else:
+            connection.commit()
+
+
+def _apply_decision_outcome_v2_schema(connection) -> None:
+    """Apply Decision Outcome v2 DDL on a caller-owned transaction."""
+
+    required_tables = {
+        'decision_signals',
+        'portfolio_policy_evaluations',
+        'personal_research_theses',
+        'research_dataset_snapshots',
+    }
+    existing_tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).all()
+    }
+    missing_tables = sorted(required_tables.difference(existing_tables))
+    if missing_tables:
+        raise RuntimeError(
+            'Decision Outcome v2 migration prerequisites are missing='
+            + ','.join(missing_tables)
+        )
+
+    for table in _DECISION_OUTCOME_V2_TABLES:
+        table.create(bind=connection, checkfirst=True)
+    for trigger_sql in _DECISION_OUTCOME_V2_TRIGGER_SQL.values():
+        connection.exec_driver_sql(trigger_sql)
+
+    _verify_decision_outcome_v2_schema_contract(connection)
+
+
+def _verify_personal_research_policy_context_schema_contract(connection) -> None:
+    """Verify replayable immutable Portfolio Policy evaluation audits."""
+
+    _verify_decision_outcome_v2_schema_contract(connection)
+    columns = {
+        row[1]: row
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info('portfolio_policy_evaluations')"
+        ).all()
+    }
+    column = columns.get('portfolio_context_json')
+    if column is None:
+        raise RuntimeError(
+            'Portfolio Policy context schema is incomplete: '
+            'portfolio_context_json is missing'
+        )
+    if (
+        _normalize_sql_contract(column[2]) != 'text'
+        or not bool(column[3])
+        or _normalize_sql_default(column[4]) != '{}'
+    ):
+        raise RuntimeError(
+            'Portfolio Policy context column has incompatible type, '
+            'nullability, or default'
+        )
+    invalid_count = connection.exec_driver_sql(
+        "SELECT count(*) FROM portfolio_policy_evaluations "
+        "WHERE NOT json_valid(portfolio_context_json) "
+        "OR json_type(portfolio_context_json) <> 'object'"
+    ).scalar_one()
+    if int(invalid_count) != 0:
+        raise RuntimeError('Portfolio Policy context contains invalid JSON rows')
+
+    actual_triggers = {
+        row[0]: row[1]
+        for row in connection.exec_driver_sql(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'trigger'"
+        ).all()
+    }
+    for trigger_name, expected_sql in (
+        _PERSONAL_RESEARCH_POLICY_CONTEXT_TRIGGER_SQL.items()
+    ):
+        actual_sql = actual_triggers.get(trigger_name)
+        if actual_sql is None:
+            raise RuntimeError(
+                f'Portfolio Policy context trigger is missing: {trigger_name}'
+            )
+        normalized_actual = _normalize_sql_contract(actual_sql).replace(
+            'create trigger if not exists',
+            'create trigger',
+            1,
+        )
+        normalized_expected = _normalize_sql_contract(expected_sql).replace(
+            'create trigger if not exists',
+            'create trigger',
+            1,
+        )
+        if normalized_actual != normalized_expected:
+            raise RuntimeError(
+                f'Portfolio Policy context trigger is incompatible: {trigger_name}'
+            )
+    for trigger_name, expected_sql in _RESEARCH_BUDGET_TRIGGER_SQL.items():
+        actual_sql = actual_triggers.get(trigger_name)
+        if actual_sql is None:
+            raise RuntimeError(
+                f'Research budget trigger is missing: {trigger_name}'
+            )
+        normalized_actual = _normalize_sql_contract(actual_sql).replace(
+            'create trigger if not exists',
+            'create trigger',
+            1,
+        )
+        normalized_expected = _normalize_sql_contract(expected_sql).replace(
+            'create trigger if not exists',
+            'create trigger',
+            1,
+        )
+        if normalized_actual != normalized_expected:
+            raise RuntimeError(
+                f'Research budget trigger is incompatible: {trigger_name}'
+            )
+
+
+def run_personal_research_policy_context_schema_upgrade(engine) -> None:
+    """Add and verify replayable immutable Portfolio Policy context."""
+
+    if engine.url.get_backend_name() != 'sqlite':
+        raise RuntimeError(
+            'Personal research Policy context migration only supports SQLite'
+        )
+    with engine.connect() as connection:
+        connection.exec_driver_sql('BEGIN IMMEDIATE')
+        try:
+            columns = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info('portfolio_policy_evaluations')"
+                ).all()
+            }
+            if 'portfolio_context_json' not in columns:
+                connection.exec_driver_sql(
+                    'ALTER TABLE portfolio_policy_evaluations ADD COLUMN '
+                    'portfolio_context_json '
+                    + _PERSONAL_RESEARCH_POLICY_CONTEXT_COLUMN_SQL
+                )
+            for trigger_sql in (
+                _PERSONAL_RESEARCH_POLICY_CONTEXT_TRIGGER_SQL.values()
+            ):
+                connection.exec_driver_sql(trigger_sql)
+            for trigger_sql in _RESEARCH_BUDGET_TRIGGER_SQL.values():
+                connection.exec_driver_sql(trigger_sql)
+            _verify_personal_research_policy_context_schema_contract(connection)
+        except BaseException:
+            connection.rollback()
+            raise
+        else:
+            connection.commit()
 
 
 class _StorageSchemaConvergence(DatabaseManager):

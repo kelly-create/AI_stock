@@ -17,6 +17,22 @@ export type DecisionSignalFeedbackValue = 'useful' | 'not_useful';
 export type DecisionSignalFeedbackSource = 'web' | 'api';
 export type DecisionProfile = 'conservative' | 'balanced' | 'aggressive';
 export type DecisionProfileDisplay = DecisionProfile | 'unknown';
+export type DecisionSignalResearchStance =
+  | 'strong_bullish'
+  | 'bullish'
+  | 'watch'
+  | 'neutral'
+  | 'bearish'
+  | 'avoid';
+export type DecisionSignalAccountAction =
+  | 'observe'
+  | 'open_candidate'
+  | 'add_candidate'
+  | 'hold'
+  | 'reduce_candidate'
+  | 'exit_candidate';
+export type DecisionSignalPolicyMode = 'off' | 'shadow' | 'enforce';
+export type DecisionSignalPolicyDecision = 'allow' | 'downgrade' | 'block' | 'no_action';
 
 export interface DecisionSignalItem {
   id: number;
@@ -32,6 +48,9 @@ export interface DecisionSignalItem {
   triggerSource: string;
   action: DecisionAction;
   actionLabel?: string | null;
+  /** Execution-facing action resolved by the server; accountAction wins over legacy action. */
+  primaryAction?: DecisionAction | null;
+  primaryActionSource?: 'account_action' | 'legacy_action' | null;
   confidence?: number | null;
   score?: number | null;
   horizon?: DecisionSignalHorizon | null;
@@ -46,6 +65,27 @@ export interface DecisionSignalItem {
   catalystSummary?: string | null;
   evidence?: DecisionSignalOpaqueJson;
   dataQualitySummary?: DecisionSignalOpaqueJson;
+  researchStance?: DecisionSignalResearchStance | null;
+  accountAction?: DecisionSignalAccountAction | null;
+  valueQualityScore?: number | null;
+  trendTimingScore?: number | null;
+  catalystScore?: number | null;
+  riskScore?: number | null;
+  evidenceQualityScore?: number | null;
+  researchSnapshotHash?: string | null;
+  policyVersion?: string | null;
+  policyHash?: string | null;
+  policyEvaluationHash?: string | null;
+  portfolioSnapshotRef?: string | null;
+  promptVersion?: string | null;
+  catalysts?: string[] | null;
+  invalidators?: string[] | null;
+  unknowns?: string[] | null;
+  evidenceRefs?: string[] | null;
+  policyMode?: DecisionSignalPolicyMode | null;
+  policyDecision?: DecisionSignalPolicyDecision | null;
+  wouldBlock?: boolean;
+  policyReasons?: string[];
   planQuality: DecisionSignalPlanQuality;
   status: DecisionSignalStatus;
   expiresAt?: string | null;

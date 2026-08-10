@@ -2227,6 +2227,43 @@ class AnalysisHistoryTestCase(unittest.TestCase):
                 1,
             )
 
+    def test_delete_analysis_history_records_preserves_formal_research_signal(self) -> None:
+        """History cleanup must not destroy immutable personal-research lineage."""
+        record_id = self._save_history("query_delete_formal_research")
+
+        with self.db.session_scope() as session:
+            session.add(DecisionSignalRecord(
+                stock_code="600519",
+                stock_name="贵州茅台",
+                market="cn",
+                source_type="analysis",
+                source_report_id=record_id,
+                trace_id="trace-delete-formal-research",
+                market_phase="intraday",
+                trigger_source="personal_research",
+                action="buy",
+                action_label="买入",
+                reason="formal personal research",
+                research_snapshot_hash="a" * 64,
+                policy_evaluation_hash="b" * 64,
+                policy_mode="shadow",
+                plan_quality="complete",
+                status="active",
+            ))
+
+        deleted = self.db.delete_analysis_history_records([record_id])
+        self.assertEqual(deleted, 1)
+
+        with self.db.get_session() as session:
+            self.assertIsNone(
+                session.query(AnalysisHistory).filter(AnalysisHistory.id == record_id).first()
+            )
+            preserved = session.query(DecisionSignalRecord).filter(
+                DecisionSignalRecord.trace_id == "trace-delete-formal-research"
+            ).one()
+            self.assertEqual(preserved.source_report_id, record_id)
+            self.assertEqual(preserved.research_snapshot_hash, "a" * 64)
+
     def test_delete_analysis_history_records_cleans_only_existing_ids_in_mixed_batch(self) -> None:
         """混合存在/不存在 ID 时，只清理实际存在历史记录的关联数据。"""
         record_id = self._save_history("query_delete_mixed")

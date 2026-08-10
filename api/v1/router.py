@@ -18,12 +18,16 @@ from api.v1.endpoints import (
     analysis,
     auth,
     backtest,
+    decision_outcomes_v2,
     decision_signals,
     health,
     history,
     intelligence,
+    personal_research_artifacts,
+    personal_research_runs,
     portfolio,
     research,
+    research_watchlist,
     stocks,
     system_config,
     usage,
@@ -94,6 +98,12 @@ router.include_router(
 )
 
 router.include_router(
+    decision_outcomes_v2.router,
+    prefix="/decision-signals",
+    tags=["DecisionSignals"],
+)
+
+router.include_router(
     decision_signals.router,
     prefix="/decision-signals",
     tags=["DecisionSignals"]
@@ -113,6 +123,24 @@ router.include_router(
 
 router.include_router(
     research.router,
+    prefix="/research",
+    tags=["Research"],
+)
+
+router.include_router(
+    research_watchlist.router,
+    prefix="/research",
+    tags=["Research"],
+)
+
+router.include_router(
+    personal_research_artifacts.router,
+    prefix="/research",
+    tags=["Research"],
+)
+
+router.include_router(
+    personal_research_runs.router,
     prefix="/research",
     tags=["Research"],
 )

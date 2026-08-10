@@ -37,7 +37,8 @@ This is the entry point for project documentation. The README covers the project
 | [LiteLLM YAML Example](examples/litellm_config.example.yaml) | Example LiteLLM multi-provider configuration |
 | [Notification Baseline](notifications.md) <sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub> (Chinese-only) | WeChat Work, Feishu, Telegram, Discord, Slack, Email, and other notification channels |
 | [Tushare Stock List Guide](TUSHARE_STOCK_LIST_GUIDE.md) <sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub> (Chinese-only) | Tushare stock-list configuration and usage notes |
-| [Personal Research Rollout](personal-research-rollout.md) <sub><sub>![P1 Badge](https://img.shields.io/badge/P1-yellow?style=flat)</sub></sub> (Chinese-only) | Explicit migrations, Durable Worker, Tushare data/factors, Research Evidence, Bounded Debate, read-only API/Web visibility, and staged flags |
+| [Personal Research Rollout](personal-research-rollout.md) <sub><sub>![P1 Badge](https://img.shields.io/badge/P1-yellow?style=flat)</sub></sub> (Chinese-only) | Original PR0–PR6 stages, explicit migrations, default-off flags, rollout dependencies, and production acceptance order |
+| [Personal Research PR0–PR6 Production Acceptance Record](personal-research-production-acceptance.md) <sub><sub>![P1 Badge](https://img.shields.io/badge/P1-yellow?style=flat)</sub></sub> (Chinese-only) | Release identity, offline/migration/backup/Docker/flag-off/canary/seven-session Shadow gates, evidence template, and rollback rules |
 
 ## Usage Topics
 
@@ -47,6 +48,9 @@ This is the entry point for project documentation. The README covers the project
 | [Bot Platform Docs](bot/) <sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub> (Chinese-only) | Feishu, DingTalk, Discord, and related Bot configuration screenshots and notes |
 | [Real-Time Alert Center](alerts.md) <sub><sub>![P4 Badge](https://img.shields.io/badge/P4-yellow?style=flat)</sub></sub> (Chinese-only) | EventMonitor baseline, Web rule management, notification attempts, cooldown state, and phase boundaries |
 | [DecisionSignal Topic](decision-signals.md) <sub><sub>![P7 Badge](https://img.shields.io/badge/P7-orange?style=flat)</sub></sub> (Chinese-only) | AI signal fields, API, Web display, alert/notification/portfolio-risk linkage, outcome evaluation, redaction, migration, and rollback |
+| [Personal Research Decision Outcome v2](decision-outcome-v2.md) <sub><sub>![P1 Badge](https://img.shields.io/badge/P1-yellow?style=flat)</sub></sub> (Chinese-only) | T+1 executability, 5/10/20-session outcomes, MFE/MAE, CSI 300/SW1 excess returns, calibration, API/Web, scheduling, notifications, and rollback |
+| [Personal Research Watchlist And Reconciliation](personal-research-watchlist-reconciliation.md) <sub><sub>![P1 Badge](https://img.shields.io/badge/P1-yellow?style=flat)</sub></sub> (Chinese-only) | Enhanced/legacy/holding universe, tombstones, absolute opening/reconciliation state, and API/Web behavior |
+| [Personal Research Runs, Skills, Debate, And Thesis](personal-research-execution-artifacts.md) <sub><sub>![P1 Badge](https://img.shields.io/badge/P1-yellow?style=flat)</sub></sub> (Chinese-only) | Durable runs, modes/budgets, five Skills, conditional Debate, Verifier/Judge, Policy Gate, Thesis, and read-only API/Web contracts |
 | [Analysis Context Pack Contract, Runtime Consumption, And Visibility](analysis-context-pack.md) <sub><sub>![P6 Badge](https://img.shields.io/badge/P6-orange?style=flat)</sub></sub> (Chinese-only) | AnalysisContextPack first-scope boundaries, field quality states, P1/P2 internal contracts, P3 prompt-summary consumption, P4 history/API/Web low-sensitivity visibility, P5 data-quality scoring, and P6 migration/rollback notes, plus source anchors; the full guide adds #1386 market-phase analysis, migration, and rollback entry points |
 | [Image Extraction Prompt](image-extract-prompt.md) <sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub> (Chinese-only) | Prompt and boundaries for extracting stock information from images |
 | [OpenClaw Skill Integration](openclaw-skill-integration.md) <sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub> (Chinese-only) | OpenClaw / Skill external integration notes |
@@ -68,7 +72,8 @@ This is the entry point for project documentation. The README covers the project
 | Document | Contents |
 | --- | --- |
 | [API Spec](architecture/api_spec.json) | FastAPI OpenAPI artifact |
-| [Personal Research Rollout](personal-research-rollout.md) <sub><sub>![P1 Badge](https://img.shields.io/badge/P1-yellow?style=flat)</sub></sub> (Chinese-only) | PR0–PR4 migration, durable jobs, immutable research data/factors/Evidence/Bounded Debate, Outbox behavior, visibility, and rollout order |
+| [Personal Research Rollout](personal-research-rollout.md) <sub><sub>![P1 Badge](https://img.shields.io/badge/P1-yellow?style=flat)</sub></sub> (Chinese-only) | Original PR0–PR6 scope, immutable research assets, staged rollout, and production acceptance boundaries |
+| [Personal Research Execution And Artifact Contract](personal-research-execution-artifacts.md) <sub><sub>![P1 Badge](https://img.shields.io/badge/P1-yellow?style=flat)</sub></sub> (Chinese-only) | Implemented run, Skill, Verifier/Judge, Thesis, and Policy contracts, including Decision Outcome v1/v2 separation |
 | [Contributing Guide (EN)](CONTRIBUTING_EN.md) | Issues, pull requests, tests, documentation sync, and collaboration expectations |
 
 ## Languages

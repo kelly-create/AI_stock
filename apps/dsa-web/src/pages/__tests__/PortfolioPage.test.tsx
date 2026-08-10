@@ -28,6 +28,10 @@ const {
   createAccount,
   deleteAccount,
   analyzePosition,
+  listReconciliations,
+  previewReconciliation,
+  applyReconciliation,
+  getReconciliation,
   listDecisionSignals,
   getLatestDecisionSignals,
 } = vi.hoisted(() => ({
@@ -50,6 +54,10 @@ const {
   createAccount: vi.fn(),
   deleteAccount: vi.fn(),
   analyzePosition: vi.fn(),
+  listReconciliations: vi.fn(),
+  previewReconciliation: vi.fn(),
+  applyReconciliation: vi.fn(),
+  getReconciliation: vi.fn(),
   listDecisionSignals: vi.fn(),
   getLatestDecisionSignals: vi.fn(),
 }));
@@ -82,6 +90,10 @@ vi.mock('../../api/portfolio', () => ({
     createAccount,
     deleteAccount,
     analyzePosition,
+    listReconciliations,
+    previewReconciliation,
+    applyReconciliation,
+    getReconciliation,
   },
 }));
 
@@ -333,6 +345,10 @@ describe('PortfolioPage FX refresh', () => {
       message: '分析任务已加入队列: HK00700',
       analysisPhase: 'auto',
     });
+    listReconciliations.mockResolvedValue({ items: [] });
+    previewReconciliation.mockResolvedValue({});
+    applyReconciliation.mockResolvedValue({});
+    getReconciliation.mockResolvedValue({});
     getLatestDecisionSignals.mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 1 });
   });
 
@@ -455,6 +471,41 @@ describe('PortfolioPage FX refresh', () => {
     expect(screen.getByText('600519 · Sell')).toBeInTheDocument();
     expect(screen.queryByText('600519 · 卖出')).not.toBeInTheDocument();
     expect(screen.queryByText('600519 · sell')).not.toBeInTheDocument();
+  });
+
+  it('prefers the formal account action over a conflicting legacy risk action', async () => {
+    getRisk.mockResolvedValueOnce(makeRisk({
+      decisionSignalRisk: {
+        available: true,
+        total: 1,
+        actions: { sell: 0, reduce: 0, alert: 0 },
+        items: [
+          {
+            accountId: 1,
+            symbol: '600519',
+            market: 'cn',
+            signal: makeDecisionSignal({
+              id: 204,
+              action: 'buy',
+              actionLabel: 'Buy',
+              accountAction: 'observe',
+              primaryAction: 'watch',
+              primaryActionSource: 'account_action',
+              policyMode: 'enforce',
+              policyDecision: 'block',
+              wouldBlock: true,
+            }),
+          },
+        ],
+      },
+    }));
+
+    renderEnglishPage();
+
+    await waitForInitialLoad();
+
+    expect(screen.getByText('600519 · Observe')).toBeInTheDocument();
+    expect(screen.queryByText('600519 · Buy')).not.toBeInTheDocument();
   });
 
   it('renders portfolio decision signal risk fail-open state', async () => {
@@ -1107,6 +1158,6 @@ describe('PortfolioPage FX refresh', () => {
     await waitFor(() => expect(deleteAccount).toHaveBeenCalledWith(1));
     await waitFor(() => expect(getAccounts).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.queryByText('Main (#1)')).not.toBeInTheDocument());
-    expect(screen.getByRole('option', { name: 'Alt (#2)' })).toBeInTheDocument();
+    expect(screen.getAllByRole('option', { name: 'Alt (#2)' })).toHaveLength(2);
   });
 });

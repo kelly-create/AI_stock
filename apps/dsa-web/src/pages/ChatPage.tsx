@@ -290,7 +290,13 @@ const ChatPage: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    void loadWatchlist();
+    let active = true;
+    queueMicrotask(() => {
+      if (active) void loadWatchlist();
+    });
+    return () => {
+      active = false;
+    };
   }, [loadWatchlist]);
 
   const stockInWatchlist = useCallback(
@@ -369,8 +375,15 @@ const ChatPage: React.FC = () => {
     if (!restoredContext) {
       return;
     }
-    setActiveStockContext(restoredContext);
-    setActiveStockCode(restoredContext.stock_code);
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      setActiveStockContext(restoredContext);
+      setActiveStockCode(restoredContext.stock_code);
+    });
+    return () => {
+      active = false;
+    };
   }, [activeStockContext, messages, sessionId]);
 
   const syncScrollState = useCallback(() => {
@@ -408,7 +421,8 @@ const ChatPage: React.FC = () => {
     const shouldAutoScroll = shouldStickToBottomRef.current;
     if (!shouldAutoScroll) {
       if (messages.length > 0 || progressSteps.length > 0 || loading) {
-        setShowJumpToBottom(true);
+        const frame = window.requestAnimationFrame(() => setShowJumpToBottom(true));
+        return () => window.cancelAnimationFrame(frame);
       }
       return;
     }
@@ -471,7 +485,14 @@ const ChatPage: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    void loadAgentStatus();
+    let active = true;
+    queueMicrotask(() => {
+      if (active) void loadAgentStatus();
+    });
+    return () => {
+      active = false;
+      agentStatusRequestIdRef.current += 1;
+    };
   }, [loadAgentStatus]);
 
   useEffect(() => {
@@ -637,39 +658,44 @@ const ChatPage: React.FC = () => {
     const recordId = parseFollowUpRecordId(searchParams.get('recordId'));
 
     if (!stock) {
-      setSearchParams({}, { replace: true });
+      if (searchParams.size > 0) {
+        setSearchParams({}, { replace: true });
+      }
       return;
     }
 
-    const hydrationToken = ++followUpHydrationTokenRef.current;
-    setInput(buildFollowUpPrompt(stock, name));
-    setActiveStockCode(stock);
-    setActiveStockContext({
-      stock_code: stock,
-      stock_name: name,
-    });
-    followUpContextRef.current = {
-      stock_code: stock,
-      stock_name: name,
-    };
-    if (recordId !== undefined) {
-      setIsFollowUpContextLoading(true);
-    }
-    void resolveChatFollowUpContext({
-      stockCode: stock,
-      stockName: name,
-      recordId,
-    }).then((context) => {
-      if (!isMountedRef.current || followUpHydrationTokenRef.current !== hydrationToken) {
-        return;
+    queueMicrotask(() => {
+      if (!isMountedRef.current) return;
+      const hydrationToken = ++followUpHydrationTokenRef.current;
+      setInput(buildFollowUpPrompt(stock, name));
+      setActiveStockCode(stock);
+      setActiveStockContext({
+        stock_code: stock,
+        stock_name: name,
+      });
+      followUpContextRef.current = {
+        stock_code: stock,
+        stock_name: name,
+      };
+      if (recordId !== undefined) {
+        setIsFollowUpContextLoading(true);
       }
-      followUpContextRef.current = context;
-    }).finally(() => {
-      if (isMountedRef.current && followUpHydrationTokenRef.current === hydrationToken) {
-        setIsFollowUpContextLoading(false);
-      }
+      void resolveChatFollowUpContext({
+        stockCode: stock,
+        stockName: name,
+        recordId,
+      }).then((context) => {
+        if (!isMountedRef.current || followUpHydrationTokenRef.current !== hydrationToken) {
+          return;
+        }
+        followUpContextRef.current = context;
+      }).finally(() => {
+        if (isMountedRef.current && followUpHydrationTokenRef.current === hydrationToken) {
+          setIsFollowUpContextLoading(false);
+        }
+      });
+      setSearchParams({}, { replace: true });
     });
-    setSearchParams({}, { replace: true });
   }, [searchParams, setSearchParams]);
 
   const handleSend = useCallback(

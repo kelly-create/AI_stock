@@ -469,7 +469,7 @@ def test_static_api_spec_tracks_cancel_stage_and_resumable_sse_contract() -> Non
             "anyOf"
         ]
     } == {
-        "#/components/schemas/DuplicateTaskError",
+        "#/components/schemas/DuplicateTaskErrorResponse",
         "#/components/schemas/ErrorResponse",
     }
     assert analyze_responses["504"]["content"]["application/json"]["schema"] == {

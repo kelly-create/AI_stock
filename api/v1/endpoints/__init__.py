@@ -20,8 +20,12 @@ from api.v1.endpoints import (
     usage,
     portfolio,
     alerts,
+    decision_outcomes_v2,
     decision_signals,
     screening,
+    personal_research_artifacts,
+    personal_research_runs,
+    research_watchlist,
 )
 __all__ = [
     "health",
@@ -35,6 +39,10 @@ __all__ = [
     "usage",
     "portfolio",
     "alerts",
+    "decision_outcomes_v2",
     "decision_signals",
     "screening",
+    "personal_research_artifacts",
+    "personal_research_runs",
+    "research_watchlist",
 ]

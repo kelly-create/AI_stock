@@ -15,7 +15,18 @@ from unittest.mock import ANY, MagicMock, patch
 _ORIGINAL_ENVIRON = dict(os.environ)
 _MODULE_TEMP_DIR = tempfile.TemporaryDirectory()
 _MODULE_ENV_FILE = Path(_MODULE_TEMP_DIR.name) / ".env"
-_MODULE_ENV_FILE.write_text("STOCK_LIST=600519,000001\n", encoding="utf-8")
+_MODULE_DB_FILE = Path(_MODULE_TEMP_DIR.name) / "analysis-api-contract.db"
+_MODULE_ENV_FILE.write_text(
+    "\n".join(
+        (
+            "STOCK_LIST=600519,000001",
+            f"DATABASE_PATH={_MODULE_DB_FILE.as_posix()}",
+            "DATABASE_MIGRATION_MODE=auto",
+            "",
+        )
+    ),
+    encoding="utf-8",
+)
 os.environ["ENV_FILE"] = str(_MODULE_ENV_FILE)
 
 from tests.litellm_stub import ensure_litellm_stub
@@ -53,6 +64,10 @@ from src.services.task_queue import AnalysisTaskQueue, TaskInfo as QueueTaskInfo
 
 
 def tearDownModule() -> None:
+    from src.storage import DatabaseManager
+
+    DatabaseManager.reset_instance()
+    Config.reset_instance()
     current_test = os.environ.get("PYTEST_CURRENT_TEST")
     for key in list(os.environ):
         if key == "PYTEST_CURRENT_TEST":
@@ -1740,6 +1755,53 @@ class AnalysisApiContractTestCase(unittest.TestCase):
 
         self.assertEqual(result["stock_name"], "Unnamed Stock")
         self.assertEqual(result["report"]["meta"]["stock_name"], "Unnamed Stock")
+
+    def test_build_analysis_response_exposes_skill_artifacts_without_thesis(self) -> None:
+        service = object.__new__(AnalysisService)
+        analysis_result = SimpleNamespace(
+            code="600519",
+            name="贵州茅台",
+            current_price=1234.56,
+            change_pct=1.23,
+            model_used="test-model",
+            analysis_summary="summary",
+            operation_advice="hold",
+            trend_prediction="up",
+            sentiment_score=80,
+            news_summary="news",
+            technical_analysis="tech",
+            fundamental_analysis="fundamental",
+            risk_warning="risk",
+            get_sniper_points=lambda: {},
+        )
+        analysis_result._personal_research_artifacts = SimpleNamespace(
+            research_snapshot_hash="a" * 64,
+            skill_execution_hashes={"personal-value-quality": "b" * 64},
+            debate_snapshot_hash=None,
+            debate_review_hash=None,
+        )
+        analysis_result.decision_signal_summary = {"id": 7}
+
+        response = service._build_analysis_response(
+            analysis_result,
+            "q-personal-artifacts",
+            report_type="full",
+        )
+
+        self.assertEqual(
+            response["personal_research"],
+            {
+                "contract_version": "personal-research-artifacts-v1",
+                "research_snapshot_hash": "a" * 64,
+                "skill_execution_hashes": {
+                    "personal-value-quality": "b" * 64,
+                },
+                "debate_snapshot_hash": None,
+                "debate_review_hash": None,
+                "thesis_hash": None,
+                "decision_signal": {"id": 7},
+            },
+        )
 
     def test_build_analysis_response_does_not_use_model_news_summary_as_retrieval_evidence(self) -> None:
         service = AnalysisService()

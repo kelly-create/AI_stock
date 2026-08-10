@@ -626,7 +626,13 @@ const SchedulerSettingsCard: React.FC<SchedulerSettingsCardProps> = ({
     if (!hasSchedulerSettings) {
       return;
     }
-    void refreshSchedulerStatus();
+    let active = true;
+    queueMicrotask(() => {
+      if (active) void refreshSchedulerStatus();
+    });
+    return () => {
+      active = false;
+    };
   }, [hasSchedulerSettings, refreshSchedulerStatus, statusRefreshToken]);
 
   useEffect(() => {

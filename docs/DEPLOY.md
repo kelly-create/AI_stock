@@ -137,6 +137,10 @@ docker compose -f ./docker/docker-compose.yml up -d --force-recreate analyzer se
 
 不可变 request、turn、snapshot 分别写入 `research_debate_requests`、`research_debate_turns`、`research_debate_snapshots`。所有写入与 JobEvent 绑定都受当前 durable lease 和取消状态 fence；失效或已取消 lease 不能提交产物。成功 stance 用 `research_debate_turn` 绑定，终止失败 stance 用仅含安全错误码的 `research_debate_failure` 绑定；重试只补未解析 stance，且 prompt/route 漂移会 fail closed。`research_debate_snapshot` JobEvent 记录实际消费任务，`research_snapshots.debate_snapshot_hash` 固定本轮 Debate，并同时保留 `evidence_snapshot_hash` lineage。request 的精确 messages 只属于持久化执行记录，任何 Debate API 都不得返回。
 
+Personal Research 的重试保证以“检查点已经持久化”为边界：已绑定的 Dataset、Debate stance、最终 Research Snapshot、五个 Skill、Review、Analysis History、DecisionSignal 和 Thesis 会复用或严格校验，不会再次执行其上游阶段；provider/LLM 已返回但对应检查点尚未提交的崩溃窗口仍可能重调，因此不承诺物理请求 exactly-once。主分析 LLM 的恢复检查点是成功写入的 Analysis History；一旦 History 已提交，Worker 会在任何 Provider、Debate 或主分析 LLM 调用前进入 terminal resume，只补缺失的确定性 Signal/Thesis 尾段。
+
+Formal Personal Research 不依赖通用 `SAVE_CONTEXT_SNAPSHOT` 开关保存完整诊断上下文。即使该开关为 `false`，History 仍会私有持久化仅供重放的最小块：冻结的市场阶段、Policy 模式、Policy 版本/hash、Gate 与服务端 Policy-context 代码指纹，以及服务端组合输入快照；该私有块会从 History/Analysis API 的 `context_snapshot` 中剥离。History-only retry 只能重放这份冻结输入，不读取当前运行时 Policy 模式或 Portfolio；私有块缺失/损坏，或 Policy/代码合同与冻结指纹不一致时必须 fail closed，不能用当前状态改写 Signal、Policy audit 或 Thesis。
+
 只读接口不依赖 `RESEARCH_DEBATE_ENABLED`，所以关闭写入开关后历史仍可读：
 
 - `GET /api/v1/research/debates`：至少提供 `job_id`、`research_snapshot_hash`、`stock_code` 之一；可选 `evidence_snapshot_hash`、带 UTC offset 的 `as_of`、opaque `cursor` 和 `limit`（默认 20、最大 100）。结果按 `as_of DESC, id DESC` 稳定分页，只返回 status、argument/open-question count、hash 与 lineage 摘要，不返回完整 Debate。
@@ -480,7 +484,7 @@ python scripts/sqlite_backup.py restore \
 docker-compose -f ./docker/docker-compose.yml up -d
 ```
 
-不要用 `cp` 或 `tar` 直接复制活动的 SQLite 主文件；WAL 中已提交的数据可能尚未合并到主文件。校验、恢复演练和生产替换的完整流程见 [SQLite 在线备份、校验与恢复](operations/sqlite-backup.md)。
+不要用 `cp` 或 `tar` 直接复制活动的 SQLite 主文件；WAL 中已提交的数据可能尚未合并到主文件。校验、恢复演练和生产替换的完整流程见 [SQLite 在线备份、校验与恢复](operations/sqlite-backup.md)。迁移前先用当前已部署版本的密封工具和旧 Schema 清单生成 rollback 备份；迁移后再用候选版本当前默认清单逐表核对关注池、Reconciliation、预算、Policy、Skill/Review/Thesis 和 Outcome v2。不得用候选新清单直接替代迁移前备份，也不得以旧版核心表清单签收迁移后的备份。
 
 ---
 

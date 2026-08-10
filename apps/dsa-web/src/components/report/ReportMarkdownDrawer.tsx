@@ -1,8 +1,10 @@
 import type React from 'react';
-import { Component, lazy, Suspense, useCallback, useMemo, useState } from 'react';
+import { Component, useCallback, useEffect, useState } from 'react';
+import type { ComponentType } from 'react';
 import type { ReportLanguage } from '../../types/analysis';
 import { getReportText, normalizeReportLanguage } from '../../utils/reportLanguage';
 import { Drawer } from '../common/Drawer';
+import type { ReportMarkdownPanelProps } from './ReportMarkdownPanel';
 
 interface ReportMarkdownDrawerProps {
   recordId: number;
@@ -60,6 +62,32 @@ const ReportMarkdownLoadingState: React.FC<{ message: string }> = ({ message }) 
   </div>
 );
 
+const ReportMarkdownPanelLoader: React.FC<ReportMarkdownPanelProps & { loadingMessage: string }> = ({
+  loadingMessage,
+  ...panelProps
+}) => {
+  const [Panel, setPanel] = useState<ComponentType<ReportMarkdownPanelProps> | null>(null);
+  const [loadError, setLoadError] = useState<unknown>(null);
+
+  useEffect(() => {
+    let active = true;
+    void import('./ReportMarkdownPanel')
+      .then((module) => {
+        if (active) setPanel(() => module.ReportMarkdownPanel);
+      })
+      .catch((error: unknown) => {
+        if (active) setLoadError(error);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  if (loadError) throw loadError;
+  if (!Panel) return <ReportMarkdownLoadingState message={loadingMessage} />;
+  return <Panel {...panelProps} />;
+};
+
 const ReportMarkdownChunkErrorState: React.FC<{
   message: string;
   dismissText: string;
@@ -91,11 +119,6 @@ export const ReportMarkdownDrawer: React.FC<ReportMarkdownDrawerProps> = ({
 }) => {
   const [isOpen, setIsOpen] = useState(true);
   const text = getReportText(normalizeReportLanguage(reportLanguage));
-  const LazyReportMarkdownPanel = useMemo(
-    () => lazy(() => import('./ReportMarkdownPanel').then((m) => ({ default: m.ReportMarkdownPanel }))),
-    [],
-  );
-
   const handleClose = useCallback(() => {
     setIsOpen(false);
     setTimeout(onClose, 300);
@@ -119,15 +142,14 @@ export const ReportMarkdownDrawer: React.FC<ReportMarkdownDrawerProps> = ({
           />
         )}
       >
-        <Suspense fallback={<ReportMarkdownLoadingState message={text.loadingReport} />}>
-          <LazyReportMarkdownPanel
-            recordId={recordId}
-            stockName={stockName}
-            stockCode={stockCode}
-            reportLanguage={reportLanguage}
-            onRequestClose={handleClose}
-          />
-        </Suspense>
+        <ReportMarkdownPanelLoader
+          recordId={recordId}
+          stockName={stockName}
+          stockCode={stockCode}
+          reportLanguage={reportLanguage}
+          onRequestClose={handleClose}
+          loadingMessage={text.loadingReport}
+        />
       </ReportMarkdownDrawerErrorBoundary>
     </Drawer>
   );

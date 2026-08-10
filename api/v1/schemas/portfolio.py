@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 from datetime import date
+import math
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class PortfolioAccountCreateRequest(BaseModel):
@@ -294,3 +295,112 @@ class PortfolioRiskResponse(BaseModel):
     drawdown: Dict[str, Any] = Field(default_factory=dict)
     stop_loss: Dict[str, Any] = Field(default_factory=dict)
     decision_signal_risk: PortfolioDecisionSignalRiskBlock = Field(default_factory=PortfolioDecisionSignalRiskBlock)
+
+
+class PortfolioReconciliationCashTarget(BaseModel):
+    currency: str = Field(..., min_length=3, max_length=8)
+    balance: float
+
+    @field_validator("balance", mode="before")
+    @classmethod
+    def validate_balance_number(cls, value):
+        if isinstance(value, bool):
+            raise ValueError("balance must be a finite number")
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("balance must be a finite number") from exc
+        if not math.isfinite(numeric):
+            raise ValueError("balance must be a finite number")
+        return numeric
+
+
+class PortfolioReconciliationPositionTarget(BaseModel):
+    stock_code: str = Field(..., min_length=1, max_length=16)
+    market: Literal["cn", "hk", "us", "jp", "kr", "tw"]
+    currency: str = Field(..., min_length=3, max_length=8)
+    quantity: float = Field(..., ge=0)
+    total_cost: float = Field(..., ge=0)
+
+    @field_validator("quantity", "total_cost", mode="before")
+    @classmethod
+    def validate_position_number(cls, value):
+        if isinstance(value, bool):
+            raise ValueError("position values must be finite numbers")
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("position values must be finite numbers") from exc
+        if not math.isfinite(numeric):
+            raise ValueError("position values must be finite numbers")
+        return numeric
+
+
+class PortfolioReconciliationPreviewRequest(BaseModel):
+    event_type: Literal["opening", "adjustment"]
+    effective_date: date
+    cash: List[PortfolioReconciliationCashTarget]
+    positions: List[PortfolioReconciliationPositionTarget]
+    source: str = Field(..., min_length=1, max_length=64)
+    note: Optional[str] = Field(None, max_length=255)
+
+
+class PortfolioReconciliationPreviewResponse(BaseModel):
+    id: int
+    preview_token: str
+    event_type: str
+    effective_date: str
+    expires_at: str
+    input_hash: str
+    book_hash: str
+    target_hash: str
+    diff: Dict[str, Any] = Field(default_factory=dict)
+    warnings: List[str] = Field(default_factory=list)
+
+
+class PortfolioReconciliationApplyRequest(BaseModel):
+    preview_token: str = Field(..., min_length=20, max_length=256)
+    idempotency_key: str = Field(..., min_length=1, max_length=128)
+
+
+class PortfolioReconciliationItem(BaseModel):
+    id: int
+    account_id: int
+    event_type: str
+    status: str
+    event_version: Optional[int] = None
+    effective_date: str
+    input_hash: str
+    book_hash: Optional[str] = None
+    target_hash: Optional[str] = None
+    source: str
+    note: Optional[str] = None
+    warnings: List[str] = Field(default_factory=list)
+    expires_at: Optional[str] = None
+    applied_at: Optional[str] = None
+    created_at: Optional[str] = None
+    adjustment_count: Optional[int] = None
+
+
+class PortfolioReconciliationAdjustmentItem(BaseModel):
+    id: int
+    identity_key: str
+    adjustment_type: str
+    stock_code: Optional[str] = None
+    market: Optional[str] = None
+    currency: str
+    quantity_delta: float
+    total_cost_delta: float
+    cash_delta: float
+    before: Dict[str, Any]
+    after: Dict[str, Any]
+    created_at: Optional[str] = None
+
+
+class PortfolioReconciliationDetailResponse(PortfolioReconciliationItem):
+    target: Dict[str, Any]
+    adjustments: List[PortfolioReconciliationAdjustmentItem] = Field(default_factory=list)
+
+
+class PortfolioReconciliationListResponse(BaseModel):
+    items: List[PortfolioReconciliationItem] = Field(default_factory=list)
