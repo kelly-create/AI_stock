@@ -27,25 +27,26 @@
 
 | 项目 | 记录值 |
 | --- | --- |
-| Git commit / tree | `PENDING` |
+| Git feature commit / tree | `abcd935b9ab9b6b4c8af15e10d011033ac237acd` / `0ffeeb2f4fbfe10a82bdeb28c06881b3786a3361` |
 | Docker image digest | `PENDING` |
 | Compose 与渲染后配置 SHA-256 | `PENDING` |
 | SQLite 迁移 head | `PENDING` |
-| 静态 OpenAPI SHA-256 | `PENDING` |
-| Web build artifact SHA-256 | `PENDING` |
+| 静态 OpenAPI SHA-256 | `9f725255c5c9eebe68a4c4fb34ab64c75f6fb4b4aafd2ced538f9ff00ce1f6e4` |
+| Web build artifact SHA-256 | `81a51c1c30e1b28b1ac8b4e603ea5bfdbf0d9bcd8204c9ffe4ba07d6777b9245` |
 | 迁移前 rollback backup / manifest | `PENDING` |
 | 迁移后 candidate backup / manifest | `PENDING` |
 | raw archive / manifest | `PENDING` |
 | 部署时间、执行人、验收人 | `PENDING` |
 
-### 2026-08-10 未提交候选的离线证据
+### 2026-08-11 PR #4 候选的离线与 CI 证据
 
-- 基线为 `94698b848f257b34fb5d2837a989b838ef82676f`；候选尚未提交，因此 Git commit、镜像和生产身份仍必须保持 `PENDING`。
+- 基线为 `94698b848f257b34fb5d2837a989b838ef82676f`；功能候选提交为 `abcd935b9ab9b6b4c8af15e10d011033ac237acd`，tree 为 `0ffeeb2f4fbfe10a82bdeb28c06881b3786a3361`。本节的验收状态回填属于 docs-only 收口；最终 PR head 与生产身份仍须以 PR #4 当前 Head CI、合并提交和密封镜像记录为准。
+- GitHub Actions [CI run 31404437702](https://github.com/kelly-create/AI_stock/actions/runs/31404437702) 对功能候选完成并通过：`ai-governance`、三片 `backend-tests`、汇总 `backend-gate`、`docker-build`（build、smoke、imports）和 `web-gate` 全部 `success`；Windows/macOS desktop-futu-package 因条件不适用而 `skipped`，不是失败。
 - 三路独立语义终审已覆盖 PR3/PR4、Durable Resume、PR5/PR6、配置热更新、迁移顺序和备份核心表，当前未发现剩余 P0/P1。
-- Web 最终字节基于既有、锁定版本的 `node_modules` 通过全量 ESLint、TypeScript、Vite production build；Vitest 为 110 个测试文件、1154 passed、2 skipped。当前环境没有 npm，尚未执行 clean `npm ci`，所以 G3 必须等 GitHub `web-gate` 后才能关闭。可视验收截图只存于仓库外证据目录，不作为仓库文件提交。
+- Web 最终字节在本地基于锁定依赖通过全量 ESLint、TypeScript、Vite production build；Vitest 为 110 个测试文件、1154 passed、2 skipped。GitHub `web-gate` 又从 clean `npm ci` 开始完成 lint 与 production build；三张页面验收截图已作为 [PR #4 评论附件](https://github.com/kelly-create/AI_stock/pull/4#issuecomment-5243134319) 发布，未作为仓库文件提交。
 - 静态 OpenAPI 当前 SHA-256 为 `9f725255c5c9eebe68a4c4fb34ab64c75f6fb4b4aafd2ced538f9ff00ce1f6e4`；47 个 Web build 文件的规范化 tree SHA-256 为 `81a51c1c30e1b28b1ac8b4e603ea5bfdbf0d9bcd8204c9ffe4ba07d6777b9245`。Web tree 算法为：递归枚举 `static/` regular files，按 POSIX 相对路径排序，逐行写入 `<relative-path>  <file-sha256>`，使用 LF 与末尾换行拼接后再计算 SHA-256。
 - 迁移测试为 31 passed、1 个 Windows 软链接能力跳过；候选版 SQLite 在线备份、严格校验、异名恢复演练得到 `quick_check=ok`、外键错误 0、55 张表。
-- Windows 等价 syntax、critical flake8、确定性 code/yfinance 门已通过；完整 `pytest -m "not network"` 仍受 Windows/Unix 子进程、SQLite 文件锁和时钟粒度差异影响，不能替代 GitHub Linux `backend-gate`，所以 G2 在远端阻断型 CI 通过前仍为 `PENDING`。
+- Windows 等价 syntax、critical flake8、确定性 code/yfinance 门已通过；完整本地 `pytest -m "not network"` 受 Windows/Unix 子进程、SQLite 文件锁和时钟粒度差异影响。权威 Linux CI 已通过三片离线测试与汇总 `backend-gate`，因此该本地平台差异不再阻断 G2。
 
 ## 门禁总表
 
@@ -53,8 +54,8 @@
 | --- | --- | --- | --- |
 | G0 范围 | 原始 PR0–PR6 逐项映射，无编号漂移或隐藏排除项 | `PASS` | rollout 阶段表、CHANGELOG、配置依赖图 |
 | G1 契约 | migrations、DB 约束、不可变 lineage、API/Pydantic、Web 类型、配置默认关闭 | `PASS` | 三路独立终审、静态 OpenAPI 与 runtime exact 对照、直接 SQL 反例 |
-| G2 后端 | Python compile/lint、focused 回归、`ci_gate.sh`、非网络 pytest | `PENDING` | 命令、退出码、测试计数、日志或 CI URL |
-| G3 Web | `npm ci`、全量 ESLint、Vitest、TypeScript、生产构建、关键页面视觉证据 | `PENDING` | 本地专项已 PASS；clean npm ci / GitHub web-gate 尚待执行 |
+| G2 后端 | Python compile/lint、focused 回归、`ci_gate.sh`、非网络 pytest | `PASS` | 本地专项证据；GitHub CI run 31404437702 三片 backend-tests 与 backend-gate |
+| G3 Web | `npm ci`、全量 ESLint、Vitest、TypeScript、生产构建、关键页面视觉证据 | `PASS` | 本地 1154 passed/2 skipped、ESLint/TypeScript/build；GitHub clean install/web-gate；PR 评论三图 |
 | G4 迁移 | 旧库检查、全量 apply、幂等 apply、失败注入回滚、约束/trigger 直写反例 | `PENDING` | 隔离旧库副本、migration markers、quick/FK/schema hash |
 | G5 备份恢复 | 迁移前旧工具备份、迁移后候选工具全表备份、raw 配对、异名隔离恢复 | `PENDING` | 两阶段 manifest、所有核心表计数、RTO、恢复后抽样 |
 | G6 镜像与编排 | Docker build/import smoke、normal/durable profiles、Worker heartbeat、唯一 Scheduler owner | `PENDING` | image labels/digest、Compose rendered diff、container health |
@@ -72,7 +73,7 @@
 | PR3 | watchlist/legacy/holding union、Opening/Reconciliation、预算、Policy shadow/enforce | `PASS` | `PENDING` |
 | PR4 | 五 Skill、模式/预算、条件 Debate、Verifier/Judge、immutable Thesis、durable resume | `PASS` | `PENDING` |
 | PR5 | T+1、5/10/20d、复权、MFE/MAE、CSI300/SW1 点时基准、四维校准 | `PASS` | `PENDING` |
-| PR6 | Web、OpenAPI、调度、通知、备份、部署与运维闭环 | `PENDING` | `PENDING` |
+| PR6 | Web、OpenAPI、调度、通知、备份、部署与运维闭环 | `PASS` | `PENDING` |
 
 ## Canary 与 Shadow 记录模板
 
@@ -111,4 +112,4 @@
 
 ## 当前结论
 
-截至本候选开发阶段，PR0–PR6 的代码范围与离线专项验收已经冻结并通过独立复核，但 GitHub Linux 阻断型 CI 和生产 G4–G9 尚未完成，因此当前结论仍是：**不可宣称整个项目已经正常上线，也不可启用 Policy Enforce。** 后续每关闭一个门禁，都应把固定版本、命令、哈希和生产证据回填到本文件；仅更新叙述而不附可复核证据不构成验收。
+截至本候选开发阶段，PR0–PR6 的代码范围、离线专项验收和 GitHub 阻断型 CI 已经冻结并通过独立复核，但生产 G4–G9 尚未完成，因此当前结论仍是：**不可宣称整个项目已经正常上线，也不可启用 Policy Enforce。** 后续每关闭一个门禁，都应把固定版本、命令、哈希和生产证据回填到本文件；仅更新叙述而不附可复核证据不构成验收。
