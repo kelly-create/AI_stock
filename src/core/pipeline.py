@@ -3138,6 +3138,42 @@ class StockAnalysisPipeline:
                 ].copy()
                 frame["date"] = parsed_dates.loc[frame.index]
             frame = frame.sort_values("date")
+
+        # Frozen Tushare ``daily`` snapshots intentionally contain only raw
+        # market columns.  The legacy fetcher path enriches those rows with
+        # moving averages before they reach this builder, so deriving the
+        # indicators here keeps both paths equivalent without reading mutable
+        # global history.  Existing provider-supplied values remain
+        # authoritative; only missing columns/cells are filled.
+        if "close" in frame.columns:
+            close_values = pd.to_numeric(frame["close"], errors="coerce")
+            for window in (5, 10, 20):
+                key = f"ma{window}"
+                derived = close_values.rolling(
+                    window=window, min_periods=1
+                ).mean().round(2)
+                if key in frame.columns:
+                    current = pd.to_numeric(frame[key], errors="coerce")
+                    frame[key] = current.where(current.notna(), derived)
+                else:
+                    frame[key] = derived
+        if "volume" in frame.columns:
+            volume_values = pd.to_numeric(frame["volume"], errors="coerce")
+            previous_average = (
+                volume_values.rolling(window=5, min_periods=1).mean().shift(1)
+            )
+            derived_ratio = volume_values.div(previous_average).replace(
+                [float("inf"), float("-inf")], pd.NA
+            ).fillna(1.0).round(2)
+            if "volume_ratio" in frame.columns:
+                current_ratio = pd.to_numeric(
+                    frame["volume_ratio"], errors="coerce"
+                )
+                frame["volume_ratio"] = current_ratio.where(
+                    current_ratio.notna(), derived_ratio
+                )
+            else:
+                frame["volume_ratio"] = derived_ratio
         frame = frame.tail(2)
         rows = frame.to_dict(orient="records")
         if not rows:
@@ -3173,7 +3209,14 @@ class StockAnalysisPipeline:
                     (float(today.get("close", 0)) - float(yesterday_close)) / float(yesterday_close) * 100,
                     2,
                 )
-            context["ma_status"] = self.db._analyze_ma_status(SimpleNamespace(**today))
+            context["ma_status"] = self.db._analyze_ma_status(
+                SimpleNamespace(
+                    close=today.get("close"),
+                    ma5=today.get("ma5"),
+                    ma10=today.get("ma10"),
+                    ma20=today.get("ma20"),
+                )
+            )
 
         return context
 

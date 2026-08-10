@@ -110,6 +110,70 @@ def _make_pipeline(*, agent_mode: bool = False, save_context_snapshot: bool = Tr
 
 
 class PipelineMarketPhaseContextTestCase(unittest.TestCase):
+    def test_frozen_raw_daily_context_derives_missing_indicators(self):
+        pipeline = _make_pipeline()
+        captured = {}
+
+        def analyze_ma_status(row):
+            captured.update(vars(row))
+            return "derived"
+
+        pipeline.db._analyze_ma_status.side_effect = analyze_ma_status
+        daily_df = pd.DataFrame(
+            [
+                {
+                    "code": "600519",
+                    "date": f"2026-07-{day:02d}",
+                    "open": float(day),
+                    "high": float(day) + 1.0,
+                    "low": float(day) - 1.0,
+                    "close": float(day),
+                    "volume": float(day * 100),
+                }
+                for day in range(1, 21)
+            ]
+        )
+
+        context = pipeline._build_analysis_context_from_daily_df(
+            "600519",
+            daily_df,
+            target_date=date(2026, 7, 20),
+        )
+
+        self.assertIsNotNone(context)
+        self.assertEqual(context["ma_status"], "derived")
+        self.assertEqual(context["today"]["ma5"], 18.0)
+        self.assertEqual(context["today"]["ma10"], 15.5)
+        self.assertEqual(context["today"]["ma20"], 10.5)
+        self.assertEqual(context["today"]["volume_ratio"], 1.18)
+        self.assertEqual(context["yesterday"]["ma5"], 17.0)
+        self.assertEqual(
+            captured,
+            {"close": 20.0, "ma5": 18.0, "ma10": 15.5, "ma20": 10.5},
+        )
+
+    def test_daily_context_missing_close_and_indicators_does_not_raise(self):
+        pipeline = _make_pipeline()
+        pipeline.db._analyze_ma_status.return_value = "missing"
+
+        context = pipeline._build_analysis_context_from_daily_df(
+            "600519",
+            pd.DataFrame(
+                [
+                    {"date": "2026-07-19", "volume": 100.0},
+                    {"date": "2026-07-20", "volume": 200.0},
+                ]
+            ),
+        )
+
+        self.assertIsNotNone(context)
+        self.assertEqual(context["ma_status"], "missing")
+        row = pipeline.db._analyze_ma_status.call_args.args[0]
+        self.assertIsNone(row.close)
+        self.assertIsNone(row.ma5)
+        self.assertIsNone(row.ma10)
+        self.assertIsNone(row.ma20)
+
     def test_jp_kr_analysis_context_uses_daily_fetcher_when_db_context_missing(self):
         pipeline = _make_pipeline()
         pipeline.db.get_analysis_context.side_effect = [None, None]

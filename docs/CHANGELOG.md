@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] 冻结 Tushare 日线缺少预计算指标时，个人投研上下文会从同一不可变日线窗口确定性补算 MA5/10/20 与量比，并对缺失字段安全降级，避免 durable canary 在模型调用前因属性缺失失败。
+
 - [新功能] 新增独立 Decision Outcome v2：按 T+1 可执行性与 5/10/20 交易日计算方向收益、MFE/MAE、CSI 300/申万一级行业超额，保存冻结 lineage，并以 durable job 支持手工及唯一 Scheduler owner 入队。
 - [改进] “AI 建议”页新增与 v1 完全隔离的 Outcome v2 面板，展示最近结果、原因码和 engine/horizon/profile/action 四维校准；样本少于 30 时保留 `n/30` 计数且所有推断指标保持不可用，不伪造零值。
 - [修复] 正式个人投研 DecisionSignal 的 Web 主决策优先显示 `account_action` 与 Policy verdict，legacy `action` 明确标为上游研究动作，避免 Enforce 已阻断为观察时仍把上游 `buy` 显示为最终账户决策。
