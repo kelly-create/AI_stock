@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] YFinance TTM 分红窗口按除权日的自然日边界计算，完整包含恰好 365 天前的事件，避免测试和生产结果随当天执行时刻漂移。
 - [修复] 个人投研 Debate 将完整业务输出合同纳入模型回退门禁；JSON 语法合法但 stance、字段或 Claim/Citation 引用不合格的响应会继续尝试下一已配置模型，全部模型不合格时仍严格失败关闭。
 - [修复] 个人 Skill Dataset lineage 允许 Factor 实际输入是 Evidence 全量冻结输入的子集，同时保持 Evidence 与 Skill 的全量 lineage 精确相等，并通过追加迁移替换旧触发器，避免 `news_search` 使正式 Evidence canary 安全失败。
 - [修复] Evidence `news_search` 使用与持久化 Dataset 相同的冻结行封装，确保 Research Snapshot 可从仓储记录逐字段重建并验证外部内容投影。

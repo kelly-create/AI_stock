@@ -282,7 +282,13 @@ class YfinanceFundamentalAdapter:
                 div_series = div_series.iloc[:, 0]
             try:
                 # Index is timezone-aware (ex-dividend date)
-                cutoff = pd.Timestamp.now(tz=div_series.index.tz) - pd.Timedelta(days=365)
+                # Dividend events are calendar dates, not intraday timestamps.
+                # Normalize the rolling boundary so an event exactly 365 days
+                # ago remains in the inclusive TTM window for the whole day.
+                cutoff = (
+                    pd.Timestamp.now(tz=div_series.index.tz).normalize()
+                    - pd.Timedelta(days=365)
+                )
                 for ts, value in div_series.items():
                     per_share = _safe_float(value)
                     if per_share is None or per_share <= 0:
