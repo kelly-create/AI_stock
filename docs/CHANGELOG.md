@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] Decision Outcome v2 在首次创建 pending 行时冻结 `DecisionSignal.status`，后续 5/10/20 交易日观察不再因来源信号正常过期而误报 lineage 冲突；其他 Signal、Policy 与 Dataset 血缘仍逐项严格校验，并由追加迁移收敛数据库触发器。
 - [修复] 个人投研 Debate 的 Agent 与传统 LiteLLM 路径向每个候选模型传递严格 JSON-object 响应格式，同时保留完整业务 validator 和模型回退，避免路由快照声明结构化输出但实际请求仅依赖提示词。
 - [修复] 将 Bounded Debate Prompt 升级为 v2，并与 Judge 的 0.5 平均置信度门槛共用同一合同；低置信度候选观点保留为限制或开放问题，禁止抬高分数或降低 fail-closed 安全阈值。
 

@@ -9,6 +9,7 @@ Decision Outcome v2 是个人投研链路的独立、不可变后验评估合同
 - 收益使用冻结的日线和复权因子计算，同时保存方向收益、MFE 和 MAE。缺失值保持 `null`，API 与 Web 都不得补成 `0`。
 - CSI 300 使用 `000300.SH`；申万一级行业按信号日的点时成员关系解析。基准或行业不可用时分别保存 `status=unavailable` 与原因，不阻断标的自身可评估结果。
 - `long` 与 `defensive` 采用相反方向解释；`observational` 仅记录观察结果，不伪造命中/未命中。
+- `signal_status` 在每个结果身份首次创建 pending 行时冻结。来源 DecisionSignal 在 5/10/20 交易日观察成熟前正常从 `active` 过期，不会使该 pending 行失效；后续推进仍必须保持最初冻结的状态值，且除这一正常生命周期字段外，Signal、Policy 与 Dataset lineage 继续逐项 fail-closed 校验。
 
 ## API 合同
 
@@ -58,5 +59,7 @@ Scheduler 只入队，不在本地调用 Tushare 或执行评估；默认 `notif
 3. 使用冻结 fixture 验证 T+1、停牌/涨跌停、5/10/20d、MFE/MAE、CSI 300、点时申万一级行业和所有失败原因。
 4. 统计明确验证 29 个样本仍为 `null`、30 个样本才产生校准指标；Web 不出现伪造 `0`。
 5. 静态 OpenAPI 与 runtime 完全一致，Web 定向测试、TypeScript、构建和受影响 eslint 通过。
+
+`2026-08-11-personal-research-v2-signal-status-lineage` 追加迁移只替换 Outcome v2 的 insert/update lineage 触发器：insert 仍要求当前信号状态与冻结值一致，pending update 则保留首次冻结状态并继续验证其余 lineage。迁移失败会同时回滚触发器和 marker；不会改写、删除或回填既有 Outcome 行。
 
 软回滚先设置 `DECISION_OUTCOME_V2_ENABLED=false`，停止新的 API/Scheduler 入队，但保留 GET 历史审计和已落库终态。随后等待运行中 job 到达安全终态，再回滚应用镜像。不要删除 v2 表、结果、Dataset 或 Portfolio/Policy lineage；需要恢复数据库时按[个人投研迁移与功能开关](personal-research-rollout.md)中的生产备份流程执行。

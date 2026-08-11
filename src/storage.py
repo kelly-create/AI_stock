@@ -6696,7 +6696,6 @@ _DECISION_OUTCOME_V2_LINEAGE_SQL = """
       AND signal.source_type = NEW.source_type
       AND signal.action = NEW.signal_action
       AND signal.horizon IS NEW.signal_horizon
-      AND signal.status = NEW.signal_status
       AND signal.decision_profile = NEW.decision_profile
       AND signal.research_snapshot_hash = NEW.research_snapshot_hash
       AND signal.policy_version = NEW.policy_version
@@ -6730,6 +6729,10 @@ _DECISION_OUTCOME_V2_LINEAGE_SQL = """
       AND policy.allowed = NEW.policy_allowed
       AND policy.would_block = NEW.would_block
 """
+_DECISION_OUTCOME_V2_INSERT_LINEAGE_SQL = (
+    _DECISION_OUTCOME_V2_LINEAGE_SQL
+    + "\n      AND signal.status = NEW.signal_status"
+)
 _DECISION_OUTCOME_V2_DATASET_INVALID_SQL = """
     EXISTS (
         SELECT 1 FROM json_each(NEW.dataset_hashes_json)
@@ -6804,7 +6807,7 @@ _DECISION_OUTCOME_V2_TRIGGER_SQL = {
         CREATE TRIGGER IF NOT EXISTS trg_decision_outcome_v2_lineage_insert
         BEFORE INSERT ON decision_outcomes_v2
         FOR EACH ROW
-        WHEN NOT EXISTS ({_DECISION_OUTCOME_V2_LINEAGE_SQL})
+        WHEN NOT EXISTS ({_DECISION_OUTCOME_V2_INSERT_LINEAGE_SQL})
         BEGIN
             SELECT RAISE(ABORT, 'decision outcome v2 lineage mismatch');
         END
@@ -8118,6 +8121,52 @@ def run_personal_research_skill_dataset_lineage_schema_upgrade(engine) -> None:
             connection.exec_driver_sql(
                 _PERSONAL_RESEARCH_SKILL_TRIGGER_SQL[trigger_name]
             )
+            _verify_personal_research_policy_context_schema_contract(connection)
+        except BaseException:
+            connection.rollback()
+            raise
+        else:
+            connection.commit()
+
+
+def run_decision_outcome_v2_signal_status_lineage_schema_upgrade(engine) -> None:
+    """Keep the signal status frozen while a pending outcome matures."""
+
+    if engine.url.get_backend_name() != 'sqlite':
+        raise RuntimeError(
+            'Decision Outcome v2 status lineage migration only supports SQLite'
+        )
+    with engine.connect() as connection:
+        connection.exec_driver_sql('BEGIN IMMEDIATE')
+        try:
+            required_tables = {
+                'decision_signals',
+                'decision_outcomes_v2',
+                'portfolio_policy_evaluations',
+            }
+            existing_tables = {
+                row[0]
+                for row in connection.exec_driver_sql(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).all()
+            }
+            missing_tables = sorted(required_tables.difference(existing_tables))
+            if missing_tables:
+                raise RuntimeError(
+                    'Decision Outcome v2 status lineage migration prerequisites '
+                    'are missing=' + ','.join(missing_tables)
+                )
+            trigger_names = (
+                'trg_decision_outcome_v2_lineage_insert',
+                'trg_decision_outcome_v2_lineage_update',
+            )
+            for trigger_name in trigger_names:
+                connection.exec_driver_sql(
+                    f'DROP TRIGGER IF EXISTS {trigger_name}'
+                )
+                connection.exec_driver_sql(
+                    _DECISION_OUTCOME_V2_TRIGGER_SQL[trigger_name]
+                )
             _verify_personal_research_policy_context_schema_contract(connection)
         except BaseException:
             connection.rollback()

@@ -51,6 +51,9 @@ PERSONAL_RESEARCH_POLICY_CONTEXT_SCHEMA_VERSION = (
 PERSONAL_RESEARCH_SKILL_DATASET_LINEAGE_SCHEMA_VERSION = (
     "2026-08-11-personal-research-skill-dataset-lineage"
 )
+DECISION_OUTCOME_V2_SIGNAL_STATUS_LINEAGE_SCHEMA_VERSION = (
+    "2026-08-11-personal-research-v2-signal-status-lineage"
+)
 
 
 class MigrationError(RuntimeError):
@@ -175,6 +178,18 @@ def _upgrade_personal_research_skill_dataset_lineage_schema(engine: Engine) -> N
     run_personal_research_skill_dataset_lineage_schema_upgrade(engine)
 
 
+def _upgrade_decision_outcome_v2_signal_status_lineage_schema(
+    engine: Engine,
+) -> None:
+    """Preserve frozen status while pending outcomes survive signal expiry."""
+
+    from src.storage import (
+        run_decision_outcome_v2_signal_status_lineage_schema_upgrade,
+    )
+
+    run_decision_outcome_v2_signal_status_lineage_schema_upgrade(engine)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=BASELINE_SCHEMA_VERSION,
@@ -261,6 +276,14 @@ MIGRATIONS: tuple[Migration, ...] = (
             "the complete Evidence and personal Skill dataset lineage"
         ),
         apply=_upgrade_personal_research_skill_dataset_lineage_schema,
+    ),
+    Migration(
+        version=DECISION_OUTCOME_V2_SIGNAL_STATUS_LINEAGE_SCHEMA_VERSION,
+        description=(
+            "Preserve the status frozen by pending Decision Outcome v2 rows "
+            "when their source signals expire normally"
+        ),
+        apply=_upgrade_decision_outcome_v2_signal_status_lineage_schema,
     ),
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version

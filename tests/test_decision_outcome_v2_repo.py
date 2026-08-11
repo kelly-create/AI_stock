@@ -317,6 +317,39 @@ def test_repository_transitions_pending_once_and_terminal_is_immutable(
         session.close()
 
 
+def test_pending_outcome_keeps_frozen_status_after_signal_expires(
+    outcome_db,
+) -> None:
+    db, _path = outcome_db
+    signal_id = _seed_signal(db, index=12)
+    repository = DecisionOutcomeV2Repository(db)
+
+    pending = repository.persist_evaluation(
+        signal_id=signal_id,
+        evaluation=_pending(),
+    )
+    assert pending.row.signal_status == "active"
+
+    with db.session_scope() as session:
+        signal = session.get(DecisionSignalRecord, signal_id)
+        assert signal is not None
+        signal.status = "expired"
+
+    transitioned = repository.persist_evaluation(
+        signal_id=signal_id,
+        evaluation=_evaluated(),
+    )
+
+    assert transitioned.transitioned is True
+    assert transitioned.row.id == pending.row.id
+    assert transitioned.row.eval_status == "evaluated"
+    assert transitioned.row.signal_status == "active"
+    with db.session_scope() as session:
+        signal = session.get(DecisionSignalRecord, signal_id)
+        assert signal is not None
+        assert signal.status == "expired"
+
+
 def test_repository_accepts_the_pure_evaluator_dto_without_adapter(outcome_db) -> None:
     db, _path = outcome_db
     signal_id = _seed_signal(db, index=11)

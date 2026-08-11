@@ -10,6 +10,7 @@ import pytest
 
 from src.migrations import (
     BASELINE_SCHEMA_VERSION,
+    DECISION_OUTCOME_V2_SIGNAL_STATUS_LINEAGE_SCHEMA_VERSION,
     DECISION_OUTCOME_V2_SCHEMA_VERSION,
     MIGRATIONS,
     PR0_CONVERGENCE_SCHEMA_VERSION,
@@ -413,6 +414,7 @@ def test_existing_baseline_is_converged_by_ordered_pr0_migration(
         DECISION_OUTCOME_V2_SCHEMA_VERSION,
         PERSONAL_RESEARCH_POLICY_CONTEXT_SCHEMA_VERSION,
         PERSONAL_RESEARCH_SKILL_DATASET_LINEAGE_SCHEMA_VERSION,
+        DECISION_OUTCOME_V2_SIGNAL_STATUS_LINEAGE_SCHEMA_VERSION,
     )
     with sqlite3.connect(database_path) as connection:
         llm_columns = {
@@ -596,6 +598,7 @@ def test_pr1_migrates_pr0_shaped_schema_preserves_rows_and_is_idempotent(
         DECISION_OUTCOME_V2_SCHEMA_VERSION,
         PERSONAL_RESEARCH_POLICY_CONTEXT_SCHEMA_VERSION,
         PERSONAL_RESEARCH_SKILL_DATASET_LINEAGE_SCHEMA_VERSION,
+        DECISION_OUTCOME_V2_SIGNAL_STATUS_LINEAGE_SCHEMA_VERSION,
     )
     assert first.is_current is True
     assert second.is_current is True
@@ -637,6 +640,7 @@ def test_pr1_rejects_ambiguous_generic_llm_audit_columns(tmp_path: Path) -> None
         DECISION_OUTCOME_V2_SCHEMA_VERSION,
         PERSONAL_RESEARCH_POLICY_CONTEXT_SCHEMA_VERSION,
         PERSONAL_RESEARCH_SKILL_DATASET_LINEAGE_SCHEMA_VERSION,
+        DECISION_OUTCOME_V2_SIGNAL_STATUS_LINEAGE_SCHEMA_VERSION,
     )
     with sqlite3.connect(database_path) as connection:
         columns = {
@@ -1992,7 +1996,7 @@ def test_decision_outcome_v2_migration_is_strict_idempotent_and_preserves_v1(
     assert second.is_current is True
     assert (
         first.current_version
-        == PERSONAL_RESEARCH_SKILL_DATASET_LINEAGE_SCHEMA_VERSION
+        == DECISION_OUTCOME_V2_SIGNAL_STATUS_LINEAGE_SCHEMA_VERSION
     )
     assert first_schema == second_schema
     assert "decision-outcome-v2" in table_sql
@@ -2078,17 +2082,20 @@ def test_skill_dataset_lineage_migration_replaces_legacy_trigger_idempotently(
             connection
         )
 
-    before = check_migration_state(database_url)
+    skill_migrations = _migrations_through(
+        PERSONAL_RESEARCH_SKILL_DATASET_LINEAGE_SCHEMA_VERSION
+    )
+    before = check_migration_state(database_url, migrations=skill_migrations)
     assert before.pending_versions == (
         PERSONAL_RESEARCH_SKILL_DATASET_LINEAGE_SCHEMA_VERSION,
     )
-    first = apply_migrations(database_url)
+    first = apply_migrations(database_url, migrations=skill_migrations)
     with sqlite3.connect(database_path) as connection:
         migrated_sql = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'trigger' "
             "AND name = 'trg_personal_research_skill_execution_lineage'"
         ).fetchone()[0]
-    second = apply_migrations(database_url)
+    second = apply_migrations(database_url, migrations=skill_migrations)
 
     assert first.is_current is True
     assert second.is_current is True
@@ -2121,8 +2128,11 @@ def test_skill_dataset_lineage_migration_failure_restores_legacy_trigger(
         "_verify_personal_research_policy_context_schema_contract",
         fail_contract,
     )
+    skill_migrations = _migrations_through(
+        PERSONAL_RESEARCH_SKILL_DATASET_LINEAGE_SCHEMA_VERSION
+    )
     with pytest.raises(RuntimeError, match="injected Skill dataset lineage"):
-        apply_migrations(database_url)
+        apply_migrations(database_url, migrations=skill_migrations)
 
     with sqlite3.connect(database_path) as connection:
         restored_sql = connection.execute(
@@ -2136,6 +2146,122 @@ def test_skill_dataset_lineage_migration_failure_restores_legacy_trigger(
 
     assert restored_sql == legacy_sql
     assert PERSONAL_RESEARCH_SKILL_DATASET_LINEAGE_SCHEMA_VERSION not in versions
+
+
+def test_outcome_v2_status_lineage_migration_is_strict_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    from src import storage
+
+    database_path = tmp_path / "outcome-v2-status-lineage.db"
+    database_url = _sqlite_url(database_path)
+    prefix = _migrations_through(
+        PERSONAL_RESEARCH_SKILL_DATASET_LINEAGE_SCHEMA_VERSION
+    )
+    apply_migrations(database_url, migrations=prefix)
+    with sqlite3.connect(database_path) as connection:
+        update_name = "trg_decision_outcome_v2_lineage_update"
+        legacy_update_sql = storage._DECISION_OUTCOME_V2_TRIGGER_SQL[
+            update_name
+        ].replace(
+            storage._DECISION_OUTCOME_V2_LINEAGE_SQL,
+            storage._DECISION_OUTCOME_V2_INSERT_LINEAGE_SQL,
+        )
+        connection.execute(f"DROP TRIGGER IF EXISTS {update_name}")
+        connection.executescript(legacy_update_sql)
+        before_update_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+            (update_name,),
+        ).fetchone()[0]
+    assert "signal.status = NEW.signal_status" in before_update_sql
+
+    first = apply_migrations(database_url)
+    with sqlite3.connect(database_path) as connection:
+        trigger_sql = dict(
+            connection.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' "
+                "AND name IN (?, ?)",
+                (
+                    "trg_decision_outcome_v2_lineage_insert",
+                    "trg_decision_outcome_v2_lineage_update",
+                ),
+            )
+        )
+        first_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+    second = apply_migrations(database_url)
+    with sqlite3.connect(database_path) as connection:
+        second_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+
+    assert first.current_version == DECISION_OUTCOME_V2_SIGNAL_STATUS_LINEAGE_SCHEMA_VERSION
+    assert second.is_current is True
+    assert first_schema == second_schema
+    assert "signal.status = NEW.signal_status" in trigger_sql[
+        "trg_decision_outcome_v2_lineage_insert"
+    ]
+    assert "signal.status = NEW.signal_status" not in trigger_sql[
+        "trg_decision_outcome_v2_lineage_update"
+    ]
+
+
+def test_outcome_v2_status_lineage_migration_failure_restores_triggers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src import storage
+
+    database_path = tmp_path / "outcome-v2-status-lineage-rollback.db"
+    database_url = _sqlite_url(database_path)
+    prefix = _migrations_through(
+        PERSONAL_RESEARCH_SKILL_DATASET_LINEAGE_SCHEMA_VERSION
+    )
+    apply_migrations(database_url, migrations=prefix)
+    with sqlite3.connect(database_path) as connection:
+        before_triggers = dict(
+            connection.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' "
+                "AND name IN (?, ?)",
+                (
+                    "trg_decision_outcome_v2_lineage_insert",
+                    "trg_decision_outcome_v2_lineage_update",
+                ),
+            )
+        )
+
+    def fail_contract(_connection) -> None:
+        raise RuntimeError("injected Outcome v2 status lineage verification failure")
+
+    monkeypatch.setattr(
+        storage,
+        "_verify_personal_research_policy_context_schema_contract",
+        fail_contract,
+    )
+    with pytest.raises(RuntimeError, match="injected Outcome v2 status lineage"):
+        apply_migrations(database_url)
+
+    with sqlite3.connect(database_path) as connection:
+        after_triggers = dict(
+            connection.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' "
+                "AND name IN (?, ?)",
+                (
+                    "trg_decision_outcome_v2_lineage_insert",
+                    "trg_decision_outcome_v2_lineage_update",
+                ),
+            )
+        )
+        versions = {
+            row[0]
+            for row in connection.execute("SELECT version FROM schema_migrations")
+        }
+
+    assert after_triggers == before_triggers
+    assert DECISION_OUTCOME_V2_SIGNAL_STATUS_LINEAGE_SCHEMA_VERSION not in versions
 
 
 def test_apply_serializes_concurrent_writers(tmp_path: Path) -> None:

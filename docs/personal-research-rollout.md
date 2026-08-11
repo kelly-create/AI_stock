@@ -149,6 +149,8 @@ Evidence 写入 `research_evidence_snapshots`，并以 `research_evidence_snapsh
 
 Skill execution 保存完整 Evidence Dataset lineage，并要求与 Evidence Snapshot 精确相等；Factor Snapshot 只保存其确定性计算实际消费的 Dataset，因此 Factor lineage 必须是该完整集合的子集，而不是被强制伪装为相等。例如 `news_search` 可被 Evidence 引用但不参与 Factor 计算。`2026-08-11-personal-research-skill-dataset-lineage` 追加迁移以事务方式替换旧插入触发器；失败会回滚触发器和 migration marker，既有不可变 Skill 行不被改写。
 
+Decision Outcome v2 的 `signal_status` 在首次 pending 创建时冻结；DecisionSignal 在观察周期成熟前正常过期不应破坏既有结果身份。`2026-08-11-personal-research-v2-signal-status-lineage` 追加迁移保持 insert 的当前状态校验，同时允许 pending update 沿用首次冻结状态；其他 Signal、Policy 与 Dataset lineage 仍严格相等，迁移失败会回滚触发器和 marker，既有 Outcome 行不被改写。
+
 持久任务 API、任务模式、日预算、Skill 计算、Debate 触发、Verifier/Judge、Policy 门槛、Thesis/Artifact API 和 Web 缺失态见[个人投研任务、Skill、Debate 与 Thesis](personal-research-execution-artifacts.md)。
 
 ## 备份与恢复
