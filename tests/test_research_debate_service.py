@@ -393,6 +393,22 @@ def test_runner_makes_exactly_two_calls_with_exact_frozen_messages() -> None:
     assert not result.failures
 
 
+def test_completion_request_validates_domain_contract_before_route_acceptance() -> None:
+    request = _request()
+    call = DebateCompletionRequest.from_frozen_request(request, "bull")
+    call.validate_output(json.dumps(_output(request, "bull")))
+
+    wrong_stance = _output(request, "bull")
+    wrong_stance["stance"] = "bear"
+    with pytest.raises(ValueError, match="stance"):
+        call.validate_output(json.dumps(wrong_stance))
+
+    unknown_reference = _output(request, "bull")
+    unknown_reference["arguments"][0]["claim_ids"] = ["claim_unknown"]
+    with pytest.raises(ValueError, match="unknown Evidence claims"):
+        call.validate_output(json.dumps(unknown_reference))
+
+
 def test_runner_resumes_existing_turn_without_repeating_it() -> None:
     request = _request()
     bull = _turn(request, "bull")

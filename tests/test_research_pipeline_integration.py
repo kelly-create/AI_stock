@@ -203,6 +203,7 @@ class _PipelineDebateRuntime:
                         {"role": "system", "content": "DEBATE-SYSTEM"},
                         {"role": "user", "content": f"DEBATE-USER::{stance}"},
                     ),
+                    validate_output=lambda _output: None,
                 )
             )
             assert result.model_used == "provider/debate-model"
@@ -226,6 +227,8 @@ class _RecordingDebateTextAdapter:
         stance = str(messages[1]["content"]).rsplit("::", 1)[-1]
         self.events.append(f"debate-{stance}")
         assert [item["role"] for item in messages] == ["system", "user"]
+        validator = kwargs.pop("response_validator")
+        assert callable(validator)
         assert kwargs == {
             "temperature": 0.2,
             "max_tokens": 2048,
@@ -383,6 +386,7 @@ def test_agent_debate_rejects_unsafe_model_before_usage_storage() -> None:
                     {"role": "system", "content": "DEBATE-SYSTEM"},
                     {"role": "user", "content": "DEBATE-USER::bull"},
                 ),
+                validate_output=lambda _output: None,
             )
         )
 
@@ -423,6 +427,7 @@ def test_agent_debate_rejects_unsafe_route_before_adapter_dispatch() -> None:
                     {"role": "system", "content": "DEBATE-SYSTEM"},
                     {"role": "user", "content": "DEBATE-USER::bull"},
                 ),
+                validate_output=lambda _output: None,
             )
         )
 

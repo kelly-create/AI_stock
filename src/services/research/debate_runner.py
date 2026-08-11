@@ -7,7 +7,7 @@ completion callable and do not alter the immutable request or its call count.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
 from .debate_security import (
@@ -28,6 +28,7 @@ from .debate_service import (
     FrozenDebateTurn,
     build_debate_snapshot,
     build_debate_turn,
+    validate_debate_completion_output,
     validate_debate_request,
     validate_debate_snapshot,
     validate_debate_turn,
@@ -47,6 +48,11 @@ class DebateCompletionRequest:
     prompt_fingerprint: str
     model_route_fingerprint: str
     output_schema_version: str
+    _frozen_request: Optional[FrozenDebateRequest] = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         request_hash = strict_fingerprint(self.request_hash, field="request_hash")
@@ -74,6 +80,21 @@ class DebateCompletionRequest:
         )
         object.__setattr__(self, "model_route_fingerprint", route_fingerprint)
         object.__setattr__(self, "output_schema_version", schema_version)
+        if self._frozen_request is not None:
+            validate_debate_request(self._frozen_request)
+            if self._frozen_request.request_hash != request_hash:
+                raise ValueError("completion request does not match its frozen request")
+
+    def validate_output(self, output: Any) -> None:
+        """Reject contract-invalid output inside a provider fallback loop."""
+
+        if self._frozen_request is None:
+            raise ValueError("completion request has no frozen Debate request")
+        validate_debate_completion_output(
+            self._frozen_request,
+            stance=self.stance,
+            output=output,
+        )
 
     @classmethod
     def from_frozen_request(
@@ -90,6 +111,7 @@ class DebateCompletionRequest:
             prompt_fingerprint=turn_request.prompt_fingerprint,
             model_route_fingerprint=request.model_route_fingerprint,
             output_schema_version=request.output_schema_version,
+            _frozen_request=request,
         )
 
 

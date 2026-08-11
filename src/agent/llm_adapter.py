@@ -11,7 +11,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import litellm
 from litellm import Router
@@ -573,6 +573,7 @@ class LLMToolAdapter:
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
         raise_on_failure: bool = False,
+        response_validator: Optional[Callable[[str], None]] = None,
     ) -> LLMResponse:
         """Send a text-only completion through the shared routing stack."""
         return self.call_completion(
@@ -583,6 +584,7 @@ class LLMToolAdapter:
             max_tokens=max_tokens,
             timeout=timeout,
             raise_on_failure=raise_on_failure,
+            response_validator=response_validator,
         )
 
     def call_completion(
@@ -595,6 +597,7 @@ class LLMToolAdapter:
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
         raise_on_failure: bool = False,
+        response_validator: Optional[Callable[[str], None]] = None,
     ) -> LLMResponse:
         """Shared completion path for both tool and text-only calls."""
         config = self._config
@@ -619,6 +622,8 @@ class LLMToolAdapter:
 
         last_error = None
         hit_rate_limit = False
+        if response_validator is not None and not callable(response_validator):
+            raise TypeError("response_validator must be callable")
         for idx, model in enumerate(models_to_try):
             remaining_timeout = timeout
             if timeout is not None and timeout > 0:
@@ -629,7 +634,7 @@ class LLMToolAdapter:
                     )
                     break
             try:
-                return self._call_litellm_model(
+                response = self._call_litellm_model(
                     messages,
                     tools or [],
                     model,
@@ -637,6 +642,9 @@ class LLMToolAdapter:
                     max_tokens=max_tokens,
                     timeout=remaining_timeout,
                 )
+                if response_validator is not None:
+                    response_validator(str(response.content or ""))
+                return response
             except Exception as e:
                 if isinstance(e, _resolve_litellm_exception("RateLimitError")):
                     logger.warning("Agent LLM rate-limited on %s: %s", model, e)

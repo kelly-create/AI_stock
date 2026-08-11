@@ -998,6 +998,7 @@ class StockAnalysisPipeline:
                         max_tokens=2048,
                         timeout=60.0,
                         raise_on_failure=True,
+                        response_validator=request.validate_output,
                     )
                     content = str(getattr(response, "content", "") or "").strip()
                     provider = str(getattr(response, "provider", "") or "").strip()
@@ -1028,7 +1029,7 @@ class StockAnalysisPipeline:
 
                 text, model_used, _usage = self.analyzer.generate_structured_text(
                     messages,
-                    response_validator=lambda raw: json.loads(raw),
+                    response_validator=request.validate_output,
                     max_tokens=2048,
                     temperature=0.2,
                     timeout=60.0,

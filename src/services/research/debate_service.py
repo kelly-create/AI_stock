@@ -1009,6 +1009,32 @@ def build_debate_turn(build_input: DebateTurnBuildInput) -> FrozenDebateTurn:
     return frozen
 
 
+def validate_debate_completion_output(
+    request: FrozenDebateRequest,
+    *,
+    stance: str,
+    output: Any,
+) -> None:
+    """Validate one provider response before accepting a routed completion.
+
+    This intentionally performs the same schema, stance, and Evidence-reference
+    checks as ``build_debate_turn`` without freezing a model-specific artifact.
+    Callers can therefore reject a syntactically valid but contract-invalid JSON
+    response inside the model fallback loop.  The runner still builds and
+    validates the final frozen turn as a second, independent boundary.
+    """
+
+    validate_debate_request(request)
+    normalized_stance = _stance(stance)
+    evidence = request._evidence_snapshot
+    if evidence is None:
+        raise ValueError("validating Debate output requires the frozen Evidence object")
+    turn = _turn_from_output(output)
+    if turn.stance != normalized_stance:
+        raise ValueError("Debate output stance does not match its frozen request")
+    _validate_turn_references(turn, evidence)
+
+
 def validate_debate_turn(turn: FrozenDebateTurn) -> None:
     if not isinstance(turn, FrozenDebateTurn):
         raise TypeError("turn must be a FrozenDebateTurn")
@@ -1796,6 +1822,7 @@ __all__ = [
     "hydrate_debate_snapshot",
     "hydrate_debate_turn",
     "validate_debate_request",
+    "validate_debate_completion_output",
     "validate_debate_snapshot",
     "validate_debate_turn",
 ]
