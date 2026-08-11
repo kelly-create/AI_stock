@@ -965,6 +965,7 @@ class StockAnalysisPipeline:
             DebateTransientError,
             DebateTerminalError,
         )
+        from src.services.research.debate_service import DEBATE_PROMPT_VERSION
 
         route = self._build_research_debate_model_route(use_agent=use_agent)
 
@@ -1015,7 +1016,7 @@ class StockAnalysisPipeline:
 
                     usage = dict(getattr(response, "usage", {}) or {})
                     usage["stage"] = f"research_debate_{request.stance}"
-                    usage["prompt_version"] = "research-debate-prompt-v1"
+                    usage["prompt_version"] = DEBATE_PROMPT_VERSION
                     persist_llm_usage(
                         usage,
                         model_used,
