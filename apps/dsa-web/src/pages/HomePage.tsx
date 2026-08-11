@@ -475,6 +475,14 @@ const HomePage: React.FC = () => {
   const liveMarketReviewLanguage = normalizeReportLanguage(marketReviewPayload?.language);
   const isMarketReviewHistoryReport = selectedReport?.meta.reportType === 'market_review';
   const isHistoryTrendUnavailable = !selectedReport || !selectedReport.meta.stockCode;
+  const toolbarStockCode = query.trim() || (
+    selectedReport && !isMarketReviewHistoryReport
+      ? selectedReport.meta.stockCode.trim()
+      : ''
+  );
+  const toolbarStockName = query.trim() || !selectedReport || isMarketReviewHistoryReport
+    ? undefined
+    : selectedReport.meta.stockName;
 
   useEffect(() => {
     if (!isHistoryTrendUnavailable || !isHistoryTrendOpen) {
@@ -1561,7 +1569,7 @@ const HomePage: React.FC = () => {
                 {t('home.marketReview')}
               </Button>
               <PersonalResearchLauncher
-                stockCode={query}
+                stockCode={toolbarStockCode}
                 notify={notify}
                 reportLanguage={normalizeReportLanguage(uiLanguage)}
                 disabled={isAnalyzing || isSubmittingMarketReview}
@@ -1569,8 +1577,8 @@ const HomePage: React.FC = () => {
               />
               <button
                 type="button"
-                onClick={() => handleSubmitAnalysis()}
-                disabled={!query || isAnalyzing}
+                onClick={() => handleSubmitAnalysis(toolbarStockCode, toolbarStockName)}
+                disabled={!toolbarStockCode || isAnalyzing}
                 className="btn-primary flex h-10 flex-1 items-center justify-center gap-1.5 whitespace-nowrap md:flex-none"
               >
                 {isAnalyzing ? (

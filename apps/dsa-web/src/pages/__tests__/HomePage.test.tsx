@@ -291,7 +291,46 @@ describe('HomePage', () => {
         name: getReportText(normalizeReportLanguage(historyReport.meta.reportLanguage)).fullReport,
       }),
     ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '个人深度研究' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '分析' })).toBeEnabled();
     expect(historyApi.getMarkdown).not.toHaveBeenCalled();
+  });
+
+  it('uses the selected history stock for toolbar actions when the search input is empty', async () => {
+    vi.mocked(historyApi.getList).mockResolvedValue({
+      total: 1,
+      page: 1,
+      limit: 20,
+      items: [historyItem],
+    });
+    vi.mocked(historyApi.getDetail).mockResolvedValue(historyReport);
+    vi.mocked(analysisApi.analyzeAsync).mockResolvedValue({
+      taskId: 'task-selected-report',
+      status: 'pending',
+    });
+
+    render(
+      <MemoryRouter>
+        <HomePage />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText('趋势维持强势');
+    const input = screen.getByPlaceholderText('输入股票代码或名称，如 600519、贵州茅台、AAPL');
+    expect(input).toHaveValue('');
+
+    fireEvent.click(screen.getByRole('button', { name: '个人深度研究' }));
+    expect(await screen.findByRole('heading', { name: '个人深度研究' })).toBeInTheDocument();
+    expect(screen.getAllByText('600519')).not.toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: '关闭抽屉' }));
+
+    fireEvent.click(screen.getByRole('button', { name: '分析' }));
+    await waitFor(() => {
+      expect(analysisApi.analyzeAsync).toHaveBeenCalledWith(expect.objectContaining({
+        stockCode: '600519',
+        stockName: historyReport.meta.stockName,
+      }));
+    });
   });
 
   it('loads markdown only after opening the full report drawer', async () => {

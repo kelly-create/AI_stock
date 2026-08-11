@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 - [新功能] 首页新增“个人深度研究”入口，支持自动、快速、标准、深度与显式辩论模式，展示 Durable Worker 进度，并在完成后直达不可变 Thesis 与正式决策信号。
+- [修复] 首页顶部输入框为空但已选中个股历史报告时，“个人深度研究”和“分析”会直接使用当前报告股票，不再错误保持禁用。
 
 - [修复] 普通股票分析在冻结因子分数缺失时保留 partial/unknowns 审计并继续生成基础报告，避免可选个人 Skill 增强层导致整项分析失败
 
