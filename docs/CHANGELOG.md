@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 - [修复] Evidence `news_search` 使用与持久化 Dataset 相同的冻结行封装，确保 Research Snapshot 可从仓储记录逐字段重建并验证外部内容投影。
+- [修复] 个人投研 Dataset 投影按仓储合同去重排序，并保留增量空查询的最新知识时间，避免正式 Research Snapshot 对已冻结行情行误报冲突。
 - [修复] Research Snapshot 对外部新闻内容继续执行脱敏投影，同时保留并校验已持久化 Dataset 的 `content_hash/content_hashes`，避免 Evidence 血缘被二次摘要后失去仓储引用。
 - [修复] 个人投研冻结快照使用只含安全标识符字符的组合 Policy 版本，避免 Evidence 任务在正式 Research Snapshot 持久化前被版本契约拒绝。
 - [修复] 增量研究数据在本次采集没有新增行时仍冻结主采集观察与全部复用历史快照，并在 Durable 冷恢复时重建同一来源集合，避免 Evidence 阶段把“已是最新”误判为 Dataset lineage 冲突。

@@ -30,6 +30,7 @@ from src.services.research.runtime import (
     PreparedResearch,
     ResearchRuntimeContractError,
     ResearchRuntimeService,
+    _adapt_datasets_payload,
 )
 from src.schemas.analysis_context_pack import ContextFieldStatus
 from src.services.analysis_context_builder import (
@@ -423,6 +424,27 @@ def _collection(*, available_at=AVAILABLE_AT, rows_by_dataset=None):
         as_of=AS_OF,
         datasets=tuple(datasets),
     )
+
+
+def test_dataset_projection_rows_are_deduplicated_and_stably_ordered():
+    rows = (
+        {"trade_date": "20250630", "close": 3.0},
+        {"trade_date": "20250629", "close": 2.0},
+        {"trade_date": "20250630", "close": 3.0},
+    )
+    collection = _collection(rows_by_dataset={"daily": list(rows)})
+
+    payload = _adapt_datasets_payload(
+        collection,
+        {"daily": rows},
+        as_of=collection.as_of,
+    )["daily"]
+
+    assert payload["row_count"] == 2
+    assert payload["rows"] == [
+        {"trade_date": "20250629", "close": 2.0},
+        {"trade_date": "20250630", "close": 3.0},
+    ]
 
 
 def _complete_rows():

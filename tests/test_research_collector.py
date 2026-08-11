@@ -1099,6 +1099,8 @@ def test_incremental_empty_primary_keeps_full_lineage_on_cold_resume(
 
         assert len(empty_provider.calls) == 1
         assert second.status == "available"
+        assert second.available_at == second_boundary
+        assert second.data_as_of == second_boundary
         assert [row["trade_date"] for row in second.normalized_rows] == [
             frozen_day.strftime("%Y%m%d")
         ]
@@ -1137,6 +1139,8 @@ def test_incremental_empty_primary_keeps_full_lineage_on_cold_resume(
 
         assert replay_provider.calls == []
         assert replayed.source_snapshot_hashes == second.source_snapshot_hashes
+        assert replayed.available_at == second_boundary
+        assert replayed.data_as_of == second_boundary
         assert [row["trade_date"] for row in replayed.normalized_rows] == [
             frozen_day.strftime("%Y%m%d")
         ]

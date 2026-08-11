@@ -24,7 +24,7 @@ from data_provider.tushare_provider import (
 )
 
 from .availability import normalize_as_of
-from .canonical import canonicalize
+from .canonical import canonical_json, canonicalize
 from .collector import ResearchDatasetCollector
 from .datasets import DatasetStatus
 from .factor_input import build_factor_input
@@ -200,6 +200,29 @@ def _adapt_rows_by_dataset(collection: Any) -> Mapping[str, tuple[Mapping[str, A
     return MappingProxyType(normalized)
 
 
+def _canonical_dataset_projection_rows(
+    rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Match the repository's stable, duplicate-free Dataset row ordering."""
+
+    unique_rows: dict[str, Mapping[str, Any]] = {}
+    for row in rows:
+        unique_rows.setdefault(
+            canonical_json(row, exclude_volatile=False),
+            row,
+        )
+    return [
+        dict(row)
+        for _, row in sorted(
+            unique_rows.items(),
+            key=lambda item: (
+                str(item[1].get("trade_date") or ""),
+                item[0],
+            ),
+        )
+    ]
+
+
 def _adapt_max_available_at(collection: Any, *, as_of: datetime) -> datetime:
     value = getattr(collection, "max_available_at", None)
     if value is None:
@@ -285,10 +308,11 @@ def _adapt_datasets_payload(
     payload: dict[str, Any] = {}
     for dataset in sorted(rows_by_dataset):
         rows = rows_by_dataset[dataset]
+        projection_rows = _canonical_dataset_projection_rows(rows)
         item = by_name.get(dataset)
         if item is None:
             # Do not infer provider status or reconstruct a row from the DB.
-            payload[dataset] = {"rows": [dict(row) for row in rows]}
+            payload[dataset] = {"rows": projection_rows}
             continue
         available_at = _aware_utc(getattr(item, "available_at"), field=f"{dataset}.available_at")
         data_as_of = _aware_utc(getattr(item, "data_as_of"), field=f"{dataset}.data_as_of")
@@ -299,7 +323,7 @@ def _adapt_datasets_payload(
         payload[dataset] = {
             "dataset": dataset,
             "status": _normalized_status(getattr(item, "status", "")),
-            "row_count": int(getattr(item, "row_count", len(rows))),
+            "row_count": len(projection_rows),
             "available_at": available_at,
             "data_as_of": data_as_of,
             # Keep the current write hash for existing consumers while the full
@@ -307,7 +331,7 @@ def _adapt_datasets_payload(
             "content_hash": content_hash,
             "content_hashes": content_hashes,
             "raw_ref": getattr(item, "raw_ref", None),
-            "rows": [dict(row) for row in rows],
+            "rows": projection_rows,
         }
     return MappingProxyType(canonicalize(payload))
 

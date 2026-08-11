@@ -36,7 +36,10 @@ from src.services.research import (
     canonical_hash,
     canonical_json,
 )
-from src.services.research.runtime import _news_dataset_payload
+from src.services.research.runtime import (
+    _adapt_datasets_payload,
+    _news_dataset_payload,
+)
 from src.services.research.snapshot_service import project_structured_datasets
 from src.storage import (
     DatabaseManager,
@@ -390,6 +393,75 @@ def test_news_dataset_projection_matches_persisted_snapshot_contract(
             model_route_fingerprint="route-hash-v1",
             as_of=NOW,
             available_at=available_at,
+            status="available",
+            canonical_payload={"datasets": projection},
+        ),
+        lease=lease,
+        now=NOW + timedelta(seconds=1),
+    )
+
+    assert result.created is True
+
+
+def test_runtime_dataset_projection_matches_repository_row_order_contract(
+    research_db,
+) -> None:
+    db, store = research_db
+    _claimed, lease = _claim(store, task_id="ordered-projection-job")
+    repository = ResearchSnapshotRepository(db)
+    rows = [
+        {"ts_code": "600519.SH", "trade_date": "20250808", "close": 3.0},
+        {"ts_code": "600519.SH", "trade_date": "20250807", "close": 2.0},
+        {"ts_code": "600519.SH", "trade_date": "20250808", "close": 3.0},
+    ]
+    dataset_input = DatasetSnapshotInput(
+        dataset="daily",
+        scope_type="stock",
+        scope_value="600519",
+        market="A",
+        provider="tushare",
+        schema_version="tushare-daily-v1",
+        trade_date=NOW.date(),
+        data_as_of=NOW - timedelta(hours=1),
+        available_at=NOW - timedelta(hours=1),
+        observed_at=NOW - timedelta(hours=1),
+        status="available",
+        normalized=rows,
+        knowledge_as_of=NOW,
+    )
+    dataset = repository.write_dataset(dataset_input, lease=lease, now=NOW)
+    item = SimpleNamespace(
+        dataset="daily",
+        status="available",
+        row_count=len(rows),
+        snapshot=dataset,
+        source_snapshot_hashes=(dataset.content_hash,),
+        available_at=dataset_input.available_at,
+        data_as_of=dataset_input.data_as_of,
+        raw_ref=None,
+    )
+    projection = project_structured_datasets(
+        _adapt_datasets_payload(
+            SimpleNamespace(datasets=(item,)),
+            {"daily": tuple(rows)},
+            as_of=NOW,
+        ),
+        as_of=NOW,
+    )
+
+    result = repository.write_research_snapshot(
+        ResearchSnapshotInput(
+            stock_code="600519",
+            market="A",
+            snapshot_version="research-snapshot-v2",
+            field_dictionary_version="research-fields-v2",
+            factor_engine_version="factor-engine-v1",
+            pack_version="analysis-context-pack-v1",
+            prompt_version="personal-research-v1",
+            policy_version="personal-policy-v1",
+            model_route_fingerprint="route-hash-v1",
+            as_of=NOW,
+            available_at=dataset_input.available_at,
             status="available",
             canonical_payload={"datasets": projection},
         ),

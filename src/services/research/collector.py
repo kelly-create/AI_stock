@@ -1532,8 +1532,12 @@ class ResearchDatasetCollector:
             status=status,
             row_count=len(ordered_rows),
             normalized_rows=ordered_rows,
-            available_at=max(item.available_at for item in chunks),
-            data_as_of=max(item.data_as_of for item in chunks),
+            available_at=max(
+                [current.available_at, *(item.available_at for item in chunks)]
+            ),
+            data_as_of=max(
+                [current.data_as_of, *(item.data_as_of for item in chunks)]
+            ),
             trade_date=max(item.trade_date for item in chunks if item.trade_date is not None),
             source_snapshot_hashes=hashes,
         )
