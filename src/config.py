@@ -332,26 +332,35 @@ def parse_research_budget_int(
     default: int,
     *,
     field_name: str,
+    minimum: int = 1,
     maximum: int = 10_000,
 ) -> int:
-    """Parse a positive, bounded daily research budget without fallback.
+    """Parse a bounded research control value without fallback.
 
-    These counters are admission controls.  A typo must not silently widen or
-    replace the configured limit, so their contract is stricter than the
-    compatibility-oriented ``parse_env_int`` helper.
+    Daily research budgets opt into an unlimited personal deployment with
+    ``minimum=0`` and value ``0``.  Other controls, including scheduler
+    intervals and batch sizes, keep the default positive minimum.  A typo must
+    never silently widen or replace the configured value.
     """
 
     raw_value = default if value is None or not str(value).strip() else value
     if isinstance(raw_value, bool):
-        raise ValueError(f"{field_name} must be an integer between 1 and {maximum}")
+        raise ValueError(
+            f"{field_name} must be an integer between {minimum} and {maximum}"
+        )
     try:
         parsed = int(str(raw_value).strip())
     except (TypeError, ValueError) as exc:
         raise ValueError(
-            f"{field_name} must be an integer between 1 and {maximum}"
+            f"{field_name} must be an integer between {minimum} and {maximum}"
         ) from exc
-    if str(parsed) != str(raw_value).strip() or not 1 <= parsed <= maximum:
-        raise ValueError(f"{field_name} must be an integer between 1 and {maximum}")
+    if (
+        str(parsed) != str(raw_value).strip()
+        or not minimum <= parsed <= maximum
+    ):
+        raise ValueError(
+            f"{field_name} must be an integer between {minimum} and {maximum}"
+        )
     return parsed
 
 
@@ -2438,16 +2447,19 @@ class Config:
                 os.getenv('RESEARCH_QUICK_DAILY_BUDGET'),
                 50,
                 field_name='RESEARCH_QUICK_DAILY_BUDGET',
+                minimum=0,
             ),
             research_standard_deep_daily_budget=parse_research_budget_int(
                 os.getenv('RESEARCH_STANDARD_DEEP_DAILY_BUDGET'),
                 20,
                 field_name='RESEARCH_STANDARD_DEEP_DAILY_BUDGET',
+                minimum=0,
             ),
             research_debate_daily_budget=parse_research_budget_int(
                 os.getenv('RESEARCH_DEBATE_DAILY_BUDGET'),
                 8,
                 field_name='RESEARCH_DEBATE_DAILY_BUDGET',
+                minimum=0,
             ),
             save_context_snapshot=os.getenv('SAVE_CONTEXT_SNAPSHOT', 'true').lower() == 'true',
             backtest_enabled=os.getenv('BACKTEST_ENABLED', 'true').lower() == 'true',

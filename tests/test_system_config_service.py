@@ -2051,6 +2051,24 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         current_map = self.manager.read_config_map()
         self.assertEqual(current_map["SEARXNG_PUBLIC_INSTANCES_ENABLED"], "false")
 
+    def test_update_accepts_unlimited_personal_research_budgets(self) -> None:
+        old_version = self.manager.get_config_version()
+        response = self.service.update(
+            config_version=old_version,
+            items=[
+                {"key": "RESEARCH_QUICK_DAILY_BUDGET", "value": "0"},
+                {"key": "RESEARCH_STANDARD_DEEP_DAILY_BUDGET", "value": "0"},
+                {"key": "RESEARCH_DEBATE_DAILY_BUDGET", "value": "0"},
+            ],
+            reload_now=False,
+        )
+
+        self.assertTrue(response["success"])
+        current_map = self.manager.read_config_map()
+        self.assertEqual(current_map["RESEARCH_QUICK_DAILY_BUDGET"], "0")
+        self.assertEqual(current_map["RESEARCH_STANDARD_DEEP_DAILY_BUDGET"], "0")
+        self.assertEqual(current_map["RESEARCH_DEBATE_DAILY_BUDGET"], "0")
+
     def test_validate_reports_invalid_llm_channel_definition(self) -> None:
         validation = self.service.validate(
             items=[

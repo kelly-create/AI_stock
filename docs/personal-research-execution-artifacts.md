@@ -74,6 +74,8 @@ curl.exe -X POST "http://127.0.0.1:8000/api/v1/research/personal/runs" `
 | Standard + Deep | 20 | `RESEARCH_STANDARD_DEEP_DAILY_BUDGET` |
 | Debate | 8 | `RESEARCH_DEBATE_DAILY_BUDGET` |
 
+三个预算配置均接受 `0`，表示个人部署不限制每日次数。无限模式仍保留 Durable lease、任务去重、并发、取消、不可变血缘和 Policy 检查，只关闭按日数量拒绝；预算账本继续记录任务，便于审计与成本回看。
+
 预算不足时任务 fail closed；重试复用同一任务保留，不应反复扣减。
 
 ## 五项确定性 Skill

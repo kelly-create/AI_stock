@@ -169,10 +169,32 @@ def test_runtime_env_loader_reads_research_budget_contract() -> None:
     assert config.research_debate_daily_budget == 9
 
 
+def test_runtime_env_loader_accepts_unlimited_personal_research_budgets() -> None:
+    with patch.dict(
+        "os.environ",
+        {
+            "STOCK_LIST": "600519",
+            "RESEARCH_QUICK_DAILY_BUDGET": "0",
+            "RESEARCH_STANDARD_DEEP_DAILY_BUDGET": "0",
+            "RESEARCH_DEBATE_DAILY_BUDGET": "0",
+        },
+        clear=True,
+    ), patch("src.config.setup_env"), patch.object(
+        Config,
+        "_parse_litellm_yaml",
+        return_value=[],
+    ):
+        config = Config._load_from_env()
+
+    assert config.research_quick_daily_budget == 0
+    assert config.research_standard_deep_daily_budget == 0
+    assert config.research_debate_daily_budget == 0
+
+
 @pytest.mark.parametrize(
     ("field", "raw"),
     [
-        ("RESEARCH_QUICK_DAILY_BUDGET", "0"),
+        ("RESEARCH_QUICK_DAILY_BUDGET", "-1"),
         ("RESEARCH_STANDARD_DEEP_DAILY_BUDGET", "2.5"),
         ("RESEARCH_DEBATE_DAILY_BUDGET", "true"),
     ],
@@ -354,6 +376,9 @@ def test_config_registry_exposes_rollout_and_tushare_quota_controls() -> None:
     assert fields["RESEARCH_QUICK_DAILY_BUDGET"]["default_value"] == "50"
     assert fields["RESEARCH_STANDARD_DEEP_DAILY_BUDGET"]["default_value"] == "20"
     assert fields["RESEARCH_DEBATE_DAILY_BUDGET"]["default_value"] == "8"
+    assert fields["RESEARCH_QUICK_DAILY_BUDGET"]["validation"]["min"] == 0
+    assert fields["RESEARCH_STANDARD_DEEP_DAILY_BUDGET"]["validation"]["min"] == 0
+    assert fields["RESEARCH_DEBATE_DAILY_BUDGET"]["validation"]["min"] == 0
     gate = get_field_definition("PORTFOLIO_POLICY_GATE_MODE")
     assert gate["default_value"] == "off"
     assert gate["validation"]["enum"] == ["off", "shadow", "enforce"]

@@ -106,7 +106,7 @@ class ResearchBudgetRepository:
                 ).scalar()
                 or 0
             )
-            if not manual_daily_override and used >= daily_limit:
+            if daily_limit > 0 and not manual_daily_override and used >= daily_limit:
                 raise ResearchBudgetConflictError(
                     f"Daily research budget exhausted for {bucket}: {used}/{daily_limit}"
                 )
