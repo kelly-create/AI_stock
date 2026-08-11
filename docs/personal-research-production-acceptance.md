@@ -57,6 +57,7 @@
 - Thesis 正向验收为 `/opt/dsa-backups/personal-thesis-acceptance-20260811T053500Z-93c98dfb`；Policy Shadow 正向验收为 `/opt/dsa-backups/personal-shadow-canary-20260811T060622Z-93c98dfb`，对应 signal `122`、完整 Portfolio context、`would_block=false`。
 - Outcome v2 正向提交与 pending 生命周期验收为 `/opt/dsa-backups/personal-outcome-shadow-promotion-20260811T062832Z-93c98dfb`：6 个 signal×horizon 候选均保持 `pending/entry_session_not_reached`，且 observation hash、lineage 与不可变状态完整。
 - Shadow Day 1 基线位于 `/opt/dsa-backups/personal-shadow-observation-acceptance-20260811T063353Z-93c98dfb`，固定 7 个 XSHG 交易日为 `2026-08-11/12/13/14/17/18/19`；自动门已通过，人工签字待完成。
+- Shadow Day 1 收盘后只读观察位于 `/opt/dsa-backups/personal-shadow-observation-day1-20260811T072420Z-93c98dfb`，result SHA-256 为 `b1eaca0eef4ab26b2c30fdec390fdf687180d7f9867f12e71ab7aeb304680ec4`，SHA256SUMS SHA-256 为 `f98c6f0296473c6f3712449054ce10d53a25926032d1ee248240426854497918`；活动任务/Outbox 均为 0、Policy 无 `enforce`、6 个 Outcome 保持合法 pending，容器/API/DB 门全部通过。
 - Debate 保持关闭。任务 `a2716ca555ad4ed7be41f60f311cb963`（600519）和 `4003b08a028345b4981c963c2dde8d07`（601985）均完成 20 份 Dataset、Factor、Evidence、双 stance 与 Verifier，随后被 Judge 以 `stance_confidence_below_minimum` 正确 fail-closed；对应 `.INCOMPLETE` 证据保留，Compose 已自动恢复。该安全负例通过，但在出现一次不放宽阈值的正向 Review/Thesis 前，G8 仍为 `IN_PROGRESS`。
 
 ## 门禁总表
@@ -72,7 +73,7 @@
 | G6 镜像与编排 | Docker build/import smoke、normal/durable profiles、Worker heartbeat、唯一 Scheduler owner | `PASS` | 固定 image/OCI revision/Compose；server 抑制调度，analyzer 为唯一 owner，worker healthy |
 | G7 flag-off 部署 | 新 schema/image 上线但新增研究 flags 全关，旧 API/任务/通知无回归 | `PASS` | flag-off 首次上线、readiness/API/DB/容器身份及逐阶段可逆切换证据 |
 | G8 分阶段 canary | Durable → Tushare → Factors → Evidence → Skill → conditional Debate/Thesis → Outcome v2 | `IN_PROGRESS` | 除 Debate 正向 Review 外均已有成功任务；两次 Debate 安全负例正确 fail-closed |
-| G9 Policy Shadow | 7 个真实交易日 shadow；差异、误阻断、缺失估值、账户动作和回滚均复核 | `IN_PROGRESS` | Day 1 自动基线已封存；2026-08-12 至 19 仍需逐日证据与人工签字 |
+| G9 Policy Shadow | 7 个真实交易日 shadow；差异、误阻断、缺失估值、账户动作和回滚均复核 | `IN_PROGRESS` | Day 1 基线与收盘后观察均已封存；2026-08-12 至 19 仍需逐日证据与人工签字 |
 
 ## PR0–PR6 功能签收
 
@@ -92,7 +93,7 @@
 
 | 交易日 | 版本/镜像 | 开启阶段 | canary task/job | Provider 与 lineage | Policy shadow allow/would-block | Outcome mature/pending/unable | 异常与处置 | 复核人 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 2026-08-11（Day 1） | `93c98dfb` / `0474a075…aec22` | Evidence、Skills、Thesis、Outcome v2、Policy Shadow；Debate off | Shadow `1761a658…ac1fc`；Outcome `fdb0dcef…5506e` | Dataset/Factor/Evidence/Skill/Thesis lineage 通过；Outcome historical replay 无 Provider 漂移 | `no_action` / `would_block=false`，Portfolio context 完整 | 6 pending，均为 `entry_session_not_reached`，没有伪造 0 | 两次 Debate Judge 低置信度 fail-closed；生产自动恢复且健康 | 自动门 PASS；人工待签 |
+| 2026-08-11（Day 1） | `93c98dfb` / `0474a075…aec22` | Evidence、Skills、Thesis、Outcome v2、Policy Shadow；Debate off | Shadow `1761a658…ac1fc`；Outcome `fdb0dcef…5506e` | Dataset/Factor/Evidence/Skill/Thesis lineage 通过；Outcome historical replay 无 Provider 漂移 | `no_action` / `would_block=false`，Portfolio context 完整 | 6 pending，均为 `entry_session_not_reached`，没有伪造 0 | 两次 Debate Judge 低置信度 fail-closed；生产自动恢复且健康 | 基线+收盘后自动门 PASS；人工待签 |
 | 2026-08-12（Day 2） | `PENDING` | `PENDING` | `PENDING` | `PENDING` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
 | 2026-08-13（Day 3） | `PENDING` | `PENDING` | `PENDING` | `PENDING` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
 | 2026-08-14（Day 4） | `PENDING` | `PENDING` | `PENDING` | `PENDING` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
