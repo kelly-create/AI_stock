@@ -125,6 +125,23 @@ def _durable_execution_active() -> bool:
         return False
 
 
+def _durable_job_type() -> Optional[str]:
+    """Return the bound durable job type without inventing a fallback."""
+
+    try:
+        from src.services.durable_job_handlers import (
+            get_optional_durable_execution_context,
+        )
+
+        context = get_optional_durable_execution_context()
+        if context is None:
+            return None
+        value = str(getattr(context.claimed_job, "job_type", "") or "").strip()
+        return value or None
+    except (AttributeError, ImportError, RuntimeError):
+        return None
+
+
 def _policy_context_date(
     context_snapshot: Optional[Mapping[str, Any]],
     field_name: str,
@@ -1250,11 +1267,31 @@ class StockAnalysisPipeline:
             from src.services.personal_research_artifact_service import (
                 PersonalResearchArtifactService,
             )
-
-            return PersonalResearchArtifactService(self.db).persist_pre_llm(
-                prepared=prepared_research,
-                frozen_write=frozen_write,
+            from src.services.research.personal_skill_evaluator import (
+                PersonalResearchSkillEvaluationError,
             )
+
+            try:
+                return PersonalResearchArtifactService(self.db).persist_pre_llm(
+                    prepared=prepared_research,
+                    frozen_write=frozen_write,
+                )
+            except PersonalResearchSkillEvaluationError as exc:
+                if (
+                    _durable_job_type()
+                    not in {"stock_analysis", "scheduled_analysis"}
+                    or " score is unavailable in the frozen Factor snapshot"
+                    not in str(exc)
+                ):
+                    raise
+                logger.warning(
+                    "Optional personal research artifacts skipped for ordinary "
+                    "analysis because a frozen Factor score is unavailable: "
+                    "stock_code=%s error=%s",
+                    getattr(prepared_research, "stock_code", None),
+                    exc,
+                )
+                return frozen_write
         return frozen_write
 
     def _build_research_execution_policy(self, *, use_agent: bool) -> Dict[str, Any]:
