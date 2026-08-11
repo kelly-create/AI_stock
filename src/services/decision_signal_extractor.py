@@ -63,6 +63,7 @@ def build_decision_signal_payload_from_report(
     query_source: str,
     report_type: str,
     profile_source: ProfileSource,
+    personal_research_fields: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any] | None:
     """Build a DecisionSignal payload from a completed stock analysis report."""
 
@@ -178,6 +179,33 @@ def build_decision_signal_payload_from_report(
         "metadata": metadata,
         "report_language": getattr(result, "report_language", None),
     }
+    if personal_research_fields is not None:
+        if not isinstance(personal_research_fields, Mapping):
+            raise TypeError("personal_research_fields must be an object")
+        allowed_formal_fields = {
+            "research_stance",
+            "account_action",
+            "value_quality_score",
+            "trend_timing_score",
+            "catalyst_score",
+            "risk_score",
+            "evidence_quality_score",
+            "research_snapshot_hash",
+            "prompt_version",
+            "catalysts",
+            "invalidators",
+            "unknowns",
+            "evidence_refs",
+            "policy_context",
+            "policy_replay_contract",
+        }
+        unknown = sorted(set(personal_research_fields) - allowed_formal_fields)
+        if unknown:
+            raise ValueError(
+                "personal_research_fields contains unsupported fields: "
+                + ",".join(unknown)
+            )
+        payload.update(dict(personal_research_fields))
     return {key: value for key, value in payload.items() if value not in (None, "", [], {})}
 
 
@@ -221,6 +249,7 @@ def extract_and_persist_from_analysis_result(
     query_source: str,
     report_type: str,
     profile_source: ProfileSource,
+    personal_research_fields: Mapping[str, Any] | None = None,
     service: Optional[DecisionSignalService] = None,
 ) -> Dict[str, Any] | None:
     """Best-effort extract and persist a DecisionSignal from an analysis result."""
@@ -235,6 +264,7 @@ def extract_and_persist_from_analysis_result(
             query_source=query_source,
             report_type=report_type,
             profile_source=profile_source,
+            personal_research_fields=personal_research_fields,
         )
         if payload is None:
             return None

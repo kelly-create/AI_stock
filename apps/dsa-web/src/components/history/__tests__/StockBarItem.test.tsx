@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { StockBarItemComponent } from '../StockBarItem';
 import type { StockBarItem } from '../../../types/analysis';
@@ -19,6 +19,31 @@ const issue1600Item: StockBarItem = {
 };
 
 describe('StockBarItemComponent', () => {
+  it('keeps row selection and deletion as independent accessible buttons', () => {
+    const onClick = vi.fn();
+    const onDelete = vi.fn();
+    render(
+      <StockBarItemComponent
+        item={issue1600Item}
+        isViewing={false}
+        onClick={onClick}
+        onDelete={onDelete}
+      />,
+    );
+
+    const [selectButton, deleteButton] = within(screen.getByTestId('stock-bar-item')).getAllByRole('button');
+
+    expect(selectButton).not.toContainElement(deleteButton);
+    expect(selectButton.querySelector('button')).toBeNull();
+
+    fireEvent.click(deleteButton);
+    expect(onDelete).toHaveBeenCalledWith('600519');
+    expect(onClick).not.toHaveBeenCalled();
+
+    fireEvent.click(selectButton);
+    expect(onClick).toHaveBeenCalledWith(1);
+  });
+
   it('keeps market phase in the meta row instead of the action row', () => {
     render(
       <StockBarItemComponent
@@ -33,7 +58,7 @@ describe('StockBarItemComponent', () => {
     const meta = screen.getByTestId('history-card-meta');
 
     expect(within(actions).getByText('观望 62')).toBeInTheDocument();
-    expect(within(actions).getByRole('button', { name: /删除 贵州茅台股票股份有限公司 历史记录/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /删除 贵州茅台股票股份有限公司 历史记录/ })).toBeInTheDocument();
     expect(within(actions).queryByText('CN · 非交易日')).not.toBeInTheDocument();
     expect(within(meta).getByText('CN · 非交易日')).toBeVisible();
 

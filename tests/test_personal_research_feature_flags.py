@@ -33,7 +33,12 @@ def test_personal_research_flags_default_to_compatible_off_state() -> None:
     assert config.research_debate_enabled is False
     assert config.research_thesis_enabled is False
     assert config.decision_outcome_v2_enabled is False
+    assert config.decision_outcome_v2_interval_minutes == 60
+    assert config.decision_outcome_v2_batch_limit == 100
     assert config.portfolio_policy_gate_mode == "off"
+    assert config.research_quick_daily_budget == 50
+    assert config.research_standard_deep_daily_budget == 20
+    assert config.research_debate_daily_budget == 8
     assert not (
         RESEARCH_ERROR_CODES
         & {issue.code for issue in config.validate_structured()}
@@ -140,6 +145,53 @@ def test_runtime_env_loader_reads_durable_worker_startup_contract() -> None:
     assert config.durable_worker_id == "worker-a"
     assert config.durable_worker_health_max_age_seconds == 30
     assert config.durable_worker_startup_timeout_seconds == 75
+
+
+def test_runtime_env_loader_reads_research_budget_contract() -> None:
+    with patch.dict(
+        "os.environ",
+        {
+            "STOCK_LIST": "600519",
+            "RESEARCH_QUICK_DAILY_BUDGET": "60",
+            "RESEARCH_STANDARD_DEEP_DAILY_BUDGET": "25",
+            "RESEARCH_DEBATE_DAILY_BUDGET": "9",
+        },
+        clear=True,
+    ), patch("src.config.setup_env"), patch.object(
+        Config,
+        "_parse_litellm_yaml",
+        return_value=[],
+    ):
+        config = Config._load_from_env()
+
+    assert config.research_quick_daily_budget == 60
+    assert config.research_standard_deep_daily_budget == 25
+    assert config.research_debate_daily_budget == 9
+
+
+@pytest.mark.parametrize(
+    ("field", "raw"),
+    [
+        ("RESEARCH_QUICK_DAILY_BUDGET", "0"),
+        ("RESEARCH_STANDARD_DEEP_DAILY_BUDGET", "2.5"),
+        ("RESEARCH_DEBATE_DAILY_BUDGET", "true"),
+    ],
+)
+def test_runtime_env_loader_rejects_invalid_research_budgets(
+    field: str,
+    raw: str,
+) -> None:
+    with patch.dict(
+        "os.environ",
+        {"STOCK_LIST": "600519", field: raw},
+        clear=True,
+    ), patch("src.config.setup_env"), patch.object(
+        Config,
+        "_parse_litellm_yaml",
+        return_value=[],
+    ):
+        with pytest.raises(ValueError, match=field):
+            Config._load_from_env()
 
 
 def test_runtime_env_loader_reads_strict_tushare_quota_contract() -> None:
@@ -272,7 +324,12 @@ def test_config_registry_exposes_rollout_and_tushare_quota_controls() -> None:
         "RESEARCH_DEBATE_ENABLED",
         "RESEARCH_THESIS_ENABLED",
         "DECISION_OUTCOME_V2_ENABLED",
+        "DECISION_OUTCOME_V2_INTERVAL_MINUTES",
+        "DECISION_OUTCOME_V2_BATCH_LIMIT",
         "PORTFOLIO_POLICY_GATE_MODE",
+        "RESEARCH_QUICK_DAILY_BUDGET",
+        "RESEARCH_STANDARD_DEEP_DAILY_BUDGET",
+        "RESEARCH_DEBATE_DAILY_BUDGET",
     }
     assert all(
         fields[key]["default_value"] == "false"
@@ -282,11 +339,21 @@ def test_config_registry_exposes_rollout_and_tushare_quota_controls() -> None:
             "TUSHARE_GLOBAL_CALLS_PER_MINUTE",
             "TUSHARE_MAX_INFLIGHT",
             "TUSHARE_ENDPOINT_LIMITS_JSON",
+            "DECISION_OUTCOME_V2_INTERVAL_MINUTES",
+            "DECISION_OUTCOME_V2_BATCH_LIMIT",
+            "RESEARCH_QUICK_DAILY_BUDGET",
+            "RESEARCH_STANDARD_DEEP_DAILY_BUDGET",
+            "RESEARCH_DEBATE_DAILY_BUDGET",
         }
     )
     assert fields["TUSHARE_GLOBAL_CALLS_PER_MINUTE"]["default_value"] == "450"
     assert fields["TUSHARE_MAX_INFLIGHT"]["default_value"] == "2"
     assert fields["TUSHARE_ENDPOINT_LIMITS_JSON"]["default_value"] == "{}"
+    assert fields["DECISION_OUTCOME_V2_INTERVAL_MINUTES"]["default_value"] == "60"
+    assert fields["DECISION_OUTCOME_V2_BATCH_LIMIT"]["default_value"] == "100"
+    assert fields["RESEARCH_QUICK_DAILY_BUDGET"]["default_value"] == "50"
+    assert fields["RESEARCH_STANDARD_DEEP_DAILY_BUDGET"]["default_value"] == "20"
+    assert fields["RESEARCH_DEBATE_DAILY_BUDGET"]["default_value"] == "8"
     gate = get_field_definition("PORTFOLIO_POLICY_GATE_MODE")
     assert gate["default_value"] == "off"
     assert gate["validation"]["enum"] == ["off", "shadow", "enforce"]

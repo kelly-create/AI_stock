@@ -98,6 +98,15 @@ from api.v1.schemas.portfolio import (
     PortfolioDecisionSignalRiskBlock,
     PortfolioDecisionSignalRiskItem,
     PortfolioRiskResponse,
+    PortfolioReconciliationCashTarget,
+    PortfolioReconciliationPositionTarget,
+    PortfolioReconciliationPreviewRequest,
+    PortfolioReconciliationPreviewResponse,
+    PortfolioReconciliationApplyRequest,
+    PortfolioReconciliationItem,
+    PortfolioReconciliationAdjustmentItem,
+    PortfolioReconciliationDetailResponse,
+    PortfolioReconciliationListResponse,
 )
 from api.v1.schemas.alerts import (
     AlertDeleteResponse,
@@ -129,6 +138,24 @@ from api.v1.schemas.decision_signals import (
     DecisionSignalProfileCalibrationBreakdowns,
     DecisionSignalProfileCalibrationBucket,
     DecisionSignalStatusUpdateRequest,
+)
+from api.v1.schemas.personal_research_artifacts import (
+    PersonalResearchDebateReviewResponse,
+    PersonalResearchSkillExecutionListResponse,
+    PersonalResearchSkillExecutionResponse,
+    PersonalResearchThesisResponse,
+)
+from api.v1.schemas.personal_research_runs import (
+    PersonalResearchRunAccepted,
+    PersonalResearchRunRequest,
+)
+from api.v1.schemas.decision_outcomes_v2 import (
+    DecisionOutcomeV2BenchmarkItem,
+    DecisionOutcomeV2Item,
+    DecisionOutcomeV2ListResponse,
+    DecisionOutcomeV2RunAccepted,
+    DecisionOutcomeV2RunRequest,
+    DecisionOutcomeV2StatsResponse,
 )
 
 __all__ = [
@@ -217,6 +244,15 @@ __all__ = [
     "PortfolioDecisionSignalRiskBlock",
     "PortfolioDecisionSignalRiskItem",
     "PortfolioRiskResponse",
+    "PortfolioReconciliationCashTarget",
+    "PortfolioReconciliationPositionTarget",
+    "PortfolioReconciliationPreviewRequest",
+    "PortfolioReconciliationPreviewResponse",
+    "PortfolioReconciliationApplyRequest",
+    "PortfolioReconciliationItem",
+    "PortfolioReconciliationAdjustmentItem",
+    "PortfolioReconciliationDetailResponse",
+    "PortfolioReconciliationListResponse",
     # alerts
     "AlertDeleteResponse",
     "AlertNotificationItem",
@@ -246,4 +282,18 @@ __all__ = [
     "DecisionSignalProfileCalibrationBreakdowns",
     "DecisionSignalProfileCalibrationBucket",
     "DecisionSignalStatusUpdateRequest",
+    # personal research Decision Outcome v2
+    "DecisionOutcomeV2BenchmarkItem",
+    "DecisionOutcomeV2Item",
+    "DecisionOutcomeV2ListResponse",
+    "DecisionOutcomeV2RunAccepted",
+    "DecisionOutcomeV2RunRequest",
+    "DecisionOutcomeV2StatsResponse",
+    # personal research artifacts
+    "PersonalResearchDebateReviewResponse",
+    "PersonalResearchSkillExecutionListResponse",
+    "PersonalResearchSkillExecutionResponse",
+    "PersonalResearchThesisResponse",
+    "PersonalResearchRunAccepted",
+    "PersonalResearchRunRequest",
 ]

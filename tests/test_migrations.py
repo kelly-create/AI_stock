@@ -10,12 +10,16 @@ import pytest
 
 from src.migrations import (
     BASELINE_SCHEMA_VERSION,
+    DECISION_OUTCOME_V2_SCHEMA_VERSION,
     MIGRATIONS,
     PR0_CONVERGENCE_SCHEMA_VERSION,
     PR1_DURABLE_JOBS_SCHEMA_VERSION,
     PR2_RESEARCH_DATA_SCHEMA_VERSION,
     PR3_RESEARCH_EVIDENCE_SCHEMA_VERSION,
     PR4_RESEARCH_DEBATE_SCHEMA_VERSION,
+    PERSONAL_RESEARCH_POLICY_CONTEXT_SCHEMA_VERSION,
+    PERSONAL_RESEARCH_POLICY_SCHEMA_VERSION,
+    PERSONAL_RESEARCH_SKILLS_SCHEMA_VERSION,
     Migration,
     MigrationError,
     _sqlite_database_path,
@@ -27,6 +31,20 @@ from src.migrations import (
 
 def _sqlite_url(path: Path) -> str:
     return f"sqlite:///{path.as_posix()}"
+
+
+def _migrations_through(version: str) -> tuple[Migration, ...]:
+    """Return the stable migration prefix ending at ``version``.
+
+    Tests that reconstruct a historical schema must not depend on the number
+    of migrations appended after that schema.  Version-addressed prefixes keep
+    those fixtures honest as the rollout advances.
+    """
+
+    for index, migration in enumerate(MIGRATIONS):
+        if migration.version == version:
+            return MIGRATIONS[: index + 1]
+    raise AssertionError(f"unknown migration version: {version}")
 
 
 _PR1_LLM_USAGE_AUDIT_COLUMN_TYPES = {
@@ -337,6 +355,10 @@ def test_existing_baseline_is_converged_by_ordered_pr0_migration(
         PR2_RESEARCH_DATA_SCHEMA_VERSION,
         PR3_RESEARCH_EVIDENCE_SCHEMA_VERSION,
         PR4_RESEARCH_DEBATE_SCHEMA_VERSION,
+        PERSONAL_RESEARCH_POLICY_SCHEMA_VERSION,
+        PERSONAL_RESEARCH_SKILLS_SCHEMA_VERSION,
+        DECISION_OUTCOME_V2_SCHEMA_VERSION,
+        PERSONAL_RESEARCH_POLICY_CONTEXT_SCHEMA_VERSION,
     )
     with sqlite3.connect(database_path) as connection:
         llm_columns = {
@@ -448,7 +470,10 @@ def test_pr1_migrates_pr0_shaped_schema_preserves_rows_and_is_idempotent(
     _create_pr0_shaped_schema(database_path)
 
     before = check_migration_state(database_url)
-    first = apply_migrations(database_url)
+    first = apply_migrations(
+        database_url,
+        migrations=_migrations_through(PR4_RESEARCH_DEBATE_SCHEMA_VERSION),
+    )
     with sqlite3.connect(database_path) as connection:
         first_schema = connection.execute(
             "SELECT type, name, sql FROM sqlite_master "
@@ -488,7 +513,10 @@ def test_pr1_migrates_pr0_shaped_schema_preserves_rows_and_is_idempotent(
             for row in connection.execute("PRAGMA table_info('decision_signals')")
         }
 
-    second = apply_migrations(database_url)
+    second = apply_migrations(
+        database_url,
+        migrations=_migrations_through(PR4_RESEARCH_DEBATE_SCHEMA_VERSION),
+    )
     with sqlite3.connect(database_path) as connection:
         second_schema = connection.execute(
             "SELECT type, name, sql FROM sqlite_master "
@@ -509,6 +537,10 @@ def test_pr1_migrates_pr0_shaped_schema_preserves_rows_and_is_idempotent(
         PR2_RESEARCH_DATA_SCHEMA_VERSION,
         PR3_RESEARCH_EVIDENCE_SCHEMA_VERSION,
         PR4_RESEARCH_DEBATE_SCHEMA_VERSION,
+        PERSONAL_RESEARCH_POLICY_SCHEMA_VERSION,
+        PERSONAL_RESEARCH_SKILLS_SCHEMA_VERSION,
+        DECISION_OUTCOME_V2_SCHEMA_VERSION,
+        PERSONAL_RESEARCH_POLICY_CONTEXT_SCHEMA_VERSION,
     )
     assert first.is_current is True
     assert second.is_current is True
@@ -534,7 +566,10 @@ def test_pr1_rejects_ambiguous_generic_llm_audit_columns(tmp_path: Path) -> None
         connection.execute("ALTER TABLE llm_usage ADD COLUMN error TEXT")
 
     with pytest.raises(RuntimeError, match="ambiguous audit columns: error"):
-        apply_migrations(database_url)
+        apply_migrations(
+            database_url,
+            migrations=_migrations_through(PR4_RESEARCH_DEBATE_SCHEMA_VERSION),
+        )
 
     state = check_migration_state(database_url)
     assert state.pending_versions == (
@@ -542,6 +577,10 @@ def test_pr1_rejects_ambiguous_generic_llm_audit_columns(tmp_path: Path) -> None
         PR2_RESEARCH_DATA_SCHEMA_VERSION,
         PR3_RESEARCH_EVIDENCE_SCHEMA_VERSION,
         PR4_RESEARCH_DEBATE_SCHEMA_VERSION,
+        PERSONAL_RESEARCH_POLICY_SCHEMA_VERSION,
+        PERSONAL_RESEARCH_SKILLS_SCHEMA_VERSION,
+        DECISION_OUTCOME_V2_SCHEMA_VERSION,
+        PERSONAL_RESEARCH_POLICY_CONTEXT_SCHEMA_VERSION,
     )
     with sqlite3.connect(database_path) as connection:
         columns = {
@@ -613,7 +652,10 @@ def test_pr1_schema_failure_rolls_back_ddl_and_does_not_record_version(
 def _create_pr1_shaped_schema(database_path: Path) -> str:
     database_url = _sqlite_url(database_path)
     _create_pr0_shaped_schema(database_path)
-    state = apply_migrations(database_url, migrations=MIGRATIONS[:-3])
+    state = apply_migrations(
+        database_url,
+        migrations=_migrations_through(PR1_DURABLE_JOBS_SCHEMA_VERSION),
+    )
     assert state.current_version == PR1_DURABLE_JOBS_SCHEMA_VERSION
     return database_url
 
@@ -624,7 +666,10 @@ def test_pr2_research_schema_contract_and_second_apply_are_stable(
     database_path = tmp_path / "pr1-to-pr2.db"
     database_url = _create_pr1_shaped_schema(database_path)
 
-    first = apply_migrations(database_url, migrations=MIGRATIONS[:-2])
+    first = apply_migrations(
+        database_url,
+        migrations=_migrations_through(PR2_RESEARCH_DATA_SCHEMA_VERSION),
+    )
     with sqlite3.connect(database_path) as connection:
         first_schema = connection.execute(
             "SELECT type, name, sql FROM sqlite_master "
@@ -688,7 +733,10 @@ def test_pr2_research_schema_contract_and_second_apply_are_stable(
             )
         }
 
-    second = apply_migrations(database_url, migrations=MIGRATIONS[:-2])
+    second = apply_migrations(
+        database_url,
+        migrations=_migrations_through(PR2_RESEARCH_DATA_SCHEMA_VERSION),
+    )
     with sqlite3.connect(database_path) as connection:
         second_schema = connection.execute(
             "SELECT type, name, sql FROM sqlite_master "
@@ -790,7 +838,10 @@ def test_pr2_schema_failure_rolls_back_all_ddl_and_version(
 
     monkeypatch.setattr(storage, "_verify_pr2_research_schema_contract", fail_contract)
     with pytest.raises(RuntimeError, match="injected PR2"):
-        apply_migrations(database_url, migrations=MIGRATIONS[:-2])
+        apply_migrations(
+            database_url,
+            migrations=_migrations_through(PR2_RESEARCH_DATA_SCHEMA_VERSION),
+        )
 
     with sqlite3.connect(database_path) as connection:
         after_schema = connection.execute(
@@ -812,7 +863,10 @@ def _create_historical_pr2_shaped_schema(database_path: Path) -> str:
     """Create the exact pre-PR3 shape, independent of current ORM metadata."""
 
     database_url = _create_pr1_shaped_schema(database_path)
-    state = apply_migrations(database_url, migrations=MIGRATIONS[:-2])
+    state = apply_migrations(
+        database_url,
+        migrations=_migrations_through(PR2_RESEARCH_DATA_SCHEMA_VERSION),
+    )
     assert state.current_version == PR2_RESEARCH_DATA_SCHEMA_VERSION
     with sqlite3.connect(database_path) as connection:
         connection.execute("DROP INDEX ix_research_snapshots_debate_hash")
@@ -858,7 +912,10 @@ def test_pr3_evidence_schema_upgrades_historical_pr2_and_is_idempotent(
     database_path = tmp_path / "pr2-to-pr3.db"
     database_url = _create_historical_pr2_shaped_schema(database_path)
 
-    first = apply_migrations(database_url, migrations=MIGRATIONS[:-1])
+    first = apply_migrations(
+        database_url,
+        migrations=_migrations_through(PR3_RESEARCH_EVIDENCE_SCHEMA_VERSION),
+    )
     with sqlite3.connect(database_path) as connection:
         first_schema = connection.execute(
             "SELECT type, name, sql FROM sqlite_master "
@@ -914,7 +971,10 @@ def test_pr3_evidence_schema_upgrades_historical_pr2_and_is_idempotent(
             ("a" * 64,),
         ).fetchone()
 
-    second = apply_migrations(database_url, migrations=MIGRATIONS[:-1])
+    second = apply_migrations(
+        database_url,
+        migrations=_migrations_through(PR3_RESEARCH_EVIDENCE_SCHEMA_VERSION),
+    )
     with sqlite3.connect(database_path) as connection:
         second_schema = connection.execute(
             "SELECT type, name, sql FROM sqlite_master "
@@ -983,7 +1043,10 @@ def test_pr3_strict_verifier_rolls_back_wrong_index_and_version(
         )
 
     with pytest.raises(RuntimeError, match="index .* is incompatible"):
-        apply_migrations(database_url, migrations=MIGRATIONS[:-1])
+        apply_migrations(
+            database_url,
+            migrations=_migrations_through(PR3_RESEARCH_EVIDENCE_SCHEMA_VERSION),
+        )
 
     with sqlite3.connect(database_path) as connection:
         tables = {
@@ -1030,7 +1093,10 @@ def test_pr3_schema_failure_rolls_back_all_ddl_and_version(
         fail_contract,
     )
     with pytest.raises(RuntimeError, match="injected PR3"):
-        apply_migrations(database_url, migrations=MIGRATIONS[:-1])
+        apply_migrations(
+            database_url,
+            migrations=_migrations_through(PR3_RESEARCH_EVIDENCE_SCHEMA_VERSION),
+        )
 
     with sqlite3.connect(database_path) as connection:
         after_schema = connection.execute(
@@ -1050,7 +1116,10 @@ def _create_historical_pr3_shaped_schema(database_path: Path) -> str:
     """Create the exact pre-PR4 shape without current debate ORM extensions."""
 
     database_url = _create_historical_pr2_shaped_schema(database_path)
-    state = apply_migrations(database_url, migrations=MIGRATIONS[:-1])
+    state = apply_migrations(
+        database_url,
+        migrations=_migrations_through(PR3_RESEARCH_EVIDENCE_SCHEMA_VERSION),
+    )
     assert state.current_version == PR3_RESEARCH_EVIDENCE_SCHEMA_VERSION
     return database_url
 
@@ -1061,7 +1130,8 @@ def test_pr4_debate_schema_upgrades_historical_pr3_and_is_idempotent(
     database_path = tmp_path / "pr3-to-pr4.db"
     database_url = _create_historical_pr3_shaped_schema(database_path)
 
-    first = apply_migrations(database_url)
+    pr4_migrations = _migrations_through(PR4_RESEARCH_DEBATE_SCHEMA_VERSION)
+    first = apply_migrations(database_url, migrations=pr4_migrations)
     with sqlite3.connect(database_path) as connection:
         first_schema = connection.execute(
             "SELECT type, name, sql FROM sqlite_master "
@@ -1148,7 +1218,7 @@ def test_pr4_debate_schema_upgrades_historical_pr3_and_is_idempotent(
             "AND name = 'research_debate_snapshots'"
         ).fetchone()[0]
 
-    second = apply_migrations(database_url)
+    second = apply_migrations(database_url, migrations=pr4_migrations)
     with sqlite3.connect(database_path) as connection:
         second_schema = connection.execute(
             "SELECT type, name, sql FROM sqlite_master "
@@ -1272,7 +1342,10 @@ def test_pr4_strict_verifier_rolls_back_wrong_index_and_version(
         )
 
     with pytest.raises(RuntimeError, match="index .* is incompatible"):
-        apply_migrations(database_url)
+        apply_migrations(
+            database_url,
+            migrations=_migrations_through(PR4_RESEARCH_DEBATE_SCHEMA_VERSION),
+        )
 
     with sqlite3.connect(database_path) as connection:
         tables = {
@@ -1321,7 +1394,10 @@ def test_pr4_schema_failure_rolls_back_all_ddl_and_version(
         fail_contract,
     )
     with pytest.raises(RuntimeError, match="injected PR4"):
-        apply_migrations(database_url)
+        apply_migrations(
+            database_url,
+            migrations=_migrations_through(PR4_RESEARCH_DEBATE_SCHEMA_VERSION),
+        )
 
     with sqlite3.connect(database_path) as connection:
         after_schema = connection.execute(
@@ -1335,6 +1411,599 @@ def test_pr4_schema_failure_rolls_back_all_ddl_and_version(
 
     assert after_schema == before_schema
     assert PR4_RESEARCH_DEBATE_SCHEMA_VERSION not in versions
+
+
+_PERSONAL_RESEARCH_TABLES = (
+    "research_watchlist_items",
+    "portfolio_reconciliations",
+    "portfolio_reconciliation_adjustments",
+    "portfolio_policy_evaluations",
+    "research_budget_reservations",
+)
+_PERSONAL_RESEARCH_SKILL_TABLES = (
+    "personal_research_skill_contracts",
+    "personal_research_skill_executions",
+    "personal_research_debate_reviews",
+    "personal_research_theses",
+)
+_DECISION_OUTCOME_V2_TABLES = ("decision_outcomes_v2",)
+_PERSONAL_RESEARCH_SIGNAL_COLUMNS = (
+    "research_stance",
+    "account_action",
+    "value_quality_score",
+    "trend_timing_score",
+    "catalyst_score",
+    "risk_score",
+    "evidence_quality_score",
+    "research_snapshot_hash",
+    "policy_version",
+    "policy_hash",
+    "policy_evaluation_hash",
+    "portfolio_snapshot_ref",
+    "prompt_version",
+    "catalysts_json",
+    "invalidators_json",
+    "unknowns_json",
+    "evidence_refs_json",
+    "policy_mode",
+    "policy_decision",
+    "would_block",
+    "policy_reasons_json",
+)
+_PERSONAL_RESEARCH_SIGNAL_INDEXES = tuple(
+    f"ix_decision_signals_{column}"
+    for column in (
+        "research_stance",
+        "account_action",
+        "research_snapshot_hash",
+        "policy_version",
+        "policy_hash",
+        "policy_evaluation_hash",
+        "portfolio_snapshot_ref",
+        "policy_mode",
+        "policy_decision",
+        "would_block",
+    )
+)
+
+
+def _create_historical_pr4_complete_schema(database_path: Path) -> str:
+    """Create the full pre-personal-research schema including Portfolio tables."""
+
+    database_url = _sqlite_url(database_path)
+    state = apply_migrations(
+        database_url,
+        migrations=_migrations_through(PR4_RESEARCH_DEBATE_SCHEMA_VERSION),
+    )
+    assert state.current_version == PR4_RESEARCH_DEBATE_SCHEMA_VERSION
+
+    # The baseline migration intentionally uses current ORM metadata.  Remove
+    # the new append-only extension to reconstruct the exact historical PR4
+    # boundary while retaining the complete legacy Portfolio schema.
+    with sqlite3.connect(database_path) as connection:
+        for table_name in reversed(_DECISION_OUTCOME_V2_TABLES):
+            connection.execute(f'DROP TABLE "{table_name}"')
+        for table_name in reversed(_PERSONAL_RESEARCH_SKILL_TABLES):
+            connection.execute(f'DROP TABLE "{table_name}"')
+        for table_name in reversed(_PERSONAL_RESEARCH_TABLES):
+            connection.execute(f'DROP TABLE "{table_name}"')
+        for index_name in _PERSONAL_RESEARCH_SIGNAL_INDEXES:
+            connection.execute(f'DROP INDEX "{index_name}"')
+        for column_name in reversed(_PERSONAL_RESEARCH_SIGNAL_COLUMNS):
+            connection.execute(
+                f'ALTER TABLE decision_signals DROP COLUMN "{column_name}"'
+            )
+        connection.execute(
+            "INSERT INTO portfolio_accounts (id, owner_id, name, market, "
+            "base_currency, is_active) VALUES (1, 'owner-1', 'primary', "
+            "'cn', 'CNY', 1)"
+        )
+        connection.execute(
+            "INSERT INTO decision_signals ("
+            "id, stock_code, market, source_type, trigger_source, action, "
+            "plan_quality, status"
+            ") VALUES (1, '600519', 'cn', 'report', 'manual', 'observe', "
+            "'unknown', 'active')"
+        )
+    return database_url
+
+
+def test_personal_research_policy_migration_preserves_pr4_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "pr4-to-personal-research.db"
+    database_url = _create_historical_pr4_complete_schema(database_path)
+
+    first = apply_migrations(
+        database_url,
+        migrations=_migrations_through(PERSONAL_RESEARCH_POLICY_SCHEMA_VERSION),
+    )
+    with sqlite3.connect(database_path) as connection:
+        first_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        signal_columns = {
+            row[1]: (row[2], bool(row[3]), row[4])
+            for row in connection.execute("PRAGMA table_info('decision_signals')")
+        }
+        opening_index = next(
+            row
+            for row in connection.execute(
+                "PRAGMA index_list('portfolio_reconciliations')"
+            )
+            if row[1] == "uix_portfolio_reconciliation_applied_opening"
+        )
+        preserved_account = connection.execute(
+            "SELECT owner_id, name, market FROM portfolio_accounts WHERE id = 1"
+        ).fetchone()
+        preserved_signal = connection.execute(
+            "SELECT stock_code, action, would_block "
+            "FROM decision_signals WHERE id = 1"
+        ).fetchone()
+
+        common_reconciliation = (
+            "INSERT INTO portfolio_reconciliations ("
+            "account_id, event_type, status, event_version, effective_date, "
+            "preview_token, input_hash, request_json, diff_json, expires_at, "
+            "applied_at) VALUES (?, 'opening', 'applied', ?, '2026-08-10', "
+            "?, ?, '{}', '{}', '2026-08-11', '2026-08-10')"
+        )
+        connection.execute(
+            common_reconciliation,
+            (1, 1, "a" * 64, "b" * 64),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                common_reconciliation,
+                (1, 2, "c" * 64, "d" * 64),
+            )
+        connection.execute(
+            "INSERT INTO portfolio_accounts (id, owner_id, name, market, "
+            "base_currency, is_active) VALUES (2, 'owner-2', 'secondary', "
+            "'cn', 'CNY', 1)"
+        )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="applied reconciliation adjustments are closed",
+        ):
+            connection.execute(
+                "INSERT INTO portfolio_reconciliation_adjustments ("
+                "reconciliation_id, account_id, identity_key, adjustment_type, "
+                "stock_code, market, currency, quantity_delta, total_cost_delta, "
+                "cash_delta, before_json, after_json"
+                ") VALUES (1, 1, 'position:cn:600519', 'position', '600519', "
+                "'cn', 'CNY', 1, 100, 0, '{}', '{}')"
+            )
+        connection.execute(
+            "INSERT INTO portfolio_reconciliations ("
+            "account_id, event_type, status, effective_date, preview_token, "
+            "input_hash, request_json, diff_json, expires_at"
+            ") VALUES (1, 'adjustment', 'preview', '2026-08-10', ?, ?, '{}', "
+            "'{}', '2026-08-11')",
+            ("e" * 64, "f" * 64),
+        )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="reconciliation adjustment account mismatch",
+        ):
+            connection.execute(
+                "INSERT INTO portfolio_reconciliation_adjustments ("
+                "reconciliation_id, account_id, identity_key, adjustment_type, "
+                "stock_code, market, currency, quantity_delta, total_cost_delta, "
+                "cash_delta, before_json, after_json"
+                ") VALUES (2, 2, 'position:cn:600519', 'position', '600519', "
+                "'cn', 'CNY', 1, 100, 0, '{}', '{}')"
+            )
+        connection.execute(
+            "INSERT INTO portfolio_reconciliation_adjustments ("
+            "reconciliation_id, account_id, identity_key, adjustment_type, "
+            "stock_code, market, currency, quantity_delta, total_cost_delta, "
+            "cash_delta, before_json, after_json"
+            ") VALUES (2, 1, 'position:cn:600519', 'position', '600519', "
+            "'cn', 'CNY', 1, 100, 0, '{}', '{}')"
+        )
+        connection.execute(
+            "UPDATE portfolio_reconciliations SET status = 'applied', "
+            "event_version = 2, idempotency_key = 'adjustment-2', "
+            "applied_at = '2026-08-10' WHERE id = 2"
+        )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="applied reconciliation is immutable",
+        ):
+            connection.execute(
+                "UPDATE portfolio_reconciliations SET account_id = 2 WHERE id = 1"
+            )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="applied reconciliation is immutable",
+        ):
+            connection.execute(
+                "UPDATE portfolio_reconciliations SET note = 'tampered' WHERE id = 1"
+            )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="reconciliation adjustment is immutable",
+        ):
+            connection.execute(
+                "UPDATE portfolio_reconciliation_adjustments "
+                "SET quantity_delta = 2 WHERE reconciliation_id = 2"
+            )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="reconciliation adjustment is immutable",
+        ):
+            connection.execute(
+                "DELETE FROM portfolio_reconciliation_adjustments "
+                "WHERE reconciliation_id = 2"
+            )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="applied reconciliation is immutable",
+        ):
+            connection.execute(
+                "DELETE FROM portfolio_reconciliations WHERE id = 1"
+            )
+
+    second = apply_migrations(
+        database_url,
+        migrations=_migrations_through(PERSONAL_RESEARCH_POLICY_SCHEMA_VERSION),
+    )
+    with sqlite3.connect(database_path) as connection:
+        second_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+
+    assert first.is_current is True
+    assert second.is_current is True
+    assert first.current_version == PERSONAL_RESEARCH_POLICY_SCHEMA_VERSION
+    assert first_schema == second_schema
+    assert set(_PERSONAL_RESEARCH_TABLES).issubset(tables)
+    assert set(_PERSONAL_RESEARCH_SIGNAL_COLUMNS).issubset(signal_columns)
+    assert signal_columns["would_block"] == ("BOOLEAN", True, "0")
+    assert bool(opening_index[2]) is True
+    assert bool(opening_index[4]) is True
+    assert preserved_account == ("owner-1", "primary", "cn")
+    assert preserved_signal == ("600519", "observe", 0)
+
+
+def test_personal_research_policy_schema_failure_rolls_back_all_ddl_and_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src import storage
+
+    database_path = tmp_path / "personal-research-rollback.db"
+    database_url = _create_historical_pr4_complete_schema(database_path)
+    with sqlite3.connect(database_path) as connection:
+        before_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+
+    def fail_contract(_connection) -> None:
+        raise RuntimeError("injected personal research schema verification failure")
+
+    monkeypatch.setattr(
+        storage,
+        "_verify_personal_research_policy_schema_contract",
+        fail_contract,
+    )
+    with pytest.raises(RuntimeError, match="injected personal research"):
+        apply_migrations(database_url)
+
+    with sqlite3.connect(database_path) as connection:
+        after_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+        versions = {
+            row[0]
+            for row in connection.execute("SELECT version FROM schema_migrations")
+        }
+
+    assert after_schema == before_schema
+    assert PERSONAL_RESEARCH_POLICY_SCHEMA_VERSION not in versions
+
+
+def _create_historical_personal_research_policy_schema(database_path: Path) -> str:
+    """Create the exact schema boundary immediately before PR4 artifacts."""
+
+    database_url = _create_historical_pr4_complete_schema(database_path)
+    state = apply_migrations(
+        database_url,
+        migrations=_migrations_through(PERSONAL_RESEARCH_POLICY_SCHEMA_VERSION),
+    )
+    assert state.current_version == PERSONAL_RESEARCH_POLICY_SCHEMA_VERSION
+    return database_url
+
+
+def test_personal_research_skills_migration_is_seeded_immutable_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "personal-research-skills.db"
+    database_url = _create_historical_personal_research_policy_schema(database_path)
+
+    first = apply_migrations(
+        database_url,
+        migrations=_migrations_through(PERSONAL_RESEARCH_SKILLS_SCHEMA_VERSION),
+    )
+    with sqlite3.connect(database_path) as connection:
+        first_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        contracts = connection.execute(
+            "SELECT skill_id, skill_version, contract_hash, score_field "
+            "FROM personal_research_skill_contracts ORDER BY rowid"
+        ).fetchall()
+        trigger_names = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+                "AND name LIKE 'trg_personal_research_%'"
+            )
+        }
+        preserved_signal = connection.execute(
+            "SELECT stock_code, market FROM decision_signals WHERE id = 1"
+        ).fetchone()
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="skill contract is immutable",
+        ):
+            connection.execute(
+                "UPDATE personal_research_skill_contracts "
+                "SET score_field = 'risk_score' "
+                "WHERE skill_id = 'personal-value-quality'"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO personal_research_skill_contracts "
+                "(skill_id, skill_version, contract_hash, score_field, canonical_json) "
+                "VALUES ('personal-fake', '1.0.0', ?, 'risk_score', '{}')",
+                ("f" * 64,),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO personal_research_skill_contracts "
+                "(skill_id, skill_version, contract_hash, score_field, canonical_json) "
+                "VALUES ('personal-value-quality', '1.0.0', ?, "
+                "'value_quality_score', '{}')",
+                ("e" * 64,),
+            )
+
+    second = apply_migrations(
+        database_url,
+        migrations=_migrations_through(PERSONAL_RESEARCH_SKILLS_SCHEMA_VERSION),
+    )
+    with sqlite3.connect(database_path) as connection:
+        second_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+
+    assert first.is_current is True
+    assert second.is_current is True
+    assert first.current_version == PERSONAL_RESEARCH_SKILLS_SCHEMA_VERSION
+    assert first_schema == second_schema
+    assert set(_PERSONAL_RESEARCH_SKILL_TABLES).issubset(tables)
+    assert len(contracts) == 5
+    assert {row[0] for row in contracts} == {
+        "personal-value-quality",
+        "personal-trend-timing",
+        "personal-catalyst",
+        "personal-risk",
+        "personal-evidence-quality",
+    }
+    assert all(row[1] == "1.0.0" and len(row[2]) == 64 for row in contracts)
+    assert {
+        "trg_personal_research_skill_execution_update",
+        "trg_personal_research_skill_execution_delete",
+        "trg_personal_research_debate_review_update",
+        "trg_personal_research_debate_review_delete",
+        "trg_personal_research_thesis_update",
+        "trg_personal_research_thesis_delete",
+    }.issubset(trigger_names)
+    assert preserved_signal == ("600519", "cn")
+
+
+def test_personal_research_skills_schema_failure_rolls_back_all_ddl_and_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src import storage
+
+    database_path = tmp_path / "personal-research-skills-rollback.db"
+    database_url = _create_historical_personal_research_policy_schema(database_path)
+    with sqlite3.connect(database_path) as connection:
+        before_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+
+    def fail_contract(_connection) -> None:
+        raise RuntimeError("injected personal research Skills verification failure")
+
+    monkeypatch.setattr(
+        storage,
+        "_verify_personal_research_skills_schema_contract",
+        fail_contract,
+    )
+    with pytest.raises(RuntimeError, match="injected personal research Skills"):
+        apply_migrations(
+            database_url,
+            migrations=_migrations_through(PERSONAL_RESEARCH_SKILLS_SCHEMA_VERSION),
+        )
+
+    with sqlite3.connect(database_path) as connection:
+        after_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+        versions = {
+            row[0]
+            for row in connection.execute("SELECT version FROM schema_migrations")
+        }
+
+    assert after_schema == before_schema
+    assert PERSONAL_RESEARCH_SKILLS_SCHEMA_VERSION not in versions
+
+
+def _create_historical_personal_research_skills_schema(
+    database_path: Path,
+) -> str:
+    """Create the exact schema boundary before Decision Outcome v2."""
+
+    database_url = _create_historical_personal_research_policy_schema(database_path)
+    state = apply_migrations(
+        database_url,
+        migrations=_migrations_through(PERSONAL_RESEARCH_SKILLS_SCHEMA_VERSION),
+    )
+    assert state.current_version == PERSONAL_RESEARCH_SKILLS_SCHEMA_VERSION
+    return database_url
+
+
+def test_decision_outcome_v2_migration_is_strict_idempotent_and_preserves_v1(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "decision-outcome-v2.db"
+    database_url = _create_historical_personal_research_skills_schema(
+        database_path
+    )
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO decision_signal_outcomes ("
+            "signal_id, horizon, engine_version, eval_status, outcome, "
+            "direction_expected, direction_correct, stock_return_pct, "
+            "action, market, holding_state"
+            ") VALUES (1, '5d', 'decision-signal-v1', 'completed', 'hit', "
+            "'up', 1, 5.0, 'observe', 'cn', 'unknown')"
+        )
+
+    first = apply_migrations(database_url)
+    with sqlite3.connect(database_path) as connection:
+        first_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+        table_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'decision_outcomes_v2'"
+        ).fetchone()[0]
+        foreign_keys = connection.execute(
+            "PRAGMA foreign_key_list('decision_outcomes_v2')"
+        ).fetchall()
+        indexes = {
+            row[1]: (bool(row[2]), bool(row[4]))
+            for row in connection.execute(
+                "PRAGMA index_list('decision_outcomes_v2')"
+            )
+        }
+        trigger_names = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+                "AND name LIKE 'trg_decision_outcome_v2_%'"
+            )
+        }
+        preserved_v1 = connection.execute(
+            "SELECT signal_id, horizon, engine_version, eval_status, outcome "
+            "FROM decision_signal_outcomes"
+        ).fetchall()
+
+    second = apply_migrations(database_url)
+    with sqlite3.connect(database_path) as connection:
+        second_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+
+    assert first.is_current is True
+    assert second.is_current is True
+    assert first.current_version == PERSONAL_RESEARCH_POLICY_CONTEXT_SCHEMA_VERSION
+    assert first_schema == second_schema
+    assert "decision-outcome-v2" in table_sql
+    assert "'pending', 'evaluated', 'observational'" in table_sql
+    assert "'unexecutable', 'unable'" in table_sql
+    assert any(
+        row[2] == "decision_signals"
+        and row[3] == "signal_id"
+        and row[4] == "id"
+        and row[6].upper() == "RESTRICT"
+        for row in foreign_keys
+    )
+    assert indexes["ix_decision_outcome_v2_candidates"] == (False, False)
+    assert indexes["ix_decision_outcome_v2_calibration"] == (False, False)
+    assert {
+        "trg_decision_outcome_v2_lineage_insert",
+        "trg_decision_outcome_v2_dataset_insert",
+        "trg_decision_outcome_v2_terminal_update",
+        "trg_decision_outcome_v2_frozen_update",
+        "trg_decision_outcome_v2_lineage_update",
+        "trg_decision_outcome_v2_dataset_update",
+        "trg_decision_outcome_v2_delete",
+        "trg_decision_outcome_v2_signal_delete_restrict",
+        "trg_decision_outcome_v2_dataset_snapshot_update_restrict",
+        "trg_decision_outcome_v2_dataset_snapshot_delete_restrict",
+    } == trigger_names
+    assert preserved_v1 == [
+        (1, "5d", "decision-signal-v1", "completed", "hit")
+    ]
+
+
+def test_decision_outcome_v2_schema_failure_rolls_back_ddl_and_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src import storage
+
+    database_path = tmp_path / "decision-outcome-v2-rollback.db"
+    database_url = _create_historical_personal_research_skills_schema(
+        database_path
+    )
+    with sqlite3.connect(database_path) as connection:
+        before_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+
+    def fail_contract(_connection) -> None:
+        raise RuntimeError("injected Decision Outcome v2 verification failure")
+
+    monkeypatch.setattr(
+        storage,
+        "_verify_decision_outcome_v2_schema_contract",
+        fail_contract,
+    )
+    with pytest.raises(RuntimeError, match="injected Decision Outcome v2"):
+        apply_migrations(database_url)
+
+    with sqlite3.connect(database_path) as connection:
+        after_schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+        versions = {
+            row[0]
+            for row in connection.execute("SELECT version FROM schema_migrations")
+        }
+
+    assert after_schema == before_schema
+    assert DECISION_OUTCOME_V2_SCHEMA_VERSION not in versions
 
 
 def test_apply_serializes_concurrent_writers(tmp_path: Path) -> None:

@@ -24,7 +24,7 @@ from data_provider.tushare_provider import (
 )
 
 from .availability import normalize_as_of
-from .canonical import canonicalize
+from .canonical import canonical_json, canonicalize
 from .collector import ResearchDatasetCollector
 from .datasets import DatasetStatus
 from .factor_input import build_factor_input
@@ -91,6 +91,8 @@ class PreparedResearch:
     debate_context: Optional[Mapping[str, Any]] = None
     debate_prompt_context: Optional[str] = None
     debate_enabled: bool = False
+    task_decision: Optional[Any] = None
+    budget_reservations: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -198,6 +200,29 @@ def _adapt_rows_by_dataset(collection: Any) -> Mapping[str, tuple[Mapping[str, A
     return MappingProxyType(normalized)
 
 
+def _canonical_dataset_projection_rows(
+    rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Match the repository's stable, duplicate-free Dataset row ordering."""
+
+    unique_rows: dict[str, Mapping[str, Any]] = {}
+    for row in rows:
+        unique_rows.setdefault(
+            canonical_json(row, exclude_volatile=False),
+            row,
+        )
+    return [
+        dict(row)
+        for _, row in sorted(
+            unique_rows.items(),
+            key=lambda item: (
+                str(item[1].get("trade_date") or ""),
+                item[0],
+            ),
+        )
+    ]
+
+
 def _adapt_max_available_at(collection: Any, *, as_of: datetime) -> datetime:
     value = getattr(collection, "max_available_at", None)
     if value is None:
@@ -283,10 +308,11 @@ def _adapt_datasets_payload(
     payload: dict[str, Any] = {}
     for dataset in sorted(rows_by_dataset):
         rows = rows_by_dataset[dataset]
+        projection_rows = _canonical_dataset_projection_rows(rows)
         item = by_name.get(dataset)
         if item is None:
             # Do not infer provider status or reconstruct a row from the DB.
-            payload[dataset] = {"rows": [dict(row) for row in rows]}
+            payload[dataset] = {"rows": projection_rows}
             continue
         available_at = _aware_utc(getattr(item, "available_at"), field=f"{dataset}.available_at")
         data_as_of = _aware_utc(getattr(item, "data_as_of"), field=f"{dataset}.data_as_of")
@@ -297,7 +323,7 @@ def _adapt_datasets_payload(
         payload[dataset] = {
             "dataset": dataset,
             "status": _normalized_status(getattr(item, "status", "")),
-            "row_count": int(getattr(item, "row_count", len(rows))),
+            "row_count": len(projection_rows),
             "available_at": available_at,
             "data_as_of": data_as_of,
             # Keep the current write hash for existing consumers while the full
@@ -305,7 +331,7 @@ def _adapt_datasets_payload(
             "content_hash": content_hash,
             "content_hashes": content_hashes,
             "raw_ref": getattr(item, "raw_ref", None),
-            "rows": [dict(row) for row in rows],
+            "rows": projection_rows,
         }
     return MappingProxyType(canonicalize(payload))
 
@@ -428,24 +454,26 @@ def _news_dataset_payload(collection: Any, *, market: str) -> Mapping[str, Any]:
             "evidence collection must expose to_dataset_input"
         )
     item = to_input(market)
+    normalized = item.normalized
+    rows = (
+        list(normalized)
+        if isinstance(normalized, list)
+        else [dict(normalized)]
+        if isinstance(normalized, Mapping)
+        else []
+    )
     return MappingProxyType(
         canonicalize(
             {
                 "dataset": item.dataset,
-                "scope_type": item.scope_type,
-                "scope_value": item.scope_value,
-                "market": item.market,
-                "provider": item.provider,
-                "schema_version": item.schema_version,
-                "data_as_of": item.data_as_of,
-                "available_at": item.available_at,
-                "observed_at": item.observed_at,
                 "status": item.status,
-                "normalized": item.normalized,
+                "row_count": len(rows),
+                "available_at": item.available_at,
+                "data_as_of": item.data_as_of,
                 "content_hash": content_hash,
                 "content_hashes": [content_hash],
                 "raw_ref": item.raw_ref,
-                "error_code": item.error_code,
+                "rows": rows,
             }
         )
     )
@@ -1060,6 +1088,69 @@ class ResearchRuntimeService:
         self._get_repository().assert_live_lease(prepared.lease)
         _raise_if_stopped(context)
 
+    def get_bound_research_snapshot(
+        self,
+        prepared: PreparedResearch,
+    ) -> Optional[Mapping[str, Any]]:
+        """Return the task-bound final snapshot after exact lineage checks."""
+
+        if not isinstance(prepared, PreparedResearch):
+            raise TypeError("prepared must be a PreparedResearch")
+        self.checkpoint(prepared)
+        record = self._get_repository().get_job_research_snapshot(
+            job_id=prepared.lease.job_id,
+            stock_code=prepared.stock_code,
+        )
+        if record is None:
+            return None
+        expected = {
+            "stock_code": prepared.stock_code,
+            "market": prepared.market,
+            "as_of": prepared.as_of,
+            "factor_snapshot_hash": (
+                prepared.factor_snapshot.content_hash
+                if prepared.factor_snapshot is not None
+                else None
+            ),
+            "evidence_snapshot_hash": (
+                prepared.evidence_snapshot.evidence_hash
+                if prepared.evidence_snapshot is not None
+                else None
+            ),
+            "debate_snapshot_hash": (
+                prepared.debate_snapshot.debate_hash
+                if prepared.debate_snapshot is not None
+                else None
+            ),
+        }
+        raw_as_of = record.get("as_of")
+        if isinstance(raw_as_of, str):
+            try:
+                raw_as_of = datetime.fromisoformat(
+                    raw_as_of.strip().replace("Z", "+00:00")
+                )
+            except ValueError as exc:
+                raise ResearchRuntimeContractError(
+                    "bound final Research snapshot has an invalid as_of"
+                ) from exc
+        actual = {
+            "stock_code": str(record.get("stock_code") or ""),
+            "market": str(record.get("market") or ""),
+            "as_of": _aware_utc(raw_as_of, field="snapshot.as_of"),
+            "factor_snapshot_hash": record.get("factor_snapshot_hash"),
+            "evidence_snapshot_hash": record.get("evidence_snapshot_hash"),
+            "debate_snapshot_hash": record.get("debate_snapshot_hash"),
+        }
+        if actual != expected:
+            mismatched = sorted(
+                key for key in expected if expected[key] != actual[key]
+            )
+            raise ResearchRuntimeContractError(
+                "bound final Research snapshot differs from prepared lineage: "
+                + ",".join(mismatched)
+            )
+        return MappingProxyType(dict(record))
+
     def _flush_provider_health(self, context: Any, collector: Any) -> bool:
         """Best-effort collection-boundary telemetry with no job semantics."""
 
@@ -1096,18 +1187,21 @@ class ResearchRuntimeService:
         *,
         reference_mode: Literal["live", "historical"] = "historical",
         evidence_search: Optional[Callable[..., Any]] = None,
+        requested_mode: str = "auto",
+        priority: int = 50,
+        budget_reservations: Sequence[Mapping[str, Any]] = (),
     ) -> Optional[PreparedResearch]:
         personal_enabled = self._personal_enabled()
         tushare_enabled = self._tushare_enabled()
         factors_enabled = self._factors_enabled()
         evidence_enabled = self._evidence_enabled()
-        debate_enabled = self._debate_enabled()
+        debate_capability_enabled = self._debate_enabled()
         if (
             not personal_enabled
             and not tushare_enabled
             and not factors_enabled
             and not evidence_enabled
-            and not debate_enabled
+            and not debate_capability_enabled
         ):
             return None
         if factors_enabled and (not personal_enabled or not tushare_enabled):
@@ -1120,7 +1214,7 @@ class ResearchRuntimeService:
             raise RuntimeError(
                 "RESEARCH_EVIDENCE_ENABLED requires RESEARCH_FACTORS_ENABLED"
             )
-        if debate_enabled and not evidence_enabled:
+        if debate_capability_enabled and not evidence_enabled:
             raise RuntimeError(
                 "RESEARCH_DEBATE_ENABLED requires RESEARCH_EVIDENCE_ENABLED"
             )
@@ -1312,6 +1406,35 @@ class ResearchRuntimeService:
                     "evidence_coverage": evidence_snapshot.coverage,
                 }
             )
+        task_decision = None
+        debate_enabled = False
+        if factors is not None and evidence_snapshot is not None:
+            from .personal_task_decision import (
+                derive_personal_research_task_decision,
+            )
+
+            task_decision = derive_personal_research_task_decision(
+                requested_mode=requested_mode,
+                priority=priority,
+                debate_enabled=debate_capability_enabled,
+                factors=factors,
+                evidence_snapshot=evidence_snapshot,
+            )
+            debate_enabled = task_decision.debate.triggered
+            research_context_values.update(
+                {
+                    "research_task_mode": task_decision.mode.resolved_mode,
+                    "research_task_decision_hash": task_decision.decision_hash,
+                    "debate_triggered": debate_enabled,
+                    "debate_trigger_reason_codes": list(
+                        task_decision.debate.reason_codes
+                    ),
+                }
+            )
+        normalized_reservations = tuple(
+            MappingProxyType(canonicalize(dict(item), exclude_volatile=False))
+            for item in budget_reservations
+        )
         research_context = MappingProxyType(canonicalize(research_context_values))
         return PreparedResearch(
             stock_code=str(stock_code).strip(),
@@ -1332,6 +1455,8 @@ class ResearchRuntimeService:
             evidence_prompt_context=evidence_prompt_context,
             evidence_enabled=evidence_enabled,
             debate_enabled=debate_enabled,
+            task_decision=task_decision,
+            budget_reservations=normalized_reservations,
         )
 
     def freeze(
@@ -1343,6 +1468,8 @@ class ResearchRuntimeService:
         model_route: Mapping[str, Any],
         policy_version: str,
         policy: Any,
+        *,
+        expected_snapshot_hash: Optional[str] = None,
     ) -> FrozenResearchWrite:
         if not isinstance(prepared, PreparedResearch):
             raise TypeError("prepared must be a PreparedResearch")
@@ -1410,6 +1537,16 @@ class ResearchRuntimeService:
             ),
             **snapshot_kwargs,
         )
+        if expected_snapshot_hash is not None:
+            expected_hash = str(expected_snapshot_hash or "").strip()
+            if not _SHA256_RE.fullmatch(expected_hash):
+                raise ValueError(
+                    "expected_snapshot_hash must be a lowercase SHA-256 digest"
+                )
+            if snapshot.snapshot_hash != expected_hash:
+                raise ResearchRuntimeContractError(
+                    "retry candidate differs from the task-bound final Research snapshot"
+                )
         _raise_if_stopped(context)
         write_result = snapshot.persist(self._get_repository(), lease=prepared.lease)
         _raise_if_stopped(context)

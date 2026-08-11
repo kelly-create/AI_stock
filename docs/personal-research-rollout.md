@@ -2,6 +2,22 @@
 
 个人投研能力采用显式数据库迁移和分阶段 Feature Flag。所有新增开关默认关闭；不配置时保持现有分析、持仓、报告和通知行为。
 
+## 原始批准范围与阶段映射
+
+本文件以最初批准的“DSA 个人 A 股投研二开与生产验证计划”PR0–PR6 为交付真源。后续开发过程中曾把 Evidence 和 Bounded Debate 分别简称为“PR3”和“PR4”；这只是实现批次编号，不代表原计划的同名阶段已经整体完成。为避免再次发生范围漂移，正式验收统一使用下表编号：
+
+| 原计划阶段 | 交付范围 | 当前基线状态 |
+| --- | --- | --- |
+| PR0 | 现网基线、迁移框架、readiness、Feature Flag 与发布骨架 | 已实现、测试并部署 |
+| PR1 | Durable Job、Lease/Heartbeat、追踪、Outbox、Bot 持久任务与 SQLite 备份 | 已实现和测试；生产功能开关尚未启用 |
+| PR2 | Tushare 统一 Provider、不可变 Dataset/Research Snapshot、确定性 Value/Trend/Catalyst/Risk 因子 | 已实现和测试；生产完整研究链尚未启用 |
+| PR3 | 增强关注池、持仓 Opening/Reconciliation、研究预算、Decision Signal 扩展、Portfolio Policy Gate Shadow/Enforce | 代码、迁移、API、Web 与离线测试已落地；生产开关仍为 off，7 个交易日 Shadow 尚未完成 |
+| PR4 | typed Evidence/Claim、个人 Skill、任务模式、按需 Debate、Verifier/Judge、Thesis 与确定性 Gate 联动 | 代码、迁移、只读 API/Web 与离线测试已落地；生产开关与 canary 尚未完成 |
+| PR5 | Decision Outcome v2：T+1 可执行性、5/10/20d、MFE/MAE、基准/行业超额和校准 | 代码、迁移、durable runtime、独立 API/Web、校准与离线测试已落地；生产数据 canary 待分阶段启用后确认 |
+| PR6 | Web、调度、通知、OpenAPI、部署与生产验收收口 | Web、Scheduler 只入队、可选低敏通知、OpenAPI 和文档契约已落地；生产部署与 canary 验收记录尚待完成 |
+
+只有 PR0–PR6 的代码、迁移、离线测试、Web/Docker 验证、生产候选验收、分阶段启用和验收记录全部闭合后，才能标记整个计划完成。代码部署成功不能替代功能启用与业务 canary；Policy Gate 必须先完成 7 个交易日 Shadow 并确认差异报告，才允许切换 Enforce。
+
 ## 数据库迁移
 
 只读检查不会创建数据库、表或 `DatabaseManager`：
@@ -89,7 +105,13 @@ Flag 关闭时，Bot 保持原来的同步、`TaskService` 和后台线程路径
 
 `scripts/fetch_tushare_stock_list.py` 是离线管理员维护工具，保留历史 Tushare SDK 契约，不属于 Durable Worker 账号桶。生产执行前必须停止研究 Worker，并避免与在线采集并行；正常分析、筛选任务和 Scheduler 不得以该脚本绕过统一 Provider。
 
-## PR3 Research Evidence 与可见性
+## 原计划 PR3：关注池、对账、预算与 Policy
+
+增强关注池与持仓 union、Opening/Reconciliation 绝对状态回放及 Web 预览/应用详见[个人投研关注池与持仓对账](personal-research-watchlist-reconciliation.md)。Quick 50、Standard+Deep 20、Debate 8 的默认日预算，Decision Signal 正式字段和 Portfolio Policy Gate 见[个人投研任务、Skill、Debate 与 Thesis](personal-research-execution-artifacts.md)。
+
+Gate 默认 `off`；`shadow` 只记录 would-block 不改动作，`enforce` 只会将被阻断的增风险动作降级为 `observe`，不阻断减仓/退出。无完整组合快照时保持缺失并 fail closed，不伪造零权重或零风险。
+
+## Evidence/Claim 基础（原计划 PR4 组成）
 
 启用 `RESEARCH_EVIDENCE_ENABLED=true` 后，Durable Worker 在已经持久化的因子快照和本轮冻结数据之上构造确定性 Evidence Snapshot。每份快照最多包含 32 条 claim 和 16 条 citation；claim 只使用 `factor_metric` / `reported_event`，citation 只引用已经持久化的 dataset / factor hash，并同时冻结 JSON Pointer、值哈希、可用时间、来源、标题、短摘录和可选规范 URL。构建和持久化边界会重新核对股票、市场、`as_of`、lineage、JSON Pointer 与值哈希；不合法或晚于知识边界的证据 fail closed，不会静默改成“支持”。
 
@@ -104,11 +126,15 @@ Evidence 写入 `research_evidence_snapshots`，并以 `research_evidence_snapsh
 
 关闭 `RESEARCH_EVIDENCE_ENABLED` 只停止新 Evidence 的采集、构建和写入；已有 Evidence、Research Snapshot 及其只读 API 仍可查询。Web 的 Run Flow 默认折叠“研究证据”，只有用户展开且当前来源是 Task 时才按 `taskId` 加载；先读分页摘要，再按 hash 加载展开项的 claim/citation。空结果使用中性状态，失败可重试，Task 切换会丢弃旧请求结果；来源链接仅在协议为 `http` / `https` 时渲染，并使用 `noopener noreferrer`。
 
-## PR4 Bounded Research Debate 与可见性
+## Bounded Research Debate 与可见性（原计划 PR4 组成）
 
-启用 `RESEARCH_DEBATE_ENABLED=true` 还要求 Personal Research、Durable Jobs、Tushare Research、Factors 和 Evidence 全部开启。有可引用 Evidence 时，Durable Worker 从同一份冻结 Evidence 顺序执行 Bull、Bear 两个独立、纯文本的高层 completion；每次 durable attempt 对每个尚未解析的 stance 至多调用一次，已经持久化的成功或终止失败 stance 不会重调。provider 返回到检查点提交之间的崩溃窗口仍可能让未持久化 stance 在 retry 中再次调用，因此不承诺整个 job 生命周期的物理请求 exactly-once。没有可引用 claim 时调用数为零。Debate 无工具、网络或记忆入口，不检索新资料，也不产生 arbiter、thesis、动作、目标价或仓位。每侧最多 6 条 argument 和 6 条 open question；每条 argument 最多引用 8 个既有 claim ID 和 8 个既有 citation ID，限制文本和置信度均有界。模型输出只是解释层，不能成为新 Evidence。
+启用 `RESEARCH_DEBATE_ENABLED=true` 还要求 Personal Research、Durable Jobs、Tushare Research、Factors 和 Evidence 全部开启。这个开关只授予能力，不代表全量任务执行 Debate；只有显式 `debate` 模式，或冻结材料达到冲突/重要性门槛，并且 Evidence 条件完整时才触发。详细门槛见[个人投研任务、Skill、Debate 与 Thesis](personal-research-execution-artifacts.md)。
+
+触发后，Durable Worker 从同一份冻结 Evidence 顺序执行 Bull、Bear 两个独立、纯文本的高层 completion；每次 durable attempt 对每个尚未解析的 stance 至多调用一次，已经持久化的成功或终止失败 stance 不会重调。provider 返回到检查点提交之间的崩溃窗口仍可能让未持久化 stance 在 retry 中再次调用，因此不承诺整个 job 生命周期的物理请求 exactly-once。没有可引用 claim 时调用数为零。Debate 生成器无工具、网络或记忆入口，不检索新资料，也不直接产生 thesis、动作、目标价或仓位。每侧最多 6 条 argument 和 6 条 open question；每条 argument 最多引用 8 个既有 claim ID 和 8 个既有 citation ID，限制文本和置信度均有界。模型输出只是解释层，不能成为新 Evidence。
 
 不可变的 exact request、单侧 turn 和最终 snapshot 分别持久化到 `research_debate_requests`、`research_debate_turns`、`research_debate_snapshots`；request hash 可作为 API lineage 摘要，但 exact messages 绝不通过 API 暴露。写入会重新校验 canonical payload/hash、Evidence lineage、Bull/Bear 顺序与计数，并受当前 lease、过期时间和取消状态 fence。单侧终止失败得到 `partial`，双侧终止失败得到 `generation_failed`；瞬时错误回到 durable retry。每个已确定的 stance 都在继续下一侧前先写入 lease-fenced 检查点：成功侧绑定 `research_debate_turn`，终止失败侧绑定仅含安全错误码的 `research_debate_failure`。因此 lease reclaim 只补同一 request hash 下尚未解析的 stance，prompt/route 漂移会 fail closed，不会重调已终止侧或拼接不同合同；完成后再绑定 `research_debate_snapshot`。`research_snapshots.debate_snapshot_hash` 固定本轮 Debate，且必须与 `evidence_snapshot_hash` 同链。
+
+完整 Personal Research 的恢复边界同样是“检查点已持久化”，不是物理请求 exactly-once：已经提交的 Dataset/Debate/Research/Skill/Review/History/Signal/Thesis 会复用或 fail closed；provider/LLM response 到检查点 commit 的窗口仍可重调。主分析 LLM 以 Analysis History 为恢复检查点，History 一旦提交，terminal resume 必须在 Provider、Debate、主 LLM 之前命中，只补确定性的 Signal/Thesis 尾段。`SAVE_CONTEXT_SNAPSHOT=false` 也不移除 formal replay 所需的私有最小块；该块只含冻结 phase、Policy 模式/版本/hash/代码指纹与服务端组合输入，API 会剥离，尾段禁止重读当前 Portfolio 或当前 Policy 模式。
 
 只读接口：
 
@@ -117,9 +143,15 @@ Evidence 写入 `research_evidence_snapshots`，并以 `research_evidence_snapsh
 
 关闭 `RESEARCH_DEBATE_ENABLED` 只停止新 request/turn/snapshot 的构建和写入，历史 Debate 及其 API 仍可读取。Web Run Flow 在“研究证据”下方默认折叠“研究辩论”，仅对 Task 来源按需加载分页摘要和 hash 详情；列表、详情、加载更多均可重试，切换 Task 会丢弃旧响应，重复页按 Debate hash 去重。所有模型文本按纯文本渲染，不创建链接、不解释 HTML，也不使用浏览器原生 `title` 承载隐藏内容。
 
+## 原计划 PR4：Skill、Verifier/Judge 与 Thesis
+
+五项 Skill 在 LLM 前由冻结因子/Evidence 确定性计算，Debate 如实际触发则必须再通过 Verifier/Judge fail-closed 检查。`RESEARCH_THESIS_ENABLED=true` 后，系统在 Decision Signal 写入后追加不可变 Thesis；未触发 Debate 也可用 Evidence 形成 Thesis，因此 Thesis 不依赖 Debate 开关。
+
+持久任务 API、任务模式、日预算、Skill 计算、Debate 触发、Verifier/Judge、Policy 门槛、Thesis/Artifact API 和 Web 缺失态见[个人投研任务、Skill、Debate 与 Thesis](personal-research-execution-artifacts.md)。
+
 ## 备份与恢复
 
-生产切换前使用 [SQLite 在线备份、校验与恢复](operations/sqlite-backup.md) 创建带 SHA-256、Schema/Index hash、核心表计数、`quick_check` 和外键检查的备份对，再按[研究原始数据归档与取证恢复](operations/research-raw-backup.md)创建与该 SQLite 哈希及引用集合绑定的 raw 归档。恢复演练必须执行 SQLite 严格校验与异名隔离恢复、raw 严格校验与隔离恢复，并通过 `RawArtifactStore` 抽样回读；记录数据库大小、raw 文件数与字节数、运行环境及总耗时，目标 RTO 不超过 15 分钟。默认核心表包括任务、事件、Outbox、组件健康以及不可变 Research Dataset / Factor / Evidence / Debate Request / Debate Turn / Debate Snapshot / Research Snapshot 表；恢复演练不得只验证业务报告表。
+生产切换前使用 [SQLite 在线备份、校验与恢复](operations/sqlite-backup.md) 创建带 SHA-256、Schema/Index hash、核心表计数、`quick_check` 和外键检查的备份对，再按[研究原始数据归档与取证恢复](operations/research-raw-backup.md)创建与该 SQLite 哈希及引用集合绑定的 raw 归档。迁移前 rollback 备份使用当前已部署版本的密封工具与旧 Schema 清单；迁移后必须改用候选版本完整默认清单再次备份、校验，不能把任一阶段的清单拿来冒充另一阶段。恢复演练必须执行 SQLite 严格校验与异名隔离恢复、raw 严格校验与隔离恢复，并通过 `RawArtifactStore` 抽样回读；记录数据库大小、raw 文件数与字节数、运行环境及总耗时，目标 RTO 不超过 15 分钟。默认核心表除任务、事件、Outbox、组件健康和不可变 Research Dataset / Factor / Evidence / Debate / Research Snapshot 外，还应覆盖关注池、Reconciliation、研究预算、Policy Evaluation、Skill Contract/Execution、Debate Review、Thesis 与 Decision Outcome v2 表；恢复演练不得只验证业务报告表。
 
 ## 功能开关和依赖
 
@@ -133,16 +165,19 @@ Evidence 写入 `research_evidence_snapshots`，并以 `research_evidence_snapsh
 | `RESEARCH_DEBATE_ENABLED` | `false` | Personal Research、Research Evidence |
 | `RESEARCH_THESIS_ENABLED` | `false` | Personal Research、Research Evidence |
 | `DECISION_OUTCOME_V2_ENABLED` | `false` | Personal Research、Research Factors |
+| `DECISION_OUTCOME_V2_INTERVAL_MINUTES` | `60` | `1-1440`；仅唯一 Scheduler owner 使用 |
+| `DECISION_OUTCOME_V2_BATCH_LIMIT` | `100` | `1-500`；每轮 durable job 候选上限 |
 | `PORTFOLIO_POLICY_GATE_MODE` | `off` | `shadow`/`enforce` 还要求 Personal Research、Factors、Evidence |
 
-`DECISION_OUTCOME_V2_ENABLED` 只控制个人投研 Outcome v2 的分阶段能力；现有 `decision-signal-v1` 后台维护由 `DECISION_SIGNAL_OUTCOME_ENABLED` 独立控制，默认开启，但只有通过 `SCHEDULE_ENABLED=true` 或 `--schedule` 启动的唯一 Scheduler owner 才会周期执行。关闭 v2 不会关闭 v1，反之亦然。
+`DECISION_OUTCOME_V2_ENABLED` 只控制个人投研 Outcome v2 的分阶段能力；现有 `decision-signal-v1` 后台维护由 `DECISION_SIGNAL_OUTCOME_ENABLED` 独立控制，默认开启，但只有通过 `SCHEDULE_ENABLED=true` 或 `--schedule` 启动的唯一 Scheduler owner 才会周期执行。关闭 v2 不会关闭 v1，反之亦然。v2 Scheduler 只按间隔和批量上限提交 durable job，Provider 访问只发生在 Worker；调度入队固定 `notify=false`。完整合同见[个人投研 Decision Outcome v2](decision-outcome-v2.md)。
 
 建议生产启用顺序：
 
 1. 先运行迁移检查和迁移应用。
 2. 启用 `DURABLE_JOBS_ENABLED` 并验证旧任务契约。
 3. 依次启用 Personal Research、Tushare Research、Factors、Evidence。
-4. 按需启用 Debate、Thesis、Outcome v2。
-5. Policy Gate 先使用 `shadow` 观察，验收后改为 `enforce`。
+4. 先验证 Skill 与基础任务，再分别启用按需 Debate 和 Thesis；Debate 开关不得解读为全量运行。
+5. Policy Gate 使用 `shadow` 完成至少 7 个交易日差异验收后，才可改为 `enforce`。
+6. Outcome v2 只在 PR5 代码、路由、校准和生产验收独立完成后启用；不与 v1 互相代替。
 
 任何不完整依赖组合都会在运行时配置加载阶段拒绝启动，并在 Web 配置保存阶段返回结构化校验错误。回滚时按相反顺序关闭开关；数据库迁移为追加式，关闭开关不要求降级数据库。

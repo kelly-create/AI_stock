@@ -171,6 +171,34 @@ describe('DecisionSignalDetails', () => {
     expect(container.querySelector('[onload]')).toBeNull();
   });
 
+  it('uses the enforced account action as the primary decision and labels buy as upstream', () => {
+    window.localStorage.setItem('dsa.uiLanguage', 'en');
+    render(
+      <UiLanguageProvider>
+        <DecisionSignalDetails
+          item={{
+            ...signal,
+            action: 'buy',
+            actionLabel: null,
+            researchStance: 'bullish',
+            accountAction: 'observe',
+            policyMode: 'enforce',
+            policyDecision: 'block',
+            wouldBlock: true,
+            policyReasons: ['position_weight_limit_exceeded'],
+          }}
+        />
+      </UiLanguageProvider>,
+    );
+
+    expect(screen.getAllByText('Observe').length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText('Policy verdict: Block')).toBeInTheDocument();
+    expect(screen.getByText('Formal personal-research decision')).toBeInTheDocument();
+    expect(screen.getByText('Upstream research action').closest('div')).toHaveTextContent('Buy');
+    expect(screen.getByText('Policy mode').closest('div')).toHaveTextContent('Enforce');
+    expect(screen.getByText('position_weight_limit_exceeded')).toBeInTheDocument();
+  });
+
   it('renders outcome results and feedback controls', () => {
     const onFeedbackSubmit = vi.fn();
     window.localStorage.setItem('dsa.uiLanguage', 'zh');
@@ -234,5 +262,25 @@ describe('DecisionSignalDetails', () => {
 
     expect(screen.getByText('10 days')).toBeInTheDocument();
     expect(screen.queryByText('10d')).not.toBeInTheDocument();
+  });
+
+  it('renders the Policy-adjusted account action in the portfolio summary', () => {
+    window.localStorage.setItem('dsa.uiLanguage', 'en');
+    render(
+      <UiLanguageProvider>
+        <PortfolioSignalSummary
+          item={{
+            ...signal,
+            action: 'buy',
+            accountAction: 'observe',
+            policyMode: 'enforce',
+            policyDecision: 'block',
+          }}
+        />
+      </UiLanguageProvider>,
+    );
+
+    expect(screen.getByText('Observe')).toBeInTheDocument();
+    expect(screen.queryByText('Buy')).not.toBeInTheDocument();
   });
 });

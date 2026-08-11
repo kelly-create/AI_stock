@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from collections import defaultdict
@@ -19,6 +20,7 @@ from src.repositories.portfolio_repo import (
     PortfolioBusyError as RepoPortfolioBusyError,
     PortfolioRepository,
 )
+from src.repositories.portfolio_reconciliation_repo import PortfolioReconciliationRepository
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +98,17 @@ class _AvgState:
     total_cost: float = 0.0
 
 
+@dataclass
+class _LedgerState:
+    cash_balances: Dict[str, float]
+    fifo_lots: Dict[Tuple[str, str, str], List[Dict[str, Any]]]
+    avg_state: Dict[Tuple[str, str, str], _AvgState]
+    fee_total_base: float = 0.0
+    tax_total_base: float = 0.0
+    realized_pnl_base: float = 0.0
+    fx_stale: bool = False
+
+
 @dataclass(frozen=True)
 class _ResolvedPositionPrice:
     price: float
@@ -109,8 +122,15 @@ class _ResolvedPositionPrice:
 class PortfolioService:
     """Business logic for account CRUD, event writes, and snapshot replay."""
 
-    def __init__(self, repo: Optional[PortfolioRepository] = None):
+    def __init__(
+        self,
+        repo: Optional[PortfolioRepository] = None,
+        reconciliation_repo: Optional[PortfolioReconciliationRepository] = None,
+    ):
         self.repo = repo or PortfolioRepository()
+        self.reconciliation_repo = reconciliation_repo or PortfolioReconciliationRepository(
+            db_manager=getattr(self.repo, "db", None)
+        )
 
     # ------------------------------------------------------------------
     # Account CRUD
@@ -612,6 +632,109 @@ class PortfolioService:
             "accounts": accounts_payload,
         }
 
+    def get_reconciliation_book_state(
+        self,
+        *,
+        account_id: int,
+        as_of: date,
+        event_type: str,
+        session: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Return the valuation-free state at an opening/adjustment boundary."""
+
+        event_type_norm = (event_type or "").strip().lower()
+        if event_type_norm not in {"opening", "adjustment"}:
+            raise ValueError("event_type must be opening or adjustment")
+        if session is None:
+            account = self.repo.get_account(account_id)
+        else:
+            account = self.repo.get_account_in_session(
+                session=session,
+                account_id=account_id,
+            )
+        if account is None:
+            raise ValueError(f"Account not found or inactive: {account_id}")
+        state = self._replay_ledger_state(
+            account=account,
+            as_of_date=as_of,
+            cost_method="fifo",
+            session=session,
+            include_as_of_events=event_type_norm != "opening",
+        )
+        return self._ledger_state_to_book(state)
+
+    def get_policy_valuation_state(
+        self,
+        *,
+        account_id: int,
+        as_of: Optional[date] = None,
+    ) -> Dict[str, Any]:
+        """Return a read-only, point-in-time account valuation for Policy Gate.
+
+        Unlike ``get_portfolio_snapshot`` this path never refreshes the
+        position cache or writes a daily snapshot.  It also avoids realtime
+        providers so the resulting policy input can be reproduced from the
+        local ledger, daily prices, and FX facts available at ``as_of``.
+        """
+
+        account = self._require_active_account(account_id)
+        replayed = self._replay_account(
+            account=account,
+            as_of_date=as_of or date.today(),
+            cost_method="fifo",
+            include_realtime=False,
+        )
+        return dict(replayed["public"])
+
+    def list_open_position_identities(
+        self,
+        *,
+        as_of: Optional[date] = None,
+    ) -> List[Tuple[str, str]]:
+        """Read current non-zero holdings directly from immutable ledger events."""
+
+        as_of_date = as_of or date.today()
+        identities: set[Tuple[str, str]] = set()
+        for account in self.repo.list_accounts(include_inactive=False):
+            state = self._replay_ledger_state(
+                account=account,
+                as_of_date=as_of_date,
+                cost_method="fifo",
+            )
+            for (stock_code, market, _currency), lots in state.fifo_lots.items():
+                quantity = sum(float(lot["remaining_quantity"]) for lot in lots)
+                if quantity > EPS:
+                    identities.add((market, stock_code))
+        return sorted(identities)
+
+    @staticmethod
+    def _ledger_state_to_book(state: _LedgerState) -> Dict[str, Any]:
+        cash = [
+            {"currency": currency, "balance": float(balance)}
+            for currency, balance in sorted(state.cash_balances.items())
+            if abs(float(balance)) > EPS
+        ]
+        positions: List[Dict[str, Any]] = []
+        for (stock_code, market, currency), lots in sorted(state.fifo_lots.items()):
+            active_lots = [lot for lot in lots if float(lot["remaining_quantity"]) > EPS]
+            quantity = sum(float(lot["remaining_quantity"]) for lot in active_lots)
+            if quantity <= EPS:
+                continue
+            total_cost = sum(
+                float(lot["remaining_quantity"]) * float(lot["unit_cost"])
+                for lot in active_lots
+            )
+            positions.append(
+                {
+                    "stock_code": stock_code,
+                    "market": market,
+                    "currency": currency,
+                    "quantity": quantity,
+                    "total_cost": total_cost,
+                }
+            )
+        return {"cash": cash, "positions": positions}
+
     def refresh_fx_rates(
         self,
         *,
@@ -704,110 +827,112 @@ class PortfolioService:
         session: Optional[Any] = None,
     ) -> float:
         if session is None:
-            trades = self.repo.list_trades(account_id, as_of=as_of_date)
-            corporate_actions = self.repo.list_corporate_actions(account_id, as_of=as_of_date)
+            account = self.repo.get_account(account_id)
         else:
-            trades = self.repo.list_trades_in_session(session=session, account_id=account_id, as_of=as_of_date)
-            corporate_actions = self.repo.list_corporate_actions_in_session(
+            account = self.repo.get_account_in_session(
                 session=session,
                 account_id=account_id,
-                as_of=as_of_date,
             )
+        if account is None:
+            raise ValueError(f"Account not found or inactive: {account_id}")
+        state = self._replay_ledger_state(
+            account=account,
+            as_of_date=as_of_date,
+            cost_method="fifo",
+            session=session,
+        )
+        return self._held_quantity(
+            key=key,
+            cost_method="fifo",
+            fifo_lots=state.fifo_lots,
+            avg_state=state.avg_state,
+        )
 
-        events = []
-        for row in corporate_actions:
-            event_key = (
-                self._normalize_symbol_for_position(row.symbol),
-                self._normalize_market(row.market),
-                self._normalize_currency(row.currency),
-            )
-            if event_key == key:
-                events.append(("corp", row.effective_date, row.id, row))
-        for row in trades:
-            event_key = (
-                self._normalize_symbol_for_position(row.symbol),
-                self._normalize_market(row.market),
-                self._normalize_currency(row.currency),
-            )
-            if event_key == key:
-                events.append(("trade", row.trade_date, row.id, row))
-
-        # Quantity validation only depends on position-changing events for one symbol.
-        # Cash ledger entries do not affect shares held, so we keep the same corp->trade
-        # ordering as full replay without pulling unrelated cash events into this path.
-        event_priority = {"corp": 1, "trade": 2}
-        events.sort(key=lambda item: (item[1], event_priority[item[0]], item[2]))
-
-        quantity_held = 0.0
-        for event_type, event_date, _, event in events:
-            if event_type == "corp":
-                action_type = (event.action_type or "").strip().lower()
-                if action_type != "split_adjustment":
-                    continue
-                split_ratio = float(event.split_ratio or 0.0)
-                if split_ratio <= 0:
-                    raise ValueError(f"Invalid split_ratio for {key[0]}")
-                if abs(split_ratio - 1.0) <= EPS:
-                    continue
-                quantity_held *= split_ratio
-                continue
-
-            qty = float(event.quantity or 0.0)
-            if qty <= 0:
-                raise ValueError(f"Invalid trade quantity for {key[0]}")
-            side = (event.side or "").strip().lower()
-            if side == "buy":
-                quantity_held += qty
-                continue
-            if side != "sell":
-                raise ValueError(f"Unsupported trade side: {event.side}")
-            if quantity_held + EPS < qty:
-                raise PortfolioOversellError(
-                    symbol=key[0],
-                    trade_date=event_date,
-                    requested_quantity=qty,
-                    available_quantity=quantity_held,
-                )
-            quantity_held -= qty
-            if quantity_held <= EPS:
-                quantity_held = 0.0
-
-        return quantity_held
-
-    def _replay_account(
+    def _replay_ledger_state(
         self,
         *,
         account: Any,
         as_of_date: date,
         cost_method: str,
-        include_realtime: bool,
-    ) -> Dict[str, Any]:
-        trades = self.repo.list_trades(account.id, as_of=as_of_date)
-        cash_ledger = self.repo.list_cash_ledger(account.id, as_of=as_of_date)
-        corporate_actions = self.repo.list_corporate_actions(account.id, as_of=as_of_date)
+        session: Optional[Any] = None,
+        include_as_of_events: bool = True,
+    ) -> _LedgerState:
+        """Replay the immutable ledger without valuation or cache writes."""
 
-        events = []
+        if session is None:
+            trades = self.repo.list_trades(account.id, as_of=as_of_date)
+            cash_ledger = self.repo.list_cash_ledger(account.id, as_of=as_of_date)
+            corporate_actions = self.repo.list_corporate_actions(account.id, as_of=as_of_date)
+        else:
+            trades = self.repo.list_trades_in_session(
+                session=session,
+                account_id=account.id,
+                as_of=as_of_date,
+            )
+            cash_ledger = self.repo.list_cash_ledger_in_session(
+                session=session,
+                account_id=account.id,
+                as_of=as_of_date,
+            )
+            corporate_actions = self.repo.list_corporate_actions_in_session(
+                session=session,
+                account_id=account.id,
+                as_of=as_of_date,
+            )
+        reconciliation_events = self.reconciliation_repo.list_applied_events(
+            account_id=int(account.id),
+            as_of=as_of_date,
+            session=session,
+        )
+
+        events: List[Tuple[str, date, int, Any]] = []
         for row in cash_ledger:
-            events.append(("cash", row.event_date, row.id, row))
+            events.append(("cash", row.event_date, int(row.id), row))
         for row in trades:
-            events.append(("trade", row.trade_date, row.id, row))
+            events.append(("trade", row.trade_date, int(row.id), row))
         for row in corporate_actions:
-            events.append(("corp", row.effective_date, row.id, row))
+            events.append(("corp", row.effective_date, int(row.id), row))
+        for header, adjustments in reconciliation_events:
+            event_type = "opening" if header.event_type == "opening" else "reconciliation"
+            if header.event_version is None:
+                raise ValueError("Applied reconciliation is missing event_version")
+            events.append(
+                (
+                    event_type,
+                    header.effective_date,
+                    int(header.event_version),
+                    (header, adjustments),
+                )
+            )
 
-        # Same-day deterministic ordering: cash -> corporate action -> trade.
-        event_priority = {"cash": 0, "corp": 1, "trade": 2}
+        if not include_as_of_events:
+            events = [item for item in events if item[1] < as_of_date]
+
+        # Opening is an opening-of-day absolute baseline. Adjustment is an
+        # end-of-day state-set after cash/corporate-action/trade events.
+        event_priority = {"opening": -1, "cash": 0, "corp": 1, "trade": 2, "reconciliation": 3}
         events.sort(key=lambda item: (item[1], event_priority[item[0]], item[2]))
 
         cash_balances: Dict[str, float] = defaultdict(float)
-        fees_total_base = 0.0
-        taxes_total_base = 0.0
-        realized_pnl_base = 0.0
-        fx_stale = False
-
         fifo_lots: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
         avg_state: Dict[Tuple[str, str, str], _AvgState] = defaultdict(_AvgState)
+        state = _LedgerState(
+            cash_balances=cash_balances,
+            fifo_lots=fifo_lots,
+            avg_state=avg_state,
+        )
 
         for event_type, event_date, _, event in events:
+            if event_type in {"opening", "reconciliation"}:
+                header, adjustments = event
+                self._apply_reconciliation_adjustments(
+                    header=header,
+                    adjustments=adjustments,
+                    cost_method=cost_method,
+                    state=state,
+                )
+                continue
+
             if event_type == "cash":
                 currency = self._normalize_currency(event.currency)
                 amount = float(event.amount or 0.0)
@@ -835,9 +960,8 @@ class PortfolioService:
                 gross = qty * price
                 side = (event.side or "").lower().strip()
                 if side == "buy":
-                    cash_balances[key[2]] -= (gross + fee + tax)
+                    cash_balances[key[2]] -= gross + fee + tax
                     if cost_method == "fifo":
-                        unit_cost = (gross + fee + tax) / qty
                         fifo_lots[key].append(
                             {
                                 "symbol": key[0],
@@ -845,17 +969,15 @@ class PortfolioService:
                                 "currency": key[2],
                                 "open_date": event_date,
                                 "remaining_quantity": qty,
-                                "unit_cost": unit_cost,
+                                "unit_cost": (gross + fee + tax) / qty,
                                 "source_trade_id": event.id,
                             }
                         )
                     else:
-                        state = avg_state[key]
-                        state.quantity += qty
-                        state.total_cost += (gross + fee + tax)
+                        avg_state[key].quantity += qty
+                        avg_state[key].total_cost += gross + fee + tax
                 elif side == "sell":
-                    cash_balances[key[2]] += (gross - fee - tax)
-                    proceeds_net = gross - fee - tax
+                    cash_balances[key[2]] += gross - fee - tax
                     if cost_method == "fifo":
                         cost_basis = self._consume_fifo_lots(
                             fifo_lots[key],
@@ -870,15 +992,15 @@ class PortfolioService:
                             key[0],
                             event_date,
                         )
-                    realized_local = proceeds_net - cost_basis
+                    realized_local = gross - fee - tax - cost_basis
                     realized_base, stale_realized, _ = self._convert_amount(
                         amount=realized_local,
                         from_currency=key[2],
                         to_currency=account.base_currency,
                         as_of_date=event_date,
                     )
-                    realized_pnl_base += realized_base
-                    fx_stale = fx_stale or stale_realized
+                    state.realized_pnl_base += realized_base
+                    state.fx_stale = state.fx_stale or stale_realized
                 else:
                     raise ValueError(f"Unsupported trade side: {event.side}")
 
@@ -894,9 +1016,9 @@ class PortfolioService:
                     to_currency=account.base_currency,
                     as_of_date=event_date,
                 )
-                fees_total_base += fee_base
-                taxes_total_base += tax_base
-                fx_stale = fx_stale or stale_fee or stale_tax
+                state.fee_total_base += fee_base
+                state.tax_total_base += tax_base
+                state.fx_stale = state.fx_stale or stale_fee or stale_tax
                 continue
 
             if event_type == "corp":
@@ -929,10 +1051,242 @@ class PortfolioService:
                             lot["remaining_quantity"] *= split_ratio
                             lot["unit_cost"] /= split_ratio
                     else:
-                        state = avg_state[key]
-                        state.quantity *= split_ratio
+                        avg_state[key].quantity *= split_ratio
                 else:
                     raise ValueError(f"Unsupported corporate action type: {event.action_type}")
+
+        return state
+
+    def _apply_reconciliation_adjustments(
+        self,
+        *,
+        header: Any,
+        adjustments: Iterable[Any],
+        cost_method: str,
+        state: _LedgerState,
+    ) -> None:
+        """Apply an immutable absolute state-set without trade/PnL semantics.
+
+        Adjustment rows are the human-auditable before/after diff.  Replay is
+        intentionally bound to the header's sealed absolute target instead of
+        only those changed rows: otherwise a later backfilled ledger event for
+        an identity that was unchanged at preview time could survive the
+        reconciliation boundary.
+        """
+
+        for adjustment in adjustments:
+            if int(adjustment.account_id) != int(header.account_id):
+                raise ValueError("Reconciliation adjustment account does not match header")
+            if int(adjustment.reconciliation_id) != int(header.id):
+                raise ValueError("Reconciliation adjustment does not match header")
+            if adjustment.adjustment_type not in {"cash", "position"}:
+                raise ValueError("Unsupported reconciliation adjustment type")
+            for field in ("before_json", "after_json"):
+                try:
+                    payload = json.loads(getattr(adjustment, field))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"Invalid reconciliation {field}") from exc
+                if not isinstance(payload, dict):
+                    raise ValueError(f"Invalid reconciliation {field} state")
+
+        target = self._load_reconciliation_target(header)
+        state.cash_balances.clear()
+        state.fifo_lots.clear()
+        state.avg_state.clear()
+
+        for item in target["cash"]:
+            currency = self._normalize_currency(item["currency"])
+            balance = self._finite_float(item["balance"], field="cash balance")
+            if abs(balance) > EPS:
+                state.cash_balances[currency] = balance
+
+        for item in target["positions"]:
+            symbol = self._normalize_symbol_for_position(item["stock_code"])
+            market = self._normalize_market(item["market"])
+            currency = self._normalize_currency(item["currency"])
+            quantity = self._finite_float(item["quantity"], field="position quantity")
+            total_cost = self._finite_float(item["total_cost"], field="position total_cost")
+            if quantity < -EPS or total_cost < -EPS:
+                raise ValueError("Reconciled position quantity and total_cost must be >= 0")
+            if quantity <= EPS:
+                if total_cost > EPS:
+                    raise ValueError("A zero reconciled quantity must have zero total_cost")
+                quantity = 0.0
+                total_cost = 0.0
+            key = (symbol, market, currency)
+            if cost_method == "fifo":
+                if quantity <= EPS:
+                    state.fifo_lots[key] = []
+                else:
+                    state.fifo_lots[key] = [
+                        {
+                            "symbol": symbol,
+                            "market": market,
+                            "currency": currency,
+                            "open_date": header.effective_date,
+                            "remaining_quantity": quantity,
+                            "unit_cost": total_cost / quantity,
+                            "source_trade_id": None,
+                        }
+                    ]
+            else:
+                state.avg_state[key].quantity = quantity
+                state.avg_state[key].total_cost = total_cost
+
+    def _load_reconciliation_target(self, header: Any) -> Dict[str, List[Dict[str, Any]]]:
+        """Validate and return the canonical absolute target sealed on a header."""
+
+        try:
+            request = json.loads(header.request_json)
+            diff = json.loads(header.diff_json)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Invalid reconciliation contract JSON") from exc
+        required_request = {
+            "book_hash",
+            "contract_version",
+            "effective_date",
+            "event_type",
+            "note",
+            "source",
+            "target",
+            "target_hash",
+        }
+        if not isinstance(request, dict) or set(request) != required_request:
+            raise ValueError("Invalid reconciliation request shape")
+        if not isinstance(diff, dict) or set(diff) != {
+            "adjustments",
+            "book_hash",
+            "contract_version",
+            "target_hash",
+            "warnings",
+        }:
+            raise ValueError("Invalid reconciliation diff shape")
+        if request["contract_version"] != "portfolio-reconciliation-v1":
+            raise ValueError("Unsupported reconciliation contract")
+        if diff["contract_version"] != request["contract_version"]:
+            raise ValueError("Reconciliation contract version mismatch")
+        if not isinstance(diff["adjustments"], list) or not isinstance(diff["warnings"], list):
+            raise ValueError("Invalid reconciliation diff collections")
+        if diff["book_hash"] != request["book_hash"]:
+            raise ValueError("Reconciliation book hash mismatch")
+        if request["event_type"] != header.event_type:
+            raise ValueError("Reconciliation event type mismatch")
+        if request["effective_date"] != header.effective_date.isoformat():
+            raise ValueError("Reconciliation effective date mismatch")
+        if request["note"] != header.note:
+            raise ValueError("Reconciliation note mismatch")
+        if not isinstance(request["source"], str) or not request["source"]:
+            raise ValueError("Invalid reconciliation source")
+        target = request["target"]
+        if not isinstance(target, dict) or set(target) != {"cash", "positions"}:
+            raise ValueError("Invalid reconciliation target shape")
+        if not isinstance(target["cash"], list) or not isinstance(target["positions"], list):
+            raise ValueError("Invalid reconciliation target collections")
+
+        normalized_cash: Dict[str, Dict[str, Any]] = {}
+        for item in target["cash"]:
+            if not isinstance(item, dict) or set(item) != {"balance", "currency"}:
+                raise ValueError("Invalid reconciliation cash target")
+            currency = self._normalize_currency(item["currency"])
+            if currency in normalized_cash:
+                raise ValueError("Duplicate reconciliation cash target")
+            balance = self._finite_float(item["balance"], field="cash balance")
+            if abs(balance) > EPS:
+                normalized_cash[currency] = {"currency": currency, "balance": balance}
+
+        normalized_positions: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+        expected_position_keys = {"currency", "market", "quantity", "stock_code", "total_cost"}
+        for item in target["positions"]:
+            if not isinstance(item, dict) or set(item) != expected_position_keys:
+                raise ValueError("Invalid reconciliation position target")
+            symbol = self._normalize_symbol_for_position(item["stock_code"])
+            market = self._normalize_market(item["market"])
+            currency = self._normalize_currency(item["currency"])
+            quantity = self._finite_float(item["quantity"], field="position quantity")
+            total_cost = self._finite_float(item["total_cost"], field="position total_cost")
+            if quantity <= EPS or total_cost < -EPS:
+                raise ValueError("Invalid reconciliation position target values")
+            identity = (market, symbol, currency)
+            if identity in normalized_positions:
+                raise ValueError("Duplicate reconciliation position target")
+            normalized_positions[identity] = {
+                "stock_code": symbol,
+                "market": market,
+                "currency": currency,
+                "quantity": quantity,
+                "total_cost": total_cost,
+            }
+
+        normalized_target = {
+            "cash": [normalized_cash[key] for key in sorted(normalized_cash)],
+            "positions": [normalized_positions[key] for key in sorted(normalized_positions)],
+        }
+        def canonical(value: Any) -> str:
+            return json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        if canonical(target) != canonical(normalized_target):
+            raise ValueError("Reconciliation target is not canonical")
+        target_hash = hashlib.sha256(canonical(target).encode("utf-8")).hexdigest()
+        if target_hash != request["target_hash"] or target_hash != diff["target_hash"]:
+            raise ValueError("Reconciliation target hash mismatch")
+        input_hash = hashlib.sha256(
+            canonical(
+                {
+                    key: request[key]
+                    for key in (
+                        "contract_version",
+                        "event_type",
+                        "effective_date",
+                        "source",
+                        "note",
+                        "target_hash",
+                        "target",
+                    )
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+        if input_hash != header.input_hash:
+            raise ValueError("Reconciliation input hash mismatch")
+        return normalized_target
+
+    @staticmethod
+    def _finite_float(value: Any, *, field: str) -> float:
+        import math
+
+        if isinstance(value, bool):
+            raise ValueError(f"{field} must be a finite number")
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field} must be a finite number") from exc
+        if not math.isfinite(numeric):
+            raise ValueError(f"{field} must be a finite number")
+        return numeric
+
+    def _replay_account(
+        self,
+        *,
+        account: Any,
+        as_of_date: date,
+        cost_method: str,
+        include_realtime: bool,
+    ) -> Dict[str, Any]:
+        ledger = self._replay_ledger_state(
+            account=account,
+            as_of_date=as_of_date,
+            cost_method=cost_method,
+        )
+        cash_balances = ledger.cash_balances
+        fifo_lots = ledger.fifo_lots
+        avg_state = ledger.avg_state
+        fees_total_base = ledger.fee_total_base
+        taxes_total_base = ledger.tax_total_base
+        realized_pnl_base = ledger.realized_pnl_base
+        fx_stale = ledger.fx_stale
 
         position_rows, lot_rows, market_value_base, total_cost_base, stale_pos = self._build_positions(
             account=account,

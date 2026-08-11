@@ -337,3 +337,91 @@ export interface PortfolioFxRefreshResponse {
   staleCount: number;
   errorCount: number;
 }
+
+export type PortfolioReconciliationEventType = 'opening' | 'adjustment';
+
+export interface PortfolioReconciliationCashTarget {
+  currency: string;
+  balance: number;
+}
+
+export interface PortfolioReconciliationPositionTarget {
+  stockCode: string;
+  market: 'cn' | 'hk' | 'us' | 'jp' | 'kr' | 'tw';
+  currency: string;
+  quantity: number;
+  totalCost: number;
+}
+
+export interface PortfolioReconciliationPreviewRequest {
+  eventType: PortfolioReconciliationEventType;
+  effectiveDate: string;
+  cash: PortfolioReconciliationCashTarget[];
+  positions: PortfolioReconciliationPositionTarget[];
+  source: string;
+  note?: string | null;
+}
+
+export interface PortfolioReconciliationPreviewResponse {
+  id: number;
+  previewToken: string;
+  eventType: PortfolioReconciliationEventType;
+  effectiveDate: string;
+  expiresAt: string;
+  inputHash: string;
+  bookHash: string;
+  targetHash: string;
+  diff: { adjustments?: Array<Record<string, unknown>> };
+  warnings: string[];
+}
+
+export interface PortfolioReconciliationApplyRequest {
+  previewToken: string;
+  idempotencyKey: string;
+}
+
+export interface PortfolioReconciliationItem {
+  id: number;
+  accountId: number;
+  eventType: PortfolioReconciliationEventType;
+  status: 'preview' | 'applied' | 'expired' | 'cancelled';
+  eventVersion?: number | null;
+  effectiveDate: string;
+  inputHash: string;
+  bookHash?: string | null;
+  targetHash?: string | null;
+  source: string;
+  note?: string | null;
+  warnings: string[];
+  expiresAt?: string | null;
+  appliedAt?: string | null;
+  createdAt?: string | null;
+  adjustmentCount?: number | null;
+}
+
+export interface PortfolioReconciliationAdjustmentItem {
+  id: number;
+  identityKey: string;
+  adjustmentType: 'cash' | 'position';
+  stockCode?: string | null;
+  market?: string | null;
+  currency: string;
+  quantityDelta: number;
+  totalCostDelta: number;
+  cashDelta: number;
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
+  createdAt?: string | null;
+}
+
+export interface PortfolioReconciliationDetailResponse extends PortfolioReconciliationItem {
+  target: {
+    cash: PortfolioReconciliationCashTarget[];
+    positions: PortfolioReconciliationPositionTarget[];
+  };
+  adjustments: PortfolioReconciliationAdjustmentItem[];
+}
+
+export interface PortfolioReconciliationListResponse {
+  items: PortfolioReconciliationItem[];
+}

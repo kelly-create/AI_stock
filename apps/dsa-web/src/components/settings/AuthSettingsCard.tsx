@@ -1,5 +1,5 @@
 import type React from 'react';
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { authApi } from '../../api/auth';
 import { getParsedApiError, isParsedApiError, type ParsedApiError } from '../../api/error';
 import { useAuth } from '../../hooks';
@@ -22,7 +22,8 @@ function createNextModeLabel(authEnabled: boolean, desiredEnabled: boolean, t: (
 export const AuthSettingsCard: React.FC = () => {
   const { authEnabled, setupState, refreshStatus } = useAuth();
   const { t } = useUiLanguage();
-  const [desiredEnabled, setDesiredEnabled] = useState(authEnabled);
+  const [desiredEnabledOverride, setDesiredEnabledOverride] = useState<boolean | null>(null);
+  const desiredEnabled = desiredEnabledOverride ?? authEnabled;
   const [currentPassword, setCurrentPassword] = useState('');
   const [password, setPassword] = useState('');
   const [passwordConfirm, setPasswordConfirm] = useState('');
@@ -47,10 +48,6 @@ export const AuthSettingsCard: React.FC = () => {
         return t('settings.authHelperDefault');
     }
   }, [setupState, desiredEnabled, t]);
-
-  useEffect(() => {
-    setDesiredEnabled(authEnabled);
-  }, [authEnabled]);
 
   const resetForm = () => {
     setCurrentPassword('');
@@ -94,6 +91,7 @@ export const AuthSettingsCard: React.FC = () => {
       );
       await refreshStatus();
       setSuccessMessage(desiredEnabled ? t('settings.authSuccessUpdated') : t('settings.authSuccessDisabled'));
+      setDesiredEnabledOverride(null);
       resetForm();
     } catch (err: unknown) {
       setError(getParsedApiError(err));
@@ -127,7 +125,7 @@ export const AuthSettingsCard: React.FC = () => {
               checked={desiredEnabled}
               disabled={isSubmitting}
               label={desiredEnabled ? t('common.enabled') : t('common.disabled')}
-              onChange={(event) => setDesiredEnabled(event.target.checked)}
+              onChange={(event) => setDesiredEnabledOverride(event.target.checked)}
               containerClassName="rounded-full border border-[var(--settings-border)] bg-[var(--settings-surface-hover)] px-4 py-2 shadow-soft-card transition-[background-color,border-color] duration-200 hover:border-[var(--settings-border-strong)] hover:bg-[var(--settings-surface)]"
             />
           </div>
@@ -213,7 +211,7 @@ export const AuthSettingsCard: React.FC = () => {
             type="button"
             variant="settings-secondary"
             onClick={() => {
-              setDesiredEnabled(authEnabled);
+              setDesiredEnabledOverride(null);
               setError(null);
               setSuccessMessage(null);
               resetForm();

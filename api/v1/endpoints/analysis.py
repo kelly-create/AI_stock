@@ -833,7 +833,8 @@ def cancel_analysis_task(task_id: str) -> TaskCancelResponse:
     summary="任务状态 SSE 流",
     description=(
         "通过 Server-Sent Events 实时推送任务状态变化，Durable 模式支持 "
-        "Last-Event-ID 续传和保留窗口缺口重置。"
+        "Last-Event-ID 续传和保留窗口缺口重置；发生保留窗口缺口时会发送 "
+        "stream_reset 事件，客户端必须清空旧游标后重新同步。"
     ),
 )
 async def task_stream(

@@ -14,12 +14,14 @@ A股自选股智能分析系统 - 核心分析流水线
 import json
 import logging
 import inspect
+import math
 import threading
 import time
 import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextvars import copy_context
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import List, Dict, Any, Optional, Tuple, Callable, Mapping
@@ -107,6 +109,8 @@ from bot.models import BotMessage
 
 logger = logging.getLogger(__name__)
 
+PERSONAL_RESEARCH_POLICY_REPLAY_KEY = "_personal_research_policy_replay"
+
 
 def _durable_execution_active() -> bool:
     """Avoid swallowing persistence failures inside a durable worker."""
@@ -119,6 +123,44 @@ def _durable_execution_active() -> bool:
         return get_optional_durable_execution_context() is not None
     except (ImportError, RuntimeError):
         return False
+
+
+def _policy_context_date(
+    context_snapshot: Optional[Mapping[str, Any]],
+    field_name: str,
+) -> Optional[date]:
+    """Resolve one frozen market date without wall-clock fallback."""
+
+    if not isinstance(context_snapshot, Mapping):
+        return None
+    phase = context_snapshot.get(MARKET_PHASE_SUMMARY_KEY)
+    if not isinstance(phase, Mapping):
+        return None
+    raw = phase.get(field_name)
+    if isinstance(raw, date) and not isinstance(raw, datetime):
+        return raw
+    if not isinstance(raw, str):
+        return None
+    try:
+        return date.fromisoformat(raw.strip())
+    except ValueError:
+        return None
+
+
+def _policy_context_as_of(
+    context_snapshot: Optional[Mapping[str, Any]],
+) -> Optional[date]:
+    """Return the latest completed daily bar used for portfolio valuation."""
+
+    return _policy_context_date(context_snapshot, "effective_daily_bar_date")
+
+
+def _policy_context_session_date(
+    context_snapshot: Optional[Mapping[str, Any]],
+) -> Optional[date]:
+    """Return the formal decision session date for lineage and sector facts."""
+
+    return _policy_context_date(context_snapshot, "session_date")
 
 
 def _share_image_payload(result: Any) -> Optional[Dict[str, Any]]:
@@ -240,6 +282,11 @@ class StockAnalysisPipeline:
         portfolio_context: Optional[Dict[str, Any]] = None,
         daily_market_context_enabled: Optional[bool] = None,
         daily_market_context_allow_generate: bool = True,
+        research_mode: str = "auto",
+        research_priority: int = 50,
+        research_manual_daily_override: bool = False,
+        policy_account_id: Optional[int] = None,
+        policy_target_weight_pct: Optional[float] = None,
     ):
         """
         初始化调度器
@@ -267,6 +314,11 @@ class StockAnalysisPipeline:
             else bool(daily_market_context_enabled)
         )
         self.daily_market_context_allow_generate = daily_market_context_allow_generate
+        self.research_mode = research_mode
+        self.research_priority = research_priority
+        self.research_manual_daily_override = research_manual_daily_override
+        self.policy_account_id = policy_account_id
+        self.policy_target_weight_pct = policy_target_weight_pct
         
         # 初始化各模块
         self.db = get_db()
@@ -392,6 +444,50 @@ class StockAnalysisPipeline:
                 self._research_runtime = runtime
         return runtime
 
+    def _reserve_research_budget(
+        self,
+        *,
+        code: str,
+        market: str,
+        requested_mode: str,
+        trigger_source: str,
+        budget_date: date,
+    ) -> Mapping[str, Any]:
+        """Reserve and consume one durable, stock-scoped research budget slot."""
+
+        from src.services.durable_job_handlers import (
+            get_optional_durable_execution_context,
+        )
+        from src.services.research_budget_service import ResearchBudgetService
+
+        context = get_optional_durable_execution_context()
+        if context is None:
+            raise RuntimeError(
+                "personal research budgets require a durable Worker execution"
+            )
+        context.checkpoint()
+        service = ResearchBudgetService(config=self.config)
+        reservation = service.reserve(
+            task_id=context.job_id,
+            stock_code=code,
+            market=market,
+            requested_mode=requested_mode,
+            trigger_source=trigger_source,
+            priority=self.research_priority,
+            manual_daily_override=self.research_manual_daily_override,
+            budget_date=budget_date,
+        )
+        transition = service.consume(int(reservation["id"]))
+        context.checkpoint()
+        return {
+            **{
+                key: value
+                for key, value in reservation.items()
+                if key not in {"created", "created_at", "updated_at"}
+            },
+            "status": transition["status"],
+        }
+
     def _prepare_research_for_stock(
         self,
         code: str,
@@ -411,10 +507,235 @@ class StockAnalysisPipeline:
         if reference_mode not in {"live", "historical"}:
             raise ValueError("reference_mode must be 'live' or 'historical'")
         self._emit_progress(14, f"{code}：正在冻结研究数据集")
-        prepare_kwargs: Dict[str, Any] = {"reference_mode": reference_mode}
+        prepare_kwargs: Dict[str, Any] = {
+            "reference_mode": reference_mode,
+        }
+        if bool(
+            getattr(self.config, "personal_research_enabled", False)
+        ) and _durable_execution_active():
+            requested_mode = str(getattr(self, "research_mode", "auto") or "auto")
+            priority = int(getattr(self, "research_priority", 50))
+            reservation = self._reserve_research_budget(
+                code=code,
+                market=market,
+                requested_mode=requested_mode,
+                trigger_source=(
+                    getattr(self, "query_source", None) or "durable_worker"
+                ),
+                budget_date=as_of.astimezone(ZoneInfo("Asia/Shanghai")).date(),
+            )
+            prepare_kwargs.update(
+                {
+                    "requested_mode": requested_mode,
+                    "priority": priority,
+                    "budget_reservations": (reservation,),
+                }
+            )
         if bool(getattr(self.config, "research_evidence_enabled", False)):
             prepare_kwargs["evidence_search"] = self._search_research_evidence
         return self._get_research_runtime().prepare(code, market, as_of, **prepare_kwargs)
+
+    def _load_personal_research_terminal_resume(
+        self,
+        *,
+        code: str,
+        report_type: ReportType,
+        query_id: str,
+    ) -> Any:
+        """Load a terminal personal-research checkpoint before any provider call."""
+
+        config = getattr(self, "config", None)
+        if not bool(getattr(config, "personal_research_enabled", False)):
+            return None
+        from src.services.durable_job_handlers import (
+            get_optional_durable_execution_context,
+        )
+
+        context = get_optional_durable_execution_context()
+        if (
+            context is None
+            or str(getattr(context.claimed_job, "job_type", "") or "")
+            != "personal_research"
+        ):
+            return None
+        context.checkpoint()
+        from src.services.personal_research_artifact_service import (
+            PersonalResearchArtifactService,
+        )
+
+        market = get_market_for_stock(normalize_stock_code(code)) or "cn"
+        resumed = PersonalResearchArtifactService(self.db).load_terminal_resume(
+            task_id=context.job_id,
+            stock_code=code,
+            market=market,
+            report_type=report_type.value,
+            query_id=query_id,
+        )
+        context.checkpoint()
+        return resumed
+
+    def _complete_personal_research_terminal_resume(
+        self,
+        resumed: Any,
+        *,
+        query_id: str,
+        report_type: ReportType,
+    ) -> AnalysisResult:
+        """Run only missing deterministic post-history work for a retry."""
+
+        result = resumed.result
+        record_history_run(
+            report_saved=True,
+            metadata_saved=True,
+            analysis_history_id=resumed.history_id,
+        )
+        signal_item = resumed.signal_item
+        if isinstance(signal_item, Mapping):
+            summary = summarize_decision_signal(signal_item)
+            if summary:
+                setattr(result, "decision_signal_summary", summary)
+            if resumed.thesis_hash is not None:
+                setattr(
+                    result,
+                    "personal_research_thesis_hash",
+                    resumed.thesis_hash,
+                )
+            elif bool(getattr(self.config, "research_thesis_enabled", False)):
+                from src.services.personal_research_artifact_service import (
+                    PersonalResearchArtifactService,
+                )
+
+                canonical_action = resolve_decision_signal_action_fields(
+                    result,
+                    report_type=report_type.value,
+                ).get("action")
+                thesis_write = PersonalResearchArtifactService(
+                    self.db
+                ).persist_thesis(
+                    artifacts=resumed.artifacts,
+                    legacy_action=canonical_action,
+                    signal_item=signal_item,
+                )
+                setattr(
+                    result,
+                    "personal_research_thesis_hash",
+                    thesis_write.content_hash,
+                )
+        else:
+            self._extract_decision_signal_after_history_save(
+                result=result,
+                query_id=query_id,
+                source_report_id=resumed.history_id,
+                report_type=report_type.value,
+                context_snapshot=dict(resumed.context_snapshot),
+                portfolio_context=getattr(self, "portfolio_context", None),
+            )
+        return result
+
+    def _freeze_personal_research_policy_replay(
+        self,
+        *,
+        result: AnalysisResult,
+        report_type: str,
+        context_snapshot: Dict[str, Any],
+    ) -> Optional[Mapping[str, Any]]:
+        """Freeze the server-owned Policy input before history becomes authoritative."""
+
+        artifacts = getattr(result, "_personal_research_artifacts", None)
+        if artifacts is None:
+            return None
+        from src.services.portfolio_policy_gate_service import (
+            build_portfolio_policy_replay_contract,
+        )
+
+        mode = str(
+            getattr(self.config, "portfolio_policy_gate_mode", "off") or "off"
+        ).strip().lower()
+        contract = build_portfolio_policy_replay_contract(mode)
+        policy_context: Mapping[str, Any] = {}
+        if mode != "off":
+            canonical_action = resolve_decision_signal_action_fields(
+                result,
+                report_type=report_type,
+            ).get("action")
+            formal_fields = artifacts.decision_signal_fields(canonical_action)
+            from src.services.personal_research_policy_context_service import (
+                PersonalResearchPolicyContextService,
+            )
+            from src.utils.sniper_points import extract_sniper_points
+
+            sniper_points = extract_sniper_points(result)
+            entry_candidates: list[float] = []
+            for raw_entry in (
+                sniper_points.get("ideal_buy"),
+                sniper_points.get("secondary_buy"),
+            ):
+                try:
+                    parsed_entry = float(raw_entry)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(parsed_entry) and parsed_entry > 0:
+                    entry_candidates.append(parsed_entry)
+            policy_context = PersonalResearchPolicyContextService(
+                db_manager=self.db
+            ).build(
+                account_id=getattr(self, "policy_account_id", None),
+                stock_code=str(getattr(result, "code", "") or ""),
+                target_weight_pct=getattr(
+                    self,
+                    "policy_target_weight_pct",
+                    None,
+                ),
+                entry_price=max(entry_candidates) if entry_candidates else None,
+                stop_loss=sniper_points.get("stop_loss"),
+                proposed_account_action=formal_fields.get("account_action"),
+                as_of=_policy_context_as_of(context_snapshot),
+                decision_session_date=_policy_context_session_date(
+                    context_snapshot
+                ),
+            )
+        phase = context_snapshot.get(MARKET_PHASE_SUMMARY_KEY)
+        if not isinstance(phase, Mapping):
+            raise RuntimeError(
+                "personal research requires a frozen market phase before history save"
+            )
+        replay_payload = {
+            "schema_version": "personal-research-policy-replay-v1",
+            "contract": dict(contract),
+            "policy_context": dict(policy_context),
+            "market_phase_summary": dict(phase),
+        }
+        from src.services.research.canonical import canonical_hash
+
+        replay = {
+            **replay_payload,
+            "replay_hash": canonical_hash(
+                replay_payload,
+                exclude_volatile=False,
+            ),
+        }
+        context_snapshot[PERSONAL_RESEARCH_POLICY_REPLAY_KEY] = replay
+        return replay
+
+    def _personal_research_history_context(
+        self,
+        *,
+        result: AnalysisResult,
+        report_type: str,
+        context_snapshot: Dict[str, Any],
+    ) -> Tuple[Dict[str, Any], bool]:
+        """Return the full or minimal private history snapshot for formal replay."""
+
+        replay = self._freeze_personal_research_policy_replay(
+            result=result,
+            report_type=report_type,
+            context_snapshot=context_snapshot,
+        )
+        if replay is None:
+            return context_snapshot, bool(self.save_context_snapshot)
+        if self.save_context_snapshot:
+            return context_snapshot, True
+        return {PERSONAL_RESEARCH_POLICY_REPLAY_KEY: dict(replay)}, True
 
     def _search_research_evidence(
         self,
@@ -580,6 +901,64 @@ class StockAnalysisPipeline:
             getattr(prepared_research, "debate_enabled", False)
         ):
             return prepared_research
+
+        task_decision = getattr(prepared_research, "task_decision", None)
+        resolved_mode = str(
+            getattr(getattr(task_decision, "mode", None), "resolved_mode", "") or ""
+        )
+        existing_reservations = tuple(
+            getattr(prepared_research, "budget_reservations", ()) or ()
+        )
+        has_debate_budget = any(
+            str(item.get("bucket") or "") == "debate"
+            for item in existing_reservations
+            if isinstance(item, Mapping)
+        )
+        if (
+            bool(getattr(self.config, "personal_research_enabled", False))
+            and _durable_execution_active()
+            and resolved_mode != "debate"
+            and not has_debate_budget
+        ):
+            budget_date_value = next(
+                (
+                    item.get("budget_date")
+                    for item in existing_reservations
+                    if isinstance(item, Mapping) and item.get("budget_date")
+                ),
+                None,
+            )
+            if isinstance(budget_date_value, str):
+                try:
+                    debate_budget_date = date.fromisoformat(budget_date_value)
+                except ValueError as exc:
+                    raise RuntimeError(
+                        "prepared research has an invalid frozen budget_date"
+                    ) from exc
+            elif isinstance(budget_date_value, date):
+                debate_budget_date = budget_date_value
+            else:
+                research_as_of = self._research_as_of(prepared_research)
+                if research_as_of is None:
+                    raise RuntimeError(
+                        "prepared research has no frozen budget date"
+                    )
+                debate_budget_date = research_as_of.astimezone(
+                    ZoneInfo("Asia/Shanghai")
+                ).date()
+            debate_reservation = self._reserve_research_budget(
+                code=str(getattr(prepared_research, "stock_code", "") or ""),
+                market=str(
+                    getattr(prepared_research, "market", "cn") or "cn"
+                ).lower(),
+                requested_mode="debate",
+                trigger_source="conflict_policy",
+                budget_date=debate_budget_date,
+            )
+            prepared_research = replace(
+                prepared_research,
+                budget_reservations=(*existing_reservations, debate_reservation),
+            )
 
         from src.services.research.debate_runner import (
             DebateCompletionResult,
@@ -803,11 +1182,47 @@ class StockAnalysisPipeline:
             "decision_execution": self._build_research_execution_policy(
                 use_agent=use_agent,
             ),
+            "task_decision": (
+                prepared_research.task_decision.policy_payload()
+                if getattr(prepared_research, "task_decision", None) is not None
+                else None
+            ),
+            "budget_reservations": [
+                dict(item)
+                for item in tuple(
+                    getattr(prepared_research, "budget_reservations", ()) or ()
+                )
+            ],
         }
 
-        return self._get_research_runtime().freeze(
+        runtime = self._get_research_runtime()
+        bound_loader = getattr(runtime, "get_bound_research_snapshot", None)
+        bound_snapshot = (
+            bound_loader(prepared_research) if callable(bound_loader) else None
+        )
+        stable_context_pack = context_pack
+        copy_pack = getattr(context_pack, "model_copy", None)
+        if callable(copy_pack):
+            # AnalysisContextPack.created_at is diagnostic wall-clock metadata.
+            # Pin it to the durable knowledge boundary so a retry can prove it
+            # rebuilt the exact same frozen prompt contract.
+            stable_context_pack = copy_pack(
+                update={"created_at": prepared_research.as_of},
+                deep=True,
+            )
+        elif isinstance(context_pack, Mapping):
+            stable_context_pack = {
+                **dict(context_pack),
+                "created_at": prepared_research.as_of,
+            }
+        freeze_kwargs = (
+            {"expected_snapshot_hash": str(bound_snapshot.get("snapshot_hash"))}
+            if bound_snapshot is not None
+            else {}
+        )
+        frozen_write = runtime.freeze(
             prepared_research,
-            context_pack,
+            stable_context_pack,
             "agent-analysis-v1" if use_agent else "traditional-analysis-v1",
             prompt,
             self._build_research_model_route(
@@ -816,9 +1231,22 @@ class StockAnalysisPipeline:
                 max_steps=max_steps,
                 timeout_seconds=timeout_seconds,
             ),
-            f"{POLICY_VERSION}+decision-execution-v1",
+            f"{POLICY_VERSION}-decision-execution-v1",
             policy,
+            **freeze_kwargs,
         )
+        if bool(
+            getattr(self.config, "personal_research_enabled", False)
+        ) and _durable_execution_active():
+            from src.services.personal_research_artifact_service import (
+                PersonalResearchArtifactService,
+            )
+
+            return PersonalResearchArtifactService(self.db).persist_pre_llm(
+                prepared=prepared_research,
+                frozen_write=frozen_write,
+            )
+        return frozen_write
 
     def _build_research_execution_policy(self, *, use_agent: bool) -> Dict[str, Any]:
         """Return a secret-free fingerprint of deterministic final-decision policy."""
@@ -973,6 +1401,7 @@ class StockAnalysisPipeline:
             portfolio_context = getattr(self, "portfolio_context", None)
             if not isinstance(portfolio_context, dict):
                 portfolio_context = None
+            personal_research_artifacts = None
             if prepared_research is not None:
                 # A current portfolio is not historical market evidence. Keep
                 # the immutable research replay independent from later account
@@ -1404,7 +1833,7 @@ class StockAnalysisPipeline:
                     report_language,
                     stock_code=code,
                 )
-                self._freeze_research_before_llm(
+                personal_research_artifacts = self._freeze_research_before_llm(
                     prepared_research,
                     context_pack=analysis_context_pack,
                     prompt={
@@ -1441,6 +1870,20 @@ class StockAnalysisPipeline:
                     stream_progress_callback=_on_llm_stream,
                     analysis_context_pack_summary=analysis_context_pack_summary,
                 )
+                if personal_research_artifacts is not None:
+                    from src.services.personal_research_artifact_service import (
+                        FrozenPersonalResearchArtifacts,
+                    )
+
+                    if isinstance(
+                        personal_research_artifacts,
+                        FrozenPersonalResearchArtifacts,
+                    ):
+                        setattr(
+                            result,
+                            "_personal_research_artifacts",
+                            personal_research_artifacts,
+                        )
                 llm_duration_ms = int((time.monotonic() - llm_started_at) * 1000)
                 record_llm_run(
                     success=bool(result and getattr(result, "success", True)),
@@ -1533,13 +1976,20 @@ class StockAnalysisPipeline:
                         market_phase_summary=market_phase_summary,
                     )
                     result.diagnostic_context_snapshot = context_snapshot
+                    history_context_snapshot, save_history_snapshot = (
+                        self._personal_research_history_context(
+                            result=result,
+                            report_type=report_type.value,
+                            context_snapshot=context_snapshot,
+                        )
+                    )
                     saved_history_id = self.db.save_analysis_history(
                         result=result,
                         query_id=query_id,
                         report_type=report_type.value,
                         news_content=news_context,
-                        context_snapshot=context_snapshot,
-                        save_snapshot=self.save_context_snapshot
+                        context_snapshot=history_context_snapshot,
+                        save_snapshot=save_history_snapshot,
                     )
                     if getattr(result, "_durable_history_reused", False):
                         frozen_context = getattr(
@@ -2000,7 +2450,7 @@ class StockAnalysisPipeline:
         min_days: int = 240,
         *,
         allow_network: bool = True,
-    ) -> None:
+    ) -> Optional[Dict[str, Any]]:
         """Ensure at least *min_days* of K-line history is in DB for agent tools."""
         from src.services.history_loader import get_frozen_target_date
 
@@ -2063,6 +2513,7 @@ class StockAnalysisPipeline:
             # request. Flag-off and non-research runs keep the legacy registry.
             research_tool_registry = None
             executor_kwargs: Dict[str, Any] = {}
+            personal_research_artifacts = None
             if prepared_research is not None:
                 from src.agent.tools.registry import ToolRegistry
 
@@ -2224,7 +2675,7 @@ class StockAnalysisPipeline:
                     context=initial_context,
                 )
                 tool_declarations = executor.tool_registry.to_openai_tools()
-                self._freeze_research_before_llm(
+                personal_research_artifacts = self._freeze_research_before_llm(
                     prepared_research,
                     context_pack=analysis_context_pack,
                     prompt=exact_prompt,
@@ -2260,6 +2711,20 @@ class StockAnalysisPipeline:
                 query_id,
                 trend_result=trend_result,
             )
+            if personal_research_artifacts is not None:
+                from src.services.personal_research_artifact_service import (
+                    FrozenPersonalResearchArtifacts,
+                )
+
+                if isinstance(
+                    personal_research_artifacts,
+                    FrozenPersonalResearchArtifacts,
+                ):
+                    setattr(
+                        result,
+                        "_personal_research_artifacts",
+                        personal_research_artifacts,
+                    )
             record_llm_run(
                 success=bool(result and getattr(result, "success", True)),
                 model=getattr(result, "model_used", None) if result else getattr(agent_result, "model", None),
@@ -2479,13 +2944,20 @@ class StockAnalysisPipeline:
                     )
                     result.diagnostic_context_snapshot = agent_context_snapshot
                     agent_context_snapshot["stock_name"] = resolved_stock_name
+                    history_context_snapshot, save_history_snapshot = (
+                        self._personal_research_history_context(
+                            result=result,
+                            report_type=report_type.value,
+                            context_snapshot=agent_context_snapshot,
+                        )
+                    )
                     saved_history_id = self.db.save_analysis_history(
                         result=result,
                         query_id=query_id,
                         report_type=report_type.value,
                         news_content=None,
-                        context_snapshot=agent_context_snapshot,
-                        save_snapshot=self.save_context_snapshot,
+                        context_snapshot=history_context_snapshot,
+                        save_snapshot=save_history_snapshot,
                     )
                     if getattr(result, "_durable_history_reused", False):
                         frozen_context = getattr(
@@ -2666,6 +3138,42 @@ class StockAnalysisPipeline:
                 ].copy()
                 frame["date"] = parsed_dates.loc[frame.index]
             frame = frame.sort_values("date")
+
+        # Frozen Tushare ``daily`` snapshots intentionally contain only raw
+        # market columns.  The legacy fetcher path enriches those rows with
+        # moving averages before they reach this builder, so deriving the
+        # indicators here keeps both paths equivalent without reading mutable
+        # global history.  Existing provider-supplied values remain
+        # authoritative; only missing columns/cells are filled.
+        if "close" in frame.columns:
+            close_values = pd.to_numeric(frame["close"], errors="coerce")
+            for window in (5, 10, 20):
+                key = f"ma{window}"
+                derived = close_values.rolling(
+                    window=window, min_periods=1
+                ).mean().round(2)
+                if key in frame.columns:
+                    current = pd.to_numeric(frame[key], errors="coerce")
+                    frame[key] = current.where(current.notna(), derived)
+                else:
+                    frame[key] = derived
+        if "volume" in frame.columns:
+            volume_values = pd.to_numeric(frame["volume"], errors="coerce")
+            previous_average = (
+                volume_values.rolling(window=5, min_periods=1).mean().shift(1)
+            )
+            derived_ratio = volume_values.div(previous_average).replace(
+                [float("inf"), float("-inf")], pd.NA
+            ).fillna(1.0).round(2)
+            if "volume_ratio" in frame.columns:
+                current_ratio = pd.to_numeric(
+                    frame["volume_ratio"], errors="coerce"
+                )
+                frame["volume_ratio"] = current_ratio.where(
+                    current_ratio.notna(), derived_ratio
+                )
+            else:
+                frame["volume_ratio"] = derived_ratio
         frame = frame.tail(2)
         rows = frame.to_dict(orient="records")
         if not rows:
@@ -2701,7 +3209,14 @@ class StockAnalysisPipeline:
                     (float(today.get("close", 0)) - float(yesterday_close)) / float(yesterday_close) * 100,
                     2,
                 )
-            context["ma_status"] = self.db._analyze_ma_status(SimpleNamespace(**today))
+            context["ma_status"] = self.db._analyze_ma_status(
+                SimpleNamespace(
+                    close=today.get("close"),
+                    ma5=today.get("ma5"),
+                    ma10=today.get("ma10"),
+                    ma20=today.get("ma20"),
+                )
+            )
 
         return context
 
@@ -2782,7 +3297,7 @@ class StockAnalysisPipeline:
         daily_market_context: Optional[DailyMarketContext],
         *,
         report_language: str,
-    ) -> None:
+    ) -> Optional[Dict[str, Any]]:
         """Attach only the safe daily market summary to runtime analysis context."""
         if daily_market_context is None:
             return
@@ -3527,6 +4042,92 @@ class StockAnalysisPipeline:
                 or getattr(self, "trace_id", None)
                 or query_id
             )
+            personal_artifacts = getattr(
+                result,
+                "_personal_research_artifacts",
+                None,
+            )
+            formal_fields = None
+            canonical_action = None
+            if personal_artifacts is not None:
+                from src.services.decision_signal_extractor import (
+                    resolve_decision_signal_action_fields,
+                )
+
+                canonical_action = resolve_decision_signal_action_fields(
+                    result,
+                    report_type=report_type,
+                ).get("action")
+                formal_fields = personal_artifacts.decision_signal_fields(
+                    canonical_action
+                )
+                replay = context_snapshot.get(
+                    PERSONAL_RESEARCH_POLICY_REPLAY_KEY
+                )
+                if replay is None and _durable_execution_active():
+                    raise RuntimeError(
+                        "durable personal research history is missing frozen Policy replay"
+                    )
+                if isinstance(replay, Mapping):
+                    contract = replay.get("contract")
+                    policy_context = replay.get("policy_context")
+                    frozen_phase = replay.get("market_phase_summary")
+                    replay_hash = str(replay.get("replay_hash") or "")
+                    if (
+                        replay.get("schema_version")
+                        != "personal-research-policy-replay-v1"
+                        or not isinstance(contract, Mapping)
+                        or not isinstance(policy_context, Mapping)
+                        or not isinstance(frozen_phase, Mapping)
+                    ):
+                        raise RuntimeError(
+                            "frozen personal research Policy replay is incomplete"
+                        )
+                    from src.services.research.canonical import canonical_hash
+
+                    replay_payload = {
+                        "schema_version": replay["schema_version"],
+                        "contract": dict(contract),
+                        "policy_context": dict(policy_context),
+                        "market_phase_summary": dict(frozen_phase),
+                    }
+                    if replay_hash != canonical_hash(
+                        replay_payload,
+                        exclude_volatile=False,
+                    ):
+                        raise RuntimeError(
+                            "frozen personal research Policy replay hash differs"
+                        )
+                    formal_fields = {
+                        **formal_fields,
+                        "policy_replay_contract": dict(contract),
+                        "policy_context": dict(policy_context),
+                    }
+                    if not isinstance(
+                        context_snapshot.get(MARKET_PHASE_SUMMARY_KEY),
+                        Mapping,
+                    ):
+                        context_snapshot = {
+                            **context_snapshot,
+                            MARKET_PHASE_SUMMARY_KEY: dict(frozen_phase),
+                        }
+                elif str(
+                    getattr(self.config, "portfolio_policy_gate_mode", "off")
+                    or "off"
+                ).strip().lower() != "off":
+                    # Compatibility for non-durable direct callers. Formal
+                    # durable runs always freeze this before history commit.
+                    replay = self._freeze_personal_research_policy_replay(
+                        result=result,
+                        report_type=report_type,
+                        context_snapshot=context_snapshot,
+                    )
+                    if replay is not None:
+                        formal_fields = {
+                            **formal_fields,
+                            "policy_replay_contract": dict(replay["contract"]),
+                            "policy_context": dict(replay["policy_context"]),
+                        }
             signal_result = extract_and_persist_from_analysis_result(
                 result,
                 context_snapshot=context_snapshot,
@@ -3536,11 +4137,31 @@ class StockAnalysisPipeline:
                 report_type=report_type,
                 portfolio_context=portfolio_context,
                 profile_source="auto_default",
+                personal_research_fields=formal_fields,
             )
             if isinstance(signal_result, dict):
                 summary = summarize_decision_signal(signal_result.get("item"))
                 if summary:
                     setattr(result, "decision_signal_summary", summary)
+            if (
+                personal_artifacts is not None
+                and bool(getattr(self.config, "research_thesis_enabled", False))
+            ):
+                from src.services.personal_research_artifact_service import (
+                    PersonalResearchArtifactService,
+                )
+
+                thesis_write = PersonalResearchArtifactService(self.db).persist_thesis(
+                    artifacts=personal_artifacts,
+                    legacy_action=canonical_action,
+                    signal_item=(
+                        signal_result.get("item")
+                        if isinstance(signal_result, dict)
+                        else None
+                    ),
+                )
+                setattr(result, "personal_research_thesis_hash", thesis_write.content_hash)
+            return signal_result
         except Exception as exc:
             if _durable_execution_active():
                 raise
@@ -3551,6 +4172,7 @@ class StockAnalysisPipeline:
                 exc,
                 exc_info=True,
             )
+            return None
 
     @staticmethod
     def _build_notification_run_snapshot(
@@ -3993,6 +4615,37 @@ class StockAnalysisPipeline:
                 trigger_source=getattr(self, "query_source", None),
             )
         try:
+            terminal_resume = None
+            if not skip_analysis:
+                terminal_resume = self._load_personal_research_terminal_resume(
+                    code=code,
+                    report_type=report_type,
+                    query_id=effective_query_id,
+                )
+            if terminal_resume is not None:
+                self._emit_progress(
+                    96,
+                    f"{code}: resuming frozen personal research report",
+                )
+                result = self._complete_personal_research_terminal_resume(
+                    terminal_resume,
+                    query_id=effective_query_id,
+                    report_type=report_type,
+                )
+                logger.info(
+                    "[%s] resumed immutable personal research history without "
+                    "provider or LLM execution: history_id=%s",
+                    code,
+                    terminal_resume.history_id,
+                )
+                if result.success and single_stock_notify:
+                    self._send_single_stock_notification(
+                        result,
+                        report_type=report_type,
+                        fallback_code=code,
+                    )
+                return result
+
             self._emit_progress(12, f"{code}：正在准备分析任务")
             # Step 1: 获取并保存数据
             prepared_research = None

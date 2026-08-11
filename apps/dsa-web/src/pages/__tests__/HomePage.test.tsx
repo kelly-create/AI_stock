@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { analysisApi, DuplicateTaskError } from '../../api/analysis';
 import { agentApi } from '../../api/agent';
 import { historyApi } from '../../api/history';
+import { researchWatchlistApi } from '../../api/research';
 import { systemConfigApi } from '../../api/systemConfig';
 import { UiLanguageProvider } from '../../contexts/UiLanguageContext';
 import { useTaskStream } from '../../hooks/useTaskStream';
@@ -59,6 +60,19 @@ vi.mock('../../api/systemConfig', () => ({
     removeFromWatchlist: vi.fn().mockResolvedValue([]),
   },
 }));
+
+vi.mock('../../api/research', async () => {
+  const actual = await vi.importActual<typeof import('../../api/research')>('../../api/research');
+  return {
+    ...actual,
+    researchWatchlistApi: {
+      getWatchlist: vi.fn(),
+      getUniverse: vi.fn(),
+      upsertItem: vi.fn(),
+      removeItem: vi.fn(),
+    },
+  };
+});
 
 vi.mock('../../api/agent', () => ({
   agentApi: {
@@ -221,6 +235,10 @@ describe('HomePage', () => {
       tasks: [],
     });
     vi.mocked(systemConfigApi.getWatchlist).mockResolvedValue([]);
+    vi.mocked(researchWatchlistApi.getUniverse).mockRejectedValue(
+      new Error('research universe unavailable'),
+    );
+    vi.mocked(researchWatchlistApi.removeItem).mockResolvedValue({ deleted: 1 });
     vi.mocked(agentApi.getSkills).mockResolvedValue({ skills: [], default_skill_id: '' });
     vi.mocked(historyApi.getDiagnostics).mockResolvedValue({
       status: 'unknown',

@@ -7,6 +7,7 @@ import type { ParsedApiError } from '../api/error';
 import { getParsedApiError } from '../api/error';
 import { ApiErrorAlert, Card, Badge, ConfirmDialog, EmptyState, InlineAlert } from '../components/common';
 import { PortfolioSignalSummary } from '../components/decision-signals/DecisionSignalDisplay';
+import { PortfolioReconciliationPanel } from '../components/portfolio/PortfolioReconciliationPanel';
 import { useUiLanguage } from '../contexts/UiLanguageContext';
 import { formatUiText } from '../i18n/uiText';
 import { PORTFOLIO_TEXT } from '../locales/featureText';
@@ -30,6 +31,7 @@ import {
   hasPositionPrice,
 } from '../utils/portfolioFormat';
 import type {
+  DecisionSignalAccountAction,
   DecisionSignalItem,
   DecisionSignalMarket,
 } from '../types/decisionSignals';
@@ -434,16 +436,35 @@ const PortfolioPage: React.FC = () => {
   }, [eventPage, loadEventsPage, loadSnapshotAndRisk]);
 
   useEffect(() => {
-    void loadAccounts();
-    void loadBrokers();
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      void loadAccounts();
+      void loadBrokers();
+    });
+    return () => {
+      active = false;
+    };
   }, [loadAccounts, loadBrokers]);
 
   useEffect(() => {
-    void loadSnapshotAndRisk();
+    let active = true;
+    queueMicrotask(() => {
+      if (active) void loadSnapshotAndRisk();
+    });
+    return () => {
+      active = false;
+    };
   }, [loadSnapshotAndRisk]);
 
   useEffect(() => {
-    void loadEvents();
+    let active = true;
+    queueMicrotask(() => {
+      if (active) void loadEvents();
+    });
+    return () => {
+      active = false;
+    };
   }, [loadEvents]);
 
   useEffect(() => {
@@ -451,17 +472,15 @@ const PortfolioPage: React.FC = () => {
       viewKey: refreshViewKey,
       requestId: refreshContextRef.current.requestId + 1,
     };
-    setFxRefreshing(false);
-    setFxRefreshFeedback(null);
+    queueMicrotask(() => {
+      setFxRefreshing(false);
+      setFxRefreshFeedback(null);
+    });
   }, [refreshViewKey]);
 
   useEffect(() => {
-    setEventPage(1);
-  }, [eventType, queryAccountId, eventDateFrom, eventDateTo, eventSymbol, eventSide, eventDirection, eventActionType]);
-
-  useEffect(() => {
     if (!writeBlocked) {
-      setWriteWarning(null);
+      queueMicrotask(() => setWriteWarning(null));
     }
   }, [writeBlocked]);
 
@@ -509,10 +528,16 @@ const PortfolioPage: React.FC = () => {
     portfolioSignalsRequestRef.current = requestId;
 
     if (positionSignalLookups.length === 0 || !snapshotMatchesAccountScope) {
-      setPortfolioSignals([]);
-      setPortfolioSignalsWarning(null);
-      setPortfolioSignalsLoading(false);
-      return;
+      let active = true;
+      queueMicrotask(() => {
+        if (!active) return;
+        setPortfolioSignals([]);
+        setPortfolioSignalsWarning(null);
+        setPortfolioSignalsLoading(false);
+      });
+      return () => {
+        active = false;
+      };
     }
 
     const isActiveRequest = () => portfolioSignalsRequestRef.current === requestId;
@@ -543,7 +568,9 @@ const PortfolioPage: React.FC = () => {
       }
     };
 
-    void loadPortfolioSignals();
+    queueMicrotask(() => {
+      if (isActiveRequest()) void loadPortfolioSignals();
+    });
 
     return () => {
       portfolioSignalsRequestRef.current += 1;
@@ -817,6 +844,7 @@ const PortfolioPage: React.FC = () => {
       });
       await loadAccounts();
       setSelectedAccount(created.id);
+      setEventPage(1);
       setShowCreateAccount(false);
       setWriteWarning(null);
       setAccountForm({
@@ -941,15 +969,26 @@ const PortfolioPage: React.FC = () => {
   };
 
   const decisionSignalRiskPreviewItems = (risk?.decisionSignalRisk?.items ?? []).slice(0, 3);
-  const formatDecisionSignalRiskAction = (signal: Partial<DecisionSignalItem>): string => (
-    getDecisionActionLabel(
-      signal.action,
+  const accountActionLabels: Record<DecisionSignalAccountAction, string> = {
+    observe: t('decisionSignals.accountAction.observe'),
+    open_candidate: t('decisionSignals.accountAction.openCandidate'),
+    add_candidate: t('decisionSignals.accountAction.addCandidate'),
+    hold: t('decisionSignals.accountAction.hold'),
+    reduce_candidate: t('decisionSignals.accountAction.reduceCandidate'),
+    exit_candidate: t('decisionSignals.accountAction.exitCandidate'),
+  };
+  const formatDecisionSignalRiskAction = (signal: Partial<DecisionSignalItem>): string => {
+    if (signal.accountAction) {
+      return accountActionLabels[signal.accountAction];
+    }
+    return getDecisionActionLabel(
+      signal.primaryAction ?? signal.action,
       signal.actionLabel,
       null,
       text.alert,
       decisionActionLabels,
-    ) ?? text.alert
-  );
+    ) ?? text.alert;
+  };
   const snapshotQualityMessage = snapshot?.dataQuality === 'partial' && snapshot.limitations?.length
     ? snapshot.limitations
       .map((limitation) => formatPortfolioLimitation(limitation, language))
@@ -972,7 +1011,10 @@ const PortfolioPage: React.FC = () => {
                 <p className="text-xs text-secondary mb-1">{text.accountView}</p>
                 <select
                   value={String(selectedAccount)}
-                  onChange={(e) => setSelectedAccount(e.target.value === 'all' ? 'all' : Number(e.target.value))}
+                  onChange={(e) => {
+                    setSelectedAccount(e.target.value === 'all' ? 'all' : Number(e.target.value));
+                    setEventPage(1);
+                  }}
                   className={PORTFOLIO_SELECT_CLASS}
                 >
                   <option value="all">{text.allAccounts}</option>
@@ -1139,6 +1181,12 @@ const PortfolioPage: React.FC = () => {
           className="rounded-xl px-3 py-2 text-xs shadow-none"
         />
       ) : null}
+
+      <PortfolioReconciliationPanel
+        accounts={accounts}
+        preferredAccountId={selectedAccount === 'all' ? undefined : selectedAccount}
+        onApplied={handleRefresh}
+      />
 
       <section className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
         <Card variant="gradient" padding="md">
@@ -1356,7 +1404,7 @@ const PortfolioPage: React.FC = () => {
                 {decisionSignalRiskPreviewItems.length > 0 ? (
                   <div className="space-y-1 pt-1">
                     {decisionSignalRiskPreviewItems.map((item) => (
-                      <div key={`${item.accountId ?? 'all'}-${item.market}-${item.symbol}-${item.signal.id ?? item.signal.action}`} className="truncate text-foreground">
+                      <div key={`${item.accountId ?? 'all'}-${item.market}-${item.symbol}-${item.signal.id ?? item.signal.primaryAction ?? item.signal.accountAction ?? item.signal.action}`} className="truncate text-foreground">
                         {item.symbol} · {formatDecisionSignalRiskAction(item.signal)}
                       </div>
                     ))}
@@ -1511,7 +1559,10 @@ const PortfolioPage: React.FC = () => {
           <h3 className="text-sm font-semibold text-foreground mb-3">事件记录</h3>
           <div className="space-y-2">
             <div className="grid grid-cols-2 gap-2">
-              <select className={PORTFOLIO_SELECT_CLASS} value={eventType} onChange={(e) => setEventType(e.target.value as EventType)}>
+              <select className={PORTFOLIO_SELECT_CLASS} value={eventType} onChange={(e) => {
+                setEventType(e.target.value as EventType);
+                setEventPage(1);
+              }}>
                 <option value="trade">交易流水</option>
                 <option value="cash">资金流水</option>
                 <option value="corporate">公司行为</option>
@@ -1521,15 +1572,27 @@ const PortfolioPage: React.FC = () => {
               </button>
             </div>
             <div className="grid grid-cols-2 gap-2">
-              <input className={PORTFOLIO_INPUT_CLASS} type="date" value={eventDateFrom} onChange={(e) => setEventDateFrom(e.target.value)} />
-              <input className={PORTFOLIO_INPUT_CLASS} type="date" value={eventDateTo} onChange={(e) => setEventDateTo(e.target.value)} />
+              <input className={PORTFOLIO_INPUT_CLASS} type="date" value={eventDateFrom} onChange={(e) => {
+                setEventDateFrom(e.target.value);
+                setEventPage(1);
+              }} />
+              <input className={PORTFOLIO_INPUT_CLASS} type="date" value={eventDateTo} onChange={(e) => {
+                setEventDateTo(e.target.value);
+                setEventPage(1);
+              }} />
             </div>
             {(eventType === 'trade' || eventType === 'corporate') ? (
               <input className={PORTFOLIO_INPUT_CLASS} placeholder="按股票代码筛选" value={eventSymbol}
-                onChange={(e) => setEventSymbol(e.target.value)} />
+                onChange={(e) => {
+                  setEventSymbol(e.target.value);
+                  setEventPage(1);
+                }} />
             ) : null}
             {eventType === 'trade' ? (
-              <select className={PORTFOLIO_SELECT_CLASS} value={eventSide} onChange={(e) => setEventSide(e.target.value as '' | PortfolioSide)}>
+              <select className={PORTFOLIO_SELECT_CLASS} value={eventSide} onChange={(e) => {
+                setEventSide(e.target.value as '' | PortfolioSide);
+                setEventPage(1);
+              }}>
                 <option value="">全部买卖方向</option>
                 <option value="buy">买入</option>
                 <option value="sell">卖出</option>
@@ -1537,7 +1600,10 @@ const PortfolioPage: React.FC = () => {
             ) : null}
             {eventType === 'cash' ? (
               <select className={PORTFOLIO_SELECT_CLASS} value={eventDirection}
-                onChange={(e) => setEventDirection(e.target.value as '' | PortfolioCashDirection)}>
+                onChange={(e) => {
+                  setEventDirection(e.target.value as '' | PortfolioCashDirection);
+                  setEventPage(1);
+                }}>
                 <option value="">全部资金方向</option>
                 <option value="in">流入</option>
                 <option value="out">流出</option>
@@ -1545,7 +1611,10 @@ const PortfolioPage: React.FC = () => {
             ) : null}
             {eventType === 'corporate' ? (
               <select className={PORTFOLIO_SELECT_CLASS} value={eventActionType}
-                onChange={(e) => setEventActionType(e.target.value as '' | PortfolioCorporateActionType)}>
+                onChange={(e) => {
+                  setEventActionType(e.target.value as '' | PortfolioCorporateActionType);
+                  setEventPage(1);
+                }}>
                 <option value="">全部公司行为</option>
                 <option value="cash_dividend">现金分红</option>
                 <option value="split_adjustment">拆并股调整</option>

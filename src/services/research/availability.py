@@ -30,6 +30,9 @@ class DatasetDefinition:
     incremental_by_trade_date: bool = False
     current_state: bool = False
     stale_after_days: Optional[int] = None
+    provider_api_name: Optional[str] = None
+    required_fields: tuple[str, ...] = ()
+    requires_query_plan: bool = False
 
 
 @dataclass(frozen=True)
@@ -175,8 +178,115 @@ DATASET_DEFINITIONS: Mapping[str, DatasetDefinition] = {
         market_daily=True,
         stale_after_days=10,
     ),
+    # Decision Outcome v2 datasets are deliberately not part of the default
+    # research bundle.  Their exact requests depend on T+1/horizon dates and,
+    # for SW daily bars, a separately frozen point-in-time membership.
+    "csi300_index_daily": _definition(
+        "csi300_index_daily",
+        ("trade_date",),
+        ("trade_date",),
+        market_daily=True,
+        stale_after_days=10,
+        provider_api_name="index_daily",
+        required_fields=(
+            "ts_code",
+            "trade_date",
+            "close",
+            "open",
+            "high",
+            "low",
+            "pre_close",
+            "change",
+            "pct_chg",
+            "vol",
+            "amount",
+        ),
+        requires_query_plan=True,
+    ),
+    "sw1_index_classify": _definition(
+        "sw1_index_classify",
+        (),
+        (),
+        accepts_date_range=False,
+        current_state=True,
+        provider_api_name="index_classify",
+        required_fields=(
+            "index_code",
+            "industry_name",
+            "parent_code",
+            "level",
+            "industry_code",
+            "is_pub",
+            "src",
+        ),
+        requires_query_plan=True,
+    ),
+    "sw1_index_member_all": _definition(
+        "sw1_index_member_all",
+        (),
+        (),
+        accepts_date_range=False,
+        current_state=True,
+        provider_api_name="index_member_all",
+        required_fields=(
+            "l1_code",
+            "l1_name",
+            "l2_code",
+            "l2_name",
+            "l3_code",
+            "l3_name",
+            "ts_code",
+            "name",
+            "in_date",
+            "out_date",
+            "is_new",
+        ),
+        requires_query_plan=True,
+    ),
+    "sw1_index_daily": _definition(
+        "sw1_index_daily",
+        ("trade_date",),
+        ("trade_date",),
+        market_daily=True,
+        stale_after_days=10,
+        provider_api_name="sw_daily",
+        required_fields=(
+            "ts_code",
+            "trade_date",
+            "name",
+            "open",
+            "low",
+            "high",
+            "close",
+            "change",
+            "pct_change",
+            "vol",
+            "amount",
+            "pe",
+            "pb",
+            "float_mv",
+            "total_mv",
+        ),
+        requires_query_plan=True,
+    ),
 }
-DEFAULT_RESEARCH_DATASETS = tuple(DATASET_DEFINITIONS)
+DEFAULT_RESEARCH_DATASETS = (
+    "stock_basic",
+    "daily",
+    "adj_factor",
+    "daily_basic",
+    "fina_indicator",
+    "income",
+    "balancesheet",
+    "cashflow",
+    "dividend",
+    "stk_holdernumber",
+    "forecast",
+    "cyq_perf",
+    "cyq_chips",
+    "stk_limit",
+    "suspend_d",
+)
 
 
 def normalize_as_of(value: datetime) -> datetime:

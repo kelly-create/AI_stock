@@ -110,6 +110,70 @@ def _make_pipeline(*, agent_mode: bool = False, save_context_snapshot: bool = Tr
 
 
 class PipelineMarketPhaseContextTestCase(unittest.TestCase):
+    def test_frozen_raw_daily_context_derives_missing_indicators(self):
+        pipeline = _make_pipeline()
+        captured = {}
+
+        def analyze_ma_status(row):
+            captured.update(vars(row))
+            return "derived"
+
+        pipeline.db._analyze_ma_status.side_effect = analyze_ma_status
+        daily_df = pd.DataFrame(
+            [
+                {
+                    "code": "600519",
+                    "date": f"2026-07-{day:02d}",
+                    "open": float(day),
+                    "high": float(day) + 1.0,
+                    "low": float(day) - 1.0,
+                    "close": float(day),
+                    "volume": float(day * 100),
+                }
+                for day in range(1, 21)
+            ]
+        )
+
+        context = pipeline._build_analysis_context_from_daily_df(
+            "600519",
+            daily_df,
+            target_date=date(2026, 7, 20),
+        )
+
+        self.assertIsNotNone(context)
+        self.assertEqual(context["ma_status"], "derived")
+        self.assertEqual(context["today"]["ma5"], 18.0)
+        self.assertEqual(context["today"]["ma10"], 15.5)
+        self.assertEqual(context["today"]["ma20"], 10.5)
+        self.assertEqual(context["today"]["volume_ratio"], 1.18)
+        self.assertEqual(context["yesterday"]["ma5"], 17.0)
+        self.assertEqual(
+            captured,
+            {"close": 20.0, "ma5": 18.0, "ma10": 15.5, "ma20": 10.5},
+        )
+
+    def test_daily_context_missing_close_and_indicators_does_not_raise(self):
+        pipeline = _make_pipeline()
+        pipeline.db._analyze_ma_status.return_value = "missing"
+
+        context = pipeline._build_analysis_context_from_daily_df(
+            "600519",
+            pd.DataFrame(
+                [
+                    {"date": "2026-07-19", "volume": 100.0},
+                    {"date": "2026-07-20", "volume": 200.0},
+                ]
+            ),
+        )
+
+        self.assertIsNotNone(context)
+        self.assertEqual(context["ma_status"], "missing")
+        row = pipeline.db._analyze_ma_status.call_args.args[0]
+        self.assertIsNone(row.close)
+        self.assertIsNone(row.ma5)
+        self.assertIsNone(row.ma10)
+        self.assertIsNone(row.ma20)
+
     def test_jp_kr_analysis_context_uses_daily_fetcher_when_db_context_missing(self):
         pipeline = _make_pipeline()
         pipeline.db.get_analysis_context.side_effect = [None, None]
@@ -804,6 +868,142 @@ class PipelineMarketPhaseContextTestCase(unittest.TestCase):
         self.assertEqual(kwargs["query_source"], "api")
         self.assertEqual(kwargs["report_type"], ReportType.SIMPLE.value)
         self.assertEqual(kwargs["profile_source"], "auto_default")
+
+    def test_personal_research_fields_do_not_require_thesis_flag(self):
+        pipeline = _make_pipeline(agent_mode=False, save_context_snapshot=True)
+        pipeline.config.research_thesis_enabled = False
+        result = _analysis_result()
+        artifacts = MagicMock()
+        artifacts.decision_signal_fields.return_value = {
+            "contract_version": "personal-decision-signal-v1",
+            "research_stance": "neutral",
+            "account_action": "hold",
+        }
+        setattr(result, "_personal_research_artifacts", artifacts)
+
+        with (
+            patch(
+                "src.core.pipeline.extract_and_persist_from_analysis_result",
+                return_value={"item": None},
+            ) as mock_extract,
+            patch(
+                "src.services.personal_research_artifact_service."
+                "PersonalResearchArtifactService.persist_thesis"
+            ) as mock_persist_thesis,
+        ):
+            pipeline._extract_decision_signal_after_history_save(
+                result=result,
+                query_id="q-personal-fields",
+                source_report_id=42,
+                report_type=ReportType.SIMPLE.value,
+                context_snapshot={"market_phase_summary": _phase_payload()},
+            )
+
+        self.assertEqual(
+            mock_extract.call_args.kwargs["personal_research_fields"],
+            artifacts.decision_signal_fields.return_value,
+        )
+        mock_persist_thesis.assert_not_called()
+        self.assertFalse(hasattr(result, "personal_research_thesis_hash"))
+
+    def test_personal_policy_context_uses_completed_bar_and_session_dates(self):
+        pipeline = _make_pipeline(agent_mode=False, save_context_snapshot=True)
+        pipeline.config.research_thesis_enabled = False
+        pipeline.config.portfolio_policy_gate_mode = "shadow"
+        pipeline.policy_account_id = 7
+        pipeline.policy_target_weight_pct = 8.0
+        result = _analysis_result()
+        artifacts = MagicMock()
+        artifacts.decision_signal_fields.return_value = {
+            "contract_version": "personal-decision-signal-v1",
+            "research_stance": "bullish",
+            "account_action": "open_candidate",
+        }
+        setattr(result, "_personal_research_artifacts", artifacts)
+        context_snapshot = {"market_phase_summary": _phase_payload()}
+        policy_context = {"portfolio_complete": True}
+
+        with (
+            patch(
+                "src.core.pipeline.extract_and_persist_from_analysis_result",
+                return_value={"item": None},
+            ) as mock_extract,
+            patch(
+                "src.services.personal_research_policy_context_service."
+                "PersonalResearchPolicyContextService.build",
+                return_value=policy_context,
+            ) as mock_build,
+            patch(
+                "src.utils.sniper_points.extract_sniper_points",
+                return_value={
+                    "ideal_buy": 100.0,
+                    "secondary_buy": 102.0,
+                    "stop_loss": 90.0,
+                },
+            ),
+        ):
+            pipeline._extract_decision_signal_after_history_save(
+                result=result,
+                query_id="q-personal-policy",
+                source_report_id=42,
+                report_type=ReportType.SIMPLE.value,
+                context_snapshot=context_snapshot,
+            )
+
+        mock_build.assert_called_once_with(
+            account_id=7,
+            stock_code="600519",
+            target_weight_pct=8.0,
+            entry_price=102.0,
+            stop_loss=90.0,
+            proposed_account_action="open_candidate",
+            as_of=date(2026, 3, 26),
+            decision_session_date=date(2026, 3, 27),
+        )
+        self.assertEqual(
+            mock_extract.call_args.kwargs["personal_research_fields"][
+                "policy_context"
+            ],
+            policy_context,
+        )
+
+    def test_thesis_persistence_requires_explicit_flag(self):
+        pipeline = _make_pipeline(agent_mode=False, save_context_snapshot=True)
+        pipeline.config.research_thesis_enabled = True
+        result = _analysis_result()
+        artifacts = MagicMock()
+        artifacts.decision_signal_fields.return_value = {
+            "contract_version": "personal-decision-signal-v1",
+            "research_stance": "bullish",
+            "account_action": "open_candidate",
+        }
+        setattr(result, "_personal_research_artifacts", artifacts)
+
+        with (
+            patch(
+                "src.core.pipeline.extract_and_persist_from_analysis_result",
+                return_value={"item": {"id": 7}},
+            ),
+            patch(
+                "src.core.pipeline.summarize_decision_signal",
+                return_value={},
+            ),
+            patch(
+                "src.services.personal_research_artifact_service."
+                "PersonalResearchArtifactService.persist_thesis",
+                return_value=SimpleNamespace(content_hash="a" * 64),
+            ) as mock_persist_thesis,
+        ):
+            pipeline._extract_decision_signal_after_history_save(
+                result=result,
+                query_id="q-personal-thesis",
+                source_report_id=42,
+                report_type=ReportType.SIMPLE.value,
+                context_snapshot={"market_phase_summary": _phase_payload()},
+            )
+
+        mock_persist_thesis.assert_called_once()
+        self.assertEqual(result.personal_research_thesis_hash, "a" * 64)
 
     def test_decision_signal_helper_failure_does_not_raise(self):
         pipeline = _make_pipeline(agent_mode=False, save_context_snapshot=True)

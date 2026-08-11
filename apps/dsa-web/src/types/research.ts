@@ -328,6 +328,42 @@ export interface ResearchDebateListResponse {
   nextCursor: string | null;
 }
 
+export type ResearchWatchlistAnalysisTier = 'quick' | 'standard' | 'deep';
+export type ResearchWatchlistMarket = 'cn' | 'hk' | 'us' | 'jp' | 'kr' | 'tw';
+export type ResearchWatchlistSource = 'enhanced' | 'legacy' | 'holding';
+
+export type ResearchHoldingsFreshness = 'ledger' | null;
+
+export interface ResearchWatchlistItem {
+  stockCode: string;
+  market: ResearchWatchlistMarket;
+  sources: ResearchWatchlistSource[];
+  reason: string | null;
+  priority: number;
+  analysisTier: ResearchWatchlistAnalysisTier;
+  nextReviewAt: string | null;
+  isActive: boolean;
+  isHolding: boolean;
+}
+
+export interface ResearchWatchlistResponse {
+  items: ResearchWatchlistItem[];
+  holdingsFreshness: 'ledger';
+}
+
+export type ResearchUniverseResponse = ResearchWatchlistResponse;
+
+export interface ResearchWatchlistMetadataInput {
+  reason: string | null;
+  priority: number;
+  analysisTier: ResearchWatchlistAnalysisTier;
+  nextReviewAt: string | null;
+}
+
+export interface ResearchWatchlistDeleteResponse {
+  deleted: 1;
+}
+
 type ResearchDebateSelector =
   | {
       jobId: string;
@@ -351,3 +387,161 @@ export type ResearchDebateListParams = ResearchDebateSelector & {
   cursor?: string;
   limit?: number;
 };
+
+export type PersonalResearchSkillId =
+  | 'personal-value-quality'
+  | 'personal-trend-timing'
+  | 'personal-catalyst'
+  | 'personal-risk'
+  | 'personal-evidence-quality';
+
+export interface PersonalResearchStockLineage {
+  taskId: string;
+  market: string;
+  stockCode: string;
+}
+
+export interface PersonalResearchSkillContract {
+  skillId: PersonalResearchSkillId;
+  version: string;
+  contractHash: string;
+  scoreField: string;
+}
+
+export interface PersonalResearchSkillLineage extends PersonalResearchStockLineage {
+  researchSnapshotHash: string;
+  factorSnapshotHash: string;
+  evidenceSnapshotHash: string;
+  datasetSnapshotHashes: string[];
+  datasetLineageHash: string;
+  inputHash: string;
+  outputHash: string;
+}
+
+export interface PersonalResearchSkillResult {
+  status: 'succeeded' | 'failed';
+  score: number | null;
+  output: Record<string, JsonValue>;
+}
+
+export interface PersonalResearchSkillExecutionResponse {
+  contract: 'personal-research-skill-execution';
+  version: 'v1';
+  executionHash: string;
+  skillContract: PersonalResearchSkillContract;
+  lineage: PersonalResearchSkillLineage;
+  input: Record<string, JsonValue>;
+  result: PersonalResearchSkillResult;
+  createdAt: string;
+}
+
+export interface PersonalResearchSkillExecutionListResponse {
+  contract: 'personal-research-skill-execution-collection';
+  version: 'v1';
+  lineage: PersonalResearchStockLineage;
+  expectedSkillIds: PersonalResearchSkillId[];
+  missingSkillIds: PersonalResearchSkillId[];
+  complete: boolean;
+  executions: PersonalResearchSkillExecutionResponse[];
+}
+
+export interface PersonalResearchDebateVerifier {
+  version: string;
+  inputHash: string;
+  outputHash: string;
+  valid: boolean;
+  failClosed: boolean;
+  reasonCodes: string[];
+  input: Record<string, JsonValue>;
+  output: Record<string, JsonValue>;
+}
+
+export type PersonalResearchDebateVerdict = 'bull' | 'bear' | 'balanced' | 'fail_closed';
+
+export interface PersonalResearchDebateJudge {
+  version: string;
+  policyHash: string;
+  inputHash: string;
+  outputHash: string;
+  failClosed: boolean;
+  reasonCodes: string[];
+  verdict: PersonalResearchDebateVerdict;
+  winner: 'bull' | 'bear' | null;
+  input: Record<string, JsonValue>;
+  output: Record<string, JsonValue>;
+}
+
+export interface PersonalResearchDebateReviewResponse {
+  contract: 'personal-research-debate-review';
+  version: 'v1';
+  reviewHash: string;
+  lineage: PersonalResearchStockLineage & {
+    debateSnapshotHash: string;
+    evidenceSnapshotHash: string;
+  };
+  verifier: PersonalResearchDebateVerifier;
+  judge: PersonalResearchDebateJudge;
+  createdAt: string;
+}
+
+export type PersonalResearchThesisStance =
+  | 'strong_bullish'
+  | 'bullish'
+  | 'watch'
+  | 'neutral'
+  | 'bearish'
+  | 'avoid';
+
+export type PersonalResearchAccountAction =
+  | 'observe'
+  | 'open_candidate'
+  | 'add_candidate'
+  | 'hold'
+  | 'reduce_candidate'
+  | 'exit_candidate';
+
+export type PersonalResearchSkillExecutionHashes = Record<PersonalResearchSkillId, string>;
+
+export interface PersonalResearchThesisLineage extends PersonalResearchStockLineage {
+  researchSnapshotHash: string;
+  skillExecutionHashes: PersonalResearchSkillExecutionHashes;
+  debateSnapshotHash: string | null;
+  debateReviewHash: string | null;
+  decisionSignalId: number | null;
+  policyEvaluationHash: string | null;
+  policyVersion: string | null;
+  policyHash: string | null;
+  portfolioSnapshotRef: string | null;
+  supersedesThesisHash: string | null;
+}
+
+export interface PersonalResearchThesisScores {
+  valueQualityScore: number;
+  trendTimingScore: number;
+  catalystScore: number;
+  riskScore: number;
+  evidenceQualityScore: number;
+}
+
+export interface PersonalResearchThesisResponse {
+  contract: 'personal-research-thesis';
+  version: string;
+  thesisHash: string;
+  contentHash: string;
+  lineage: PersonalResearchThesisLineage;
+  stance: PersonalResearchThesisStance;
+  accountAction: PersonalResearchAccountAction;
+  scores: PersonalResearchThesisScores;
+  catalysts: string[];
+  invalidators: string[];
+  unknowns: string[];
+  evidenceRefs: string[];
+  content: Record<string, JsonValue>;
+  createdAt: string;
+}
+
+export interface PersonalResearchLatestThesisParams {
+  taskId: string;
+  market: string;
+  stockCode: string;
+}

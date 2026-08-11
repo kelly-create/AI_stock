@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import type React from 'react';
 import { Send } from 'lucide-react';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
@@ -50,28 +50,19 @@ export const NotificationTestPanel: React.FC<NotificationTestPanelProps> = ({
 }) => {
   const { language, t } = useUiLanguage();
   const [channel, setChannel] = useState<NotificationTestChannel>('wechat');
-  const [title, setTitle] = useState(t('settings.notificationTestTitleValue'));
-  const [content, setContent] = useState(t('settings.notificationTestContent'));
+  const [titleOverride, setTitleOverride] = useState<string | null>(null);
+  const [contentOverride, setContentOverride] = useState<string | null>(null);
+  const title = titleOverride ?? t('settings.notificationTestTitleValue');
+  const content = contentOverride ?? t('settings.notificationTestContent');
   const [timeoutSeconds, setTimeoutSeconds] = useState('20');
   const [result, setResult] = useState<TestNotificationChannelResponse | null>(null);
   const [error, setError] = useState<ParsedApiError | null>(null);
   const [isTesting, setIsTesting] = useState(false);
-  const [isTitleEdited, setIsTitleEdited] = useState(false);
-  const [isContentEdited, setIsContentEdited] = useState(false);
 
   const normalizedItems = useMemo(
     () => items.map((item) => ({ key: item.key, value: String(item.value ?? '') })),
     [items],
   );
-
-  useEffect(() => {
-    if (!isTitleEdited) {
-      setTitle(t('settings.notificationTestTitleValue'));
-    }
-    if (!isContentEdited) {
-      setContent(t('settings.notificationTestContent'));
-    }
-  }, [isTitleEdited, isContentEdited, t]);
 
   const runTest = async () => {
     setError(null);
@@ -127,8 +118,7 @@ export const NotificationTestPanel: React.FC<NotificationTestPanelProps> = ({
           maxLength={80}
           disabled={disabled || isTesting}
           onChange={(event) => {
-            setIsTitleEdited(true);
-            setTitle(event.target.value);
+            setTitleOverride(event.target.value);
           }}
         />
         <Input
@@ -151,8 +141,7 @@ export const NotificationTestPanel: React.FC<NotificationTestPanelProps> = ({
           rows={4}
           disabled={disabled || isTesting}
           onChange={(event) => {
-            setIsContentEdited(true);
-            setContent(event.target.value);
+            setContentOverride(event.target.value);
           }}
           className="input-surface input-focus-glow min-h-[112px] w-full resize-y rounded-xl border bg-transparent px-4 py-3 text-sm leading-6 text-foreground outline-none disabled:cursor-not-allowed disabled:opacity-50"
         />

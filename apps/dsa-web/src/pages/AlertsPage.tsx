@@ -126,7 +126,7 @@ const AlertsPage: React.FC = () => {
   const [testResult, setTestResult] = useState<AlertRuleTestResponse | null>(null);
   const rulesRequestIdRef = useRef(0);
 
-  const loadRules = useCallback(async (pageOverride?: number) => {
+  const loadRules = useCallback((pageOverride?: number) => {
     const requestId = rulesRequestIdRef.current + 1;
     rulesRequestIdRef.current = requestId;
     const isLatestRequest = () => rulesRequestIdRef.current === requestId;
@@ -136,32 +136,37 @@ const AlertsPage: React.FC = () => {
       alertType: alertTypeFilterToQuery(alertTypeFilter),
       pageSize: PAGE_SIZE,
     };
-    setRulesLoading(true);
-    try {
-      let response = await alertsApi.listRules({ ...baseQuery, page: requestedPage });
-      if (!isLatestRequest()) return null;
-      const lastPage = Math.max(1, Math.ceil(response.total / PAGE_SIZE));
-      if (response.items.length === 0 && response.total > 0 && requestedPage > lastPage) {
-        setRulesPage(lastPage);
-        response = await alertsApi.listRules({ ...baseQuery, page: lastPage });
+    queueMicrotask(() => {
+      if (isLatestRequest()) setRulesLoading(true);
+    });
+    return alertsApi.listRules({ ...baseQuery, page: requestedPage })
+      .then(async (initialResponse) => {
+        let response = initialResponse;
         if (!isLatestRequest()) return null;
-      } else if (pageOverride !== undefined && pageOverride !== rulesPage) {
-        setRulesPage(pageOverride);
-      }
-      setRules(response.items);
-      setRulesTotal(response.total);
-      setRulesError(null);
-      setRulesLoaded(true);
-      return response;
-    } catch (error) {
-      if (!isLatestRequest()) return null;
-      setRulesError(getParsedApiError(error));
-      return null;
-    } finally {
-      if (isLatestRequest()) {
-        setRulesLoading(false);
-      }
-    }
+        const lastPage = Math.max(1, Math.ceil(response.total / PAGE_SIZE));
+        if (response.items.length === 0 && response.total > 0 && requestedPage > lastPage) {
+          setRulesPage(lastPage);
+          response = await alertsApi.listRules({ ...baseQuery, page: lastPage });
+          if (!isLatestRequest()) return null;
+        } else if (pageOverride !== undefined && pageOverride !== rulesPage) {
+          setRulesPage(pageOverride);
+        }
+        setRules(response.items);
+        setRulesTotal(response.total);
+        setRulesError(null);
+        setRulesLoaded(true);
+        return response;
+      })
+      .catch((error: unknown) => {
+        if (!isLatestRequest()) return null;
+        setRulesError(getParsedApiError(error));
+        return null;
+      })
+      .finally(() => {
+        if (isLatestRequest()) {
+          setRulesLoading(false);
+        }
+      });
   }, [alertTypeFilter, enabledFilter, rulesPage]);
 
   const loadTriggers = useCallback(async () => {
@@ -192,12 +197,22 @@ const AlertsPage: React.FC = () => {
 
   useEffect(() => {
     void loadRules();
+    return () => {
+      rulesRequestIdRef.current += 1;
+    };
   }, [loadRules]);
 
   useEffect(() => {
     if (!rulesLoaded) return;
-    void loadTriggers();
-    void loadNotifications();
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      void loadTriggers();
+      void loadNotifications();
+    });
+    return () => {
+      active = false;
+    };
   }, [loadNotifications, loadTriggers, rulesLoaded]);
 
   const handleCreateRule = async (payload: AlertRuleCreateRequest) => {

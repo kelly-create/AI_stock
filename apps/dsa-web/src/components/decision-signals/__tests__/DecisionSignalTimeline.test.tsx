@@ -120,6 +120,19 @@ describe('DecisionSignalTimeline helpers', () => {
     expect(alert.shape).toBe('diamond');
   });
 
+  it('uses the Policy-adjusted account action for formal signal geometry', () => {
+    const blockedBuy = getTimelinePointStyle(makeSignal({
+      action: 'buy',
+      accountAction: 'observe',
+      policyMode: 'enforce',
+      policyDecision: 'block',
+    }));
+
+    expect(blockedBuy.rank).toBe(ACTION_RANK.watch);
+    expect(blockedBuy.family).toBe('neutral');
+    expect(blockedBuy.fill).toBe('#0891b2');
+  });
+
   it('clamps invalid score and confidence values without NaN geometry', () => {
     const missing = getTimelinePointStyle(makeSignal({ score: Number.NaN, confidence: Number.NaN }));
     const clamped = getTimelinePointStyle(makeSignal({ score: 150, confidence: 2 }));
@@ -189,7 +202,32 @@ describe('DecisionSignalTimeline', () => {
     expect(screen.getByText('风格: 进取')).toBeInTheDocument();
   });
 
+  it('labels the Policy-adjusted account action instead of the upstream action', () => {
+    window.localStorage.setItem('dsa.uiLanguage', 'en');
+    render(
+      <UiLanguageProvider>
+        <TimelineTooltip
+          active
+          payload={[{
+            payload: buildTimelineData([
+              makeSignal({
+                action: 'buy',
+                accountAction: 'observe',
+                policyMode: 'enforce',
+                policyDecision: 'block',
+              }),
+            ])[0],
+          }]}
+        />
+      </UiLanguageProvider>,
+    );
+
+    expect(screen.getByText('Account action: Observe')).toBeInTheDocument();
+    expect(screen.queryByText('Action: Buy')).not.toBeInTheDocument();
+  });
+
   it('renders explicit null profile as unknown instead of falling back to metadata', () => {
+    window.localStorage.setItem('dsa.uiLanguage', 'zh');
     render(
       <UiLanguageProvider>
         <TimelineTooltip

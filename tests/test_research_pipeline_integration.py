@@ -28,6 +28,7 @@ ensure_litellm_stub()
 from data_provider.realtime_types import ChipDistribution
 from src.core.pipeline import StockAnalysisPipeline
 from src.enums import ReportType
+from src.services.research.debate_security import strict_version_identifier
 
 
 _SHANGHAI = timezone(timedelta(hours=8))
@@ -740,8 +741,12 @@ class TestResearchAnalyzeStockIntegration:
         pipeline.analyzer.generate_structured_text.assert_not_called()
         runtime_freeze_args = pipeline._research_runtime.freeze.call_args.args
         assert runtime_freeze_args[5] == (
-            "factor-policy-v1+decision-execution-v1"
+            "factor-policy-v1-decision-execution-v1"
         )
+        assert strict_version_identifier(
+            runtime_freeze_args[5],
+            field="policy_version",
+        ) == runtime_freeze_args[5]
         frozen_policy = runtime_freeze_args[6]
         assert frozen_policy["factor_policy"]["policy_version"] == (
             "factor-policy-v1"

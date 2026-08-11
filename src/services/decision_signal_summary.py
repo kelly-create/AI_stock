@@ -15,6 +15,11 @@ SUMMARY_FIELDS = (
     "market",
     "action",
     "action_label",
+    "account_action",
+    "policy_mode",
+    "policy_decision",
+    "would_block",
+    "policy_reasons",
     "horizon",
     "status",
     "source_type",
@@ -25,6 +30,36 @@ SUMMARY_FIELDS = (
     "created_at",
     "expires_at",
 )
+
+_ACCOUNT_ACTION_TO_PRIMARY_ACTION = {
+    "observe": "watch",
+    "open_candidate": "buy",
+    "add_candidate": "add",
+    "hold": "hold",
+    "reduce_candidate": "reduce",
+    "exit_candidate": "sell",
+}
+
+
+def resolve_decision_signal_primary_action(item: Any) -> tuple[Optional[str], Optional[str]]:
+    """Resolve the execution-facing action and its authoritative source.
+
+    Formal ``account_action`` is Policy-adjusted and therefore wins whenever it
+    is present. Legacy summaries continue to fall back to ``action``. An
+    unknown formal value fails closed instead of silently reviving the legacy
+    action.
+    """
+
+    if not isinstance(item, dict):
+        return None, None
+    raw_account_action = item.get("account_action")
+    if raw_account_action not in (None, ""):
+        account_action = str(raw_account_action).strip().lower()
+        return _ACCOUNT_ACTION_TO_PRIMARY_ACTION.get(account_action), "account_action"
+    raw_action = item.get("action")
+    if raw_action in (None, ""):
+        return None, None
+    return str(raw_action).strip().lower() or None, "legacy_action"
 
 
 def summarize_decision_signal(item: Any) -> Optional[Dict[str, Any]]:
@@ -38,6 +73,11 @@ def summarize_decision_signal(item: Any) -> Optional[Dict[str, Any]]:
         if value in (None, "", [], {}):
             continue
         summary[field_name] = sanitize_decision_signal_payload(value)
+    primary_action, primary_action_source = resolve_decision_signal_primary_action(item)
+    if primary_action is not None:
+        summary["primary_action"] = sanitize_decision_signal_payload(primary_action)
+    if primary_action_source is not None:
+        summary["primary_action_source"] = primary_action_source
     return summary or None
 
 

@@ -1,5 +1,5 @@
 import type React from 'react';
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import type { AnalysisReport, HistoryItem, StockHistoryFilters, StockHistoryRange } from '../../types/analysis';
 import { getSentimentColor } from '../../types/analysis';
 import {
@@ -188,16 +188,18 @@ export const StockHistoryTrendDrawer: React.FC<StockHistoryTrendDrawerProps> = (
 }) => {
   const { t } = useUiLanguage();
   const currentRecordId = report.meta.id;
-  const [selectedRecordId, setSelectedRecordId] = useState(currentRecordId);
+  const [selection, setSelection] = useState(() => ({
+    currentRecordId,
+    selectedRecordId: currentRecordId,
+  }));
+  const selectedRecordId = selection.currentRecordId === currentRecordId
+    ? selection.selectedRecordId
+    : currentRecordId;
   const actionLabels = useMemo(() => buildDecisionActionLabelMap(t), [t]);
   const summary = useMemo(
     () => summarizeView(items, report, t, actionLabels, currentRecordId),
     [actionLabels, currentRecordId, items, report, t],
   );
-
-  useEffect(() => {
-    setSelectedRecordId(currentRecordId);
-  }, [currentRecordId]);
 
   return (
     <div className="space-y-4 animate-fade-in">
@@ -330,7 +332,7 @@ export const StockHistoryTrendDrawer: React.FC<StockHistoryTrendDrawerProps> = (
                         className={`cursor-pointer transition-colors ${
                           isSelected ? 'bg-primary/10 ring-1 ring-inset ring-primary/35' : 'hover:bg-hover/35'
                         }`}
-                        onClick={() => setSelectedRecordId(item.id)}
+                        onClick={() => setSelection({ currentRecordId, selectedRecordId: item.id })}
                       >
                         <td className="whitespace-nowrap px-3 py-3 font-mono text-sm text-secondary-text">
                           {formatHistoryTime(item.createdAt)}

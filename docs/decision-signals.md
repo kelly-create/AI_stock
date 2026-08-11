@@ -17,7 +17,11 @@
 - 建议语义：`action`、`action_label`、`confidence`、`score`、`horizon`、`market_phase`、`plan_quality`、`status`。
 - 计划与解释：`entry_low`、`entry_high`、`stop_loss`、`target_price`、`invalidation`、`watch_conditions`、`reason`、`risk_summary`、`catalyst_summary`。
 - 证据与质量：`evidence`、`data_quality_summary`、`metadata`。
+- 正式个人投研：`research_stance`、`account_action`、`value_quality_score`、`trend_timing_score`、`catalyst_score`、`risk_score`、`evidence_quality_score`、`catalysts`、`invalidators`、`unknowns`、`evidence_refs`。
+- 研究与组合 lineage：`research_snapshot_hash`、`policy_version`、`policy_hash`、`policy_evaluation_hash`、`portfolio_snapshot_ref`、`prompt_version`、`policy_mode`、`policy_decision`、`would_block`、`policy_reasons`。
 - 生命周期：`expires_at`、`created_at`、`updated_at`。
+
+正式个人投研字段是 nullable 的追加扩展；没有对应 Personal Research 资产的 legacy 信号保持缺失，客户端不得补成 0 或据此推断已生成 Thesis。通用 `POST /api/v1/decision-signals` 只写 legacy/manual 字段，并显式拒绝研究分数、Research hash、Policy context 等 server-owned 正式字段；正式资产必须经 `POST /api/v1/research/personal/runs` 进入 Durable Worker，由服务端冻结 Research/五 Skill 与组合估值事实后写入。
 
 枚举取值：
 
@@ -29,6 +33,10 @@
 | `action` | `buy`、`add`、`hold`、`reduce`、`sell`、`watch`、`avoid`、`alert` |
 | `horizon` | `intraday`、`1d`、`3d`、`5d`、`10d`、`swing`、`long` |
 | `decision_profile` | `conservative`、`balanced`、`aggressive`；数据库 `NULL` 表示 legacy / unknown |
+| `research_stance` | `strong_bullish`、`bullish`、`watch`、`neutral`、`bearish`、`avoid` |
+| `account_action` | `observe`、`open_candidate`、`add_candidate`、`hold`、`reduce_candidate`、`exit_candidate` |
+| `policy_mode` | `off`、`shadow`、`enforce` |
+| `policy_decision` | `allow`、`downgrade`、`block`、`no_action` |
 | `plan_quality` | `complete`、`partial`、`minimal`、`unknown` |
 | `status` | `active`、`expired`、`invalidated`、`closed`、`archived` |
 
@@ -160,7 +168,9 @@ Web 入口位于 `/decision-signals`：
 - 信号表现统计保持全局已复盘 outcome 口径，不等于当前可见信号数量，也不随当前股票或高级列表筛选变化；当已复盘样本数为 0 时，Web 显示零样本空状态而不是一组 `0/-` 指标。
 - Web 展示优先读取正式 `decision_profile` 字段，只有字段缺失时才回退 legacy metadata；历史缺失或非法 profile 的信号显示为 `unknown`，不会误标为 `balanced`。
 - market filter 在 API / 服务层与 Web 前端均已支持 `cn/hk/us/jp/kr/tw`；`jp/kr/tw` 的前端本地化标签均已补齐，`tw` 信号可经 API 正常写入、按 `market=tw` 查询，并可在 Web DecisionSignal 页面通过市场筛选项选择台股（tw）；告警（大盘红绿灯）市场支持 `cn/hk/us/jp/kr`。
-- 详情抽屉展示动作、状态、评分、置信度、周期、计划质量、市场阶段、价格计划、风险、观察条件、证据、数据质量和 metadata。
+- 详情抽屉展示动作、状态、评分、置信度、周期、计划质量、市场阶段、价格计划、风险、观察条件、证据、数据质量和 metadata。正式个人投研信号存在 `account_action` 时，主决策徽标必须优先显示账户动作，并同时显示 Policy verdict/mode/reasons；legacy `action` 仅标为“上游研究动作”。例如 Enforce 将上游 `buy` 阻断为 `account_action=observe` 时，页面主决策显示“观察 / Policy 阻断”，不能继续把 `buy` 呈现为最终账户决策。
+- Portfolio 风险摘要沿用相同主动作规则：后端低敏 summary 保留 `account_action`、Policy verdict、`primary_action` 及其来源，筛选和计数以 `primary_action` 为准；Web 优先显示正式账户动作，只有旧信号缺少正式字段时才回退 legacy `action`。
+- 详情抽屉的独立 `Personal Research Thesis` 区块会先按 signal ID 读取 latest Thesis，再沿响应 lineage 读取五项 Skill execution 和可选 Debate Review；区块展示分数/版本/hash、Verifier/Judge、stance/account action、催化剂、失效条件、未知项和 Evidence 引用。它与 legacy Skill Outcome、Decision Outcome v1 明确分区；`null`/404 显示“尚无正式 Thesis”，不会把缺失分数伪造成 0。子资产失败只降级对应 lineage 展示，不覆盖已读取的 Thesis。
 - 详情抽屉或已有来源报告 ID 的页面上下文可以发起 reassess preview；没有可用来源报告 ID 时入口禁用。Preview 本身不加入列表、latest 或时间线；通过 guardrail 后可由用户二次确认保存。保存会重新请求 `persist=true`，成功后只使用响应中的后端 `item`；`created`、`existing`、`refreshed` 使用不同反馈，existing 不会被描述为新建，终态 existing 不会被乐观注入 active latest/时间线，created/refreshed 才按返回状态更新并刷新相关视图。Web 不会把 preview 拼成本地信号。
 - 保存时的 guardrail 调整 warning 会保留显示。如果 persist 重算被 guardrail 阻断，Web 会显示 `blocked_reason` 和结构化 warning，保留 preview 供用户理解，且不会把失败结果加入时间线。
 - 首页分析表单不提供 `decision_profile`；默认自动生成路径仍只使用 `balanced`。
@@ -227,7 +237,9 @@ P5 通过 sidecar 表保存用户反馈和后验结果，不扩展 `decision_sig
 - 后验评估只支持日线可验证的 `1d/3d/5d/10d`；`intraday/swing/long`、非方向动作、缺价和 forward bars 不足会写入 `eval_status=unable` 与明确 `unable_reason`。
 - 评估时冻结 action、market、market_phase、source_type、source_agent、plan_quality、data_quality_level、holding_state 等统计维度，历史统计不依赖后续 live join。
 
-唯一的 Scheduler owner 会在启动后执行一轮 v1 Outcome 维护，再按配置间隔推进到期信号。后台批处理会跳过非方向动作和不受支持的自然周期，避免反复生成确定不可评估的记录；显式按信号评估仍会保留 `unable_reason`。该维护与默认关闭的 `DECISION_OUTCOME_V2_ENABLED` 相互独立。
+唯一的 Scheduler owner 会在启动后执行一轮 v1 Outcome 维护，再按配置间隔推进到期信号。后台批处理会跳过非方向动作和不受支持的自然周期，避免反复生成确定不可评估的记录；显式按信号评估仍会保留 `unable_reason`。该维护与默认关闭的 `DECISION_OUTCOME_V2_ENABLED` 相互独立：v1 结果不等于个人投研 Outcome v2，关闭任一开关不关闭另一条路径。v2 使用独立表、durable job、API、Web 面板和四维校准合同；完整口径见[个人投研 Decision Outcome v2](decision-outcome-v2.md)。
+
+个人投研任务、五项 Skill、按需 Debate、Verifier/Judge、Policy Gate 和 Thesis 的完整契约见[个人投研任务、Skill、Debate 与 Thesis](personal-research-execution-artifacts.md)。
 
 | 配置 | 默认值 | 约束 | 说明 |
 | --- | --- | --- | --- |

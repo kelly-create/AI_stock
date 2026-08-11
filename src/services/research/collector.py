@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
+import json
 import re
 import threading
 from types import MappingProxyType
@@ -37,6 +38,10 @@ from .availability import (
     to_tushare_ts_code,
 )
 from .datasets import DatasetStatus
+from .decision_outcome_v2_datasets import (
+    DecisionOutcomeV2DatasetQuery,
+    validate_decision_outcome_v2_frames,
+)
 from .canonical import canonical_json
 from .raw_store import RawArtifactStore
 from .repositories import (
@@ -555,6 +560,7 @@ class ResearchDatasetCollector:
         cancel_event: Optional[CancellationSignal] = None,
         _ts_code: Optional[str] = None,
         reference_mode: ResearchReferenceMode = "historical",
+        query_plan: Optional[DecisionOutcomeV2DatasetQuery] = None,
     ) -> DatasetCollectionResult:
         boundary = normalize_as_of(as_of)
         if reference_mode not in {"live", "historical"}:
@@ -585,6 +591,16 @@ class ResearchDatasetCollector:
                 error_code="unsupported_dataset",
                 error=ValueError(f"unsupported research dataset: {dataset_name!r}"),
             )
+        if query_plan is not None and query_plan.dataset != definition.name:
+            raise ValueError("query_plan dataset conflicts with requested dataset")
+        if definition.requires_query_plan and query_plan is None:
+            raise ValueError(
+                f"research dataset {definition.name!r} requires an exact query_plan"
+            )
+        if not definition.requires_query_plan and query_plan is not None:
+            raise ValueError(
+                f"research dataset {definition.name!r} does not accept a query_plan"
+            )
         scope_value = ts_code.split(".", 1)[0]
         recovered = self._load_job_terminal_result(
             lease,
@@ -592,13 +608,26 @@ class ResearchDatasetCollector:
             scope_value,
             boundary,
         )
+        if (
+            recovered is None
+            and definition.current_state
+            and reference_mode == "live"
+        ):
+            recovered = self._load_job_terminal_result_at_any_boundary(
+                lease,
+                definition.name,
+                scope_value,
+            )
         if recovered is not None:
+            if query_plan is not None:
+                self._assert_recovered_query_plan(recovered, query_plan)
             if definition.incremental_by_trade_date:
                 return self._merge_incremental_window(
                     definition,
                     scope_value,
                     boundary,
                     recovered,
+                    lease=lease,
                 )
             return recovered
         if definition.current_state and reference_mode == "historical":
@@ -620,6 +649,8 @@ class ResearchDatasetCollector:
                     skipped=True,
                     reused=True,
                 )
+            if query_plan is not None:
+                self._assert_recovered_query_plan(existing, query_plan)
             return self._bind_existing_result(
                 existing,
                 definition=definition,
@@ -633,7 +664,11 @@ class ResearchDatasetCollector:
             boundary=boundary,
             lease=lease,
             cancel_event=cancel_event,
+            query_plan=query_plan,
             bootstrap_current_state=(
+                definition.name == "stock_basic" and reference_mode == "live"
+            ),
+            observe_current_state=(
                 definition.current_state and reference_mode == "live"
             ),
         )
@@ -643,19 +678,52 @@ class ResearchDatasetCollector:
                 scope_value,
                 boundary,
                 result,
+                lease=lease,
             )
-        self._remember_terminal_result(
-            lease,
-            definition.name,
-            scope_value,
-            (
-                result.data_as_of
-                if definition.current_state and reference_mode == "live"
-                else boundary
-            ),
-            result,
-        )
+        # A merged incremental window intentionally binds more than one
+        # immutable chunk to the same job boundary.  The durable events remain
+        # authoritative; caching one of those chunks as though it were the
+        # sole terminal binding would make a later resume order-dependent.
+        if not (
+            definition.incremental_by_trade_date
+            and len(result.source_snapshot_hashes) > 1
+        ):
+            self._remember_terminal_result(
+                lease,
+                definition.name,
+                scope_value,
+                (
+                    result.data_as_of
+                    if definition.current_state and reference_mode == "live"
+                    else boundary
+                ),
+                result,
+            )
         return result
+
+    def _assert_recovered_query_plan(
+        self,
+        result: DatasetCollectionResult,
+        query_plan: DecisionOutcomeV2DatasetQuery,
+    ) -> None:
+        """Reject reuse when an immutable payload came from another window."""
+
+        if result.raw_ref is None:
+            # Permission and transport terminals intentionally carry no raw
+            # payload. Dataset + stock scope + frozen boundary remain their
+            # complete identity and their typed failure must stay reusable.
+            return
+        try:
+            raw = json.loads(self.raw_store.read(result.raw_ref).decode("utf-8"))
+        except (KeyError, TypeError, ValueError, OSError) as exc:
+            raise ValueError("verified benchmark raw query plan is invalid") from exc
+        if not isinstance(raw, Mapping):
+            raise ValueError("verified benchmark raw query plan is invalid")
+        expected = dict(query_plan.to_audit_params())
+        if raw.get("params") != expected:
+            raise ValueError(
+                "verified benchmark snapshot conflicts with exact query plan"
+            )
 
     def _collect_supported_dataset(
         self,
@@ -665,12 +733,14 @@ class ResearchDatasetCollector:
         boundary: datetime,
         lease: LeaseFence,
         cancel_event: Optional[CancellationSignal],
+        query_plan: Optional[DecisionOutcomeV2DatasetQuery] = None,
         bootstrap_current_state: bool = False,
+        observe_current_state: bool = False,
     ) -> DatasetCollectionResult:
         scope_value = ts_code.split(".", 1)[0]
 
         def _terminal_boundary() -> datetime:
-            if bootstrap_current_state:
+            if observe_current_state:
                 return normalize_as_of(self.clock())
             return boundary
 
@@ -698,7 +768,7 @@ class ResearchDatasetCollector:
                 ),
                 retryable=retryable,
                 observed_at=(
-                    terminal_boundary if bootstrap_current_state else None
+                    terminal_boundary if observe_current_state else None
                 ),
             )
 
@@ -707,11 +777,15 @@ class ResearchDatasetCollector:
             if definition.incremental_by_trade_date
             else None
         )
-        query_params = self._build_query_params(
-            ts_code,
-            definition,
-            boundary=boundary,
-            last_trade_date=last_trade_date,
+        query_params = (
+            dict(query_plan.to_audit_params())
+            if query_plan is not None
+            else self._build_query_params(
+                ts_code,
+                definition,
+                boundary=boundary,
+                last_trade_date=last_trade_date,
+            )
         )
         if query_params is None:
             existing = self._load_latest_terminal_result(
@@ -733,6 +807,7 @@ class ResearchDatasetCollector:
                 "start_date": cutoff_text,
                 "end_date": cutoff_text,
             }
+        frames: list[pd.DataFrame] = []
         try:
             if definition.incremental_by_trade_date:
                 key = (
@@ -753,6 +828,7 @@ class ResearchDatasetCollector:
                     ),
                     cancel_event=cancel_event,
                 )
+                frames.append(frame)
                 # A waiter may have been cancelled or lost its lease while the
                 # shared transport was in flight. It must never inherit the
                 # owner's authority to persist.
@@ -761,11 +837,23 @@ class ResearchDatasetCollector:
                         "Tushare collection cancelled after single-flight"
                     )
                 self._assert_live_lease_after_wait(lease)
+            elif query_plan is not None:
+                for request in query_plan.requests:
+                    frames.append(
+                        self.provider.query(
+                            request.api_name,
+                            fields=request.fields_arg,
+                            _cancel_event=cancel_event,
+                            **dict(request.provider_params),
+                        )
+                    )
             else:
-                frame = self.provider.query(
-                    definition.name,
-                    _cancel_event=cancel_event,
-                    **query_params,
+                frames.append(
+                    self.provider.query(
+                        definition.provider_api_name or definition.name,
+                        _cancel_event=cancel_event,
+                        **query_params,
+                    )
                 )
         except TushareRequestCancelled:
             raise
@@ -853,6 +941,11 @@ class ResearchDatasetCollector:
             )
 
         try:
+            frame = (
+                validate_decision_outcome_v2_frames(query_plan, frames)
+                if query_plan is not None
+                else frames[0]
+            )
             rows, invalid_value_rows = normalize_frame_rows(frame)
         except (TypeError, ValueError) as error:
             return _terminal_error(
@@ -864,15 +957,29 @@ class ResearchDatasetCollector:
 
         raw_reference = self.raw_store.put_json(
             {
-                "api_name": definition.name,
+                "api_name": (
+                    query_plan.requests[0].api_name
+                    if query_plan is not None and len(query_plan.requests) == 1
+                    else definition.provider_api_name or definition.name
+                ),
                 "params": query_params,
+                "fields": (
+                    list(query_plan.requests[0].fields)
+                    if query_plan is not None and len(query_plan.requests) == 1
+                    else None
+                ),
+                "requests": (
+                    [request.to_dict() for request in query_plan.requests]
+                    if query_plan is not None
+                    else None
+                ),
                 "columns": [str(column) for column in frame.columns],
                 "rows": rows,
             }
         )
         observation_time = (
             normalize_as_of(self.clock())
-            if bootstrap_current_state
+            if observe_current_state
             else None
         )
         effective_boundary = observation_time or boundary
@@ -1346,6 +1453,8 @@ class ResearchDatasetCollector:
         scope_value: str,
         boundary: datetime,
         current: DatasetCollectionResult,
+        *,
+        lease: LeaseFence,
     ) -> DatasetCollectionResult:
         """Return the complete persisted CYQ window, not only the new chunk."""
 
@@ -1357,6 +1466,22 @@ class ResearchDatasetCollector:
         )
         if not chunks:
             return current
+        current_hash = (
+            current.snapshot.content_hash if current.snapshot is not None else None
+        )
+        for chunk in chunks:
+            chunk_hash = (
+                chunk.snapshot.content_hash if chunk.snapshot is not None else None
+            )
+            if chunk_hash is None or chunk_hash == current_hash:
+                continue
+            self._bind_existing_incremental_result(
+                chunk,
+                definition=definition,
+                scope_value=scope_value,
+                boundary=boundary,
+                lease=lease,
+            )
         unique_rows: dict[str, Mapping[str, Any]] = {}
         for chunk in chunks:
             for row in chunk.normalized_rows:
@@ -1390,22 +1515,29 @@ class ResearchDatasetCollector:
             if latest_chunk.status == DatasetStatus.STALE.value
             else DatasetStatus.AVAILABLE.value
         )
-        hashes = tuple(
-            sorted(
-                {
-                    item.snapshot.content_hash
-                    for item in chunks
-                    if item.snapshot is not None
-                }
-            )
-        )
+        source_hashes = {
+            item.snapshot.content_hash
+            for item in chunks
+            if item.snapshot is not None
+        }
+        # The primary incremental request is itself frozen provenance even
+        # when it returns no new rows.  Keeping that terminal observation in
+        # the merged lineage lets a cold durable resume distinguish "already
+        # up to date" from a window assembled only from older chunks.
+        if current.snapshot is not None:
+            source_hashes.add(current.snapshot.content_hash)
+        hashes = tuple(sorted(source_hashes))
         return replace(
-            current,
+            latest_chunk,
             status=status,
             row_count=len(ordered_rows),
             normalized_rows=ordered_rows,
-            available_at=max(item.available_at for item in chunks),
-            data_as_of=max(item.data_as_of for item in chunks),
+            available_at=max(
+                [current.available_at, *(item.available_at for item in chunks)]
+            ),
+            data_as_of=max(
+                [current.data_as_of, *(item.data_as_of for item in chunks)]
+            ),
             trade_date=max(item.trade_date for item in chunks if item.trade_date is not None),
             source_snapshot_hashes=hashes,
         )
@@ -1686,6 +1818,37 @@ class ResearchDatasetCollector:
             )
         with _CYQ_STATE_LOCK:
             _remember_job_result_locked(cache_key, result)
+        return result
+
+    def _load_job_terminal_result_at_any_boundary(
+        self,
+        lease: LeaseFence,
+        dataset: str,
+        scope_value: str,
+    ) -> Optional[DatasetCollectionResult]:
+        """Recover one live current-state result whose observation froze later."""
+
+        self._assert_live_lease_after_wait(lease)
+        row = self.repository.get_job_dataset(
+            job_id=lease.job_id,
+            dataset=dataset,
+            scope_value=scope_value,
+            as_of=None,
+            terminal_only=True,
+        )
+        if row is None:
+            return None
+        if not isinstance(row, Mapping):
+            raise ValueError("verified job Dataset checkpoint must be an object")
+        if (
+            row.get("dataset") != dataset
+            or row.get("scope_type") != "stock"
+            or row.get("scope_value") != scope_value
+        ):
+            raise ValueError("verified job Dataset checkpoint conflicts with scope")
+        result = self._hydrate_snapshot_payload(row, reused=True)
+        if result.retryable:
+            raise ValueError("terminal Dataset checkpoint cannot be retryable")
         return result
 
     def _load_latest_terminal_result(

@@ -332,6 +332,79 @@ def build_decision_signal_outcome_background_tasks(
     }]
 
 
+def _decision_outcome_v2_interval_seconds(config: Config) -> int:
+    interval_minutes = getattr(config, "decision_outcome_v2_interval_minutes", 60)
+    try:
+        return max(1, min(int(interval_minutes), 1440)) * 60
+    except (TypeError, ValueError):  # pragma: no cover - defensive branch
+        logger.warning(
+            "Invalid DECISION_OUTCOME_V2_INTERVAL_MINUTES=%r; use fallback 60",
+            interval_minutes,
+        )
+        return 60 * 60
+
+
+def _decision_outcome_v2_batch_limit(config: Config) -> int:
+    batch_limit = getattr(config, "decision_outcome_v2_batch_limit", 100)
+    try:
+        return max(1, min(int(batch_limit), 500))
+    except (TypeError, ValueError):  # pragma: no cover - defensive branch
+        logger.warning(
+            "Invalid DECISION_OUTCOME_V2_BATCH_LIMIT=%r; use fallback 100",
+            batch_limit,
+        )
+        return 100
+
+
+def build_decision_outcome_v2_background_tasks(
+    config: Config,
+    *,
+    config_provider: Optional[Callable[[], Config]] = None,
+    durable_enabled: Optional[bool] = None,
+) -> List[Dict[str, Any]]:
+    """Submit Outcome v2 work without importing providers in the scheduler."""
+
+    if not getattr(config, "decision_outcome_v2_enabled", False):
+        return []
+    is_durable = (
+        durable_enabled is True
+        or (durable_enabled is None and _durable_jobs_enabled(config))
+    )
+    if not is_durable:
+        logger.error(
+            "Decision Outcome v2 requires DURABLE_JOBS_ENABLED; "
+            "the scheduler will not evaluate provider data locally"
+        )
+        return []
+
+    def enqueue_outcome_v2_task() -> None:
+        runtime_config = config_provider() if config_provider is not None else config
+        if not getattr(runtime_config, "decision_outcome_v2_enabled", False):
+            return
+        _submit_durable_scheduler_job(
+            "decision_outcomes_v2",
+            {
+                "signal_id": None,
+                "horizons": ["5d", "10d", "20d"],
+                "stock_code": None,
+                "decision_profile": None,
+                "limit": _decision_outcome_v2_batch_limit(runtime_config),
+                "notify": False,
+            },
+            stock_code="decision-outcome-v2",
+            dedupe_key="scheduler:decision_outcomes_v2",
+            notify=False,
+            message="Decision Outcome v2 maintenance queued",
+        )
+
+    return [{
+        "task": enqueue_outcome_v2_task,
+        "interval_seconds": _decision_outcome_v2_interval_seconds(config),
+        "run_immediately": True,
+        "name": "decision_outcomes_v2",
+    }]
+
+
 class RuntimeSchedulerService:
     """Manage scheduled analysis inside the current API/Web/Desktop process."""
 
@@ -464,6 +537,7 @@ class RuntimeSchedulerService:
         return [
             *self._current_agent_event_monitor_background_tasks(config),
             *self._current_decision_signal_outcome_background_tasks(config),
+            *self._current_decision_outcome_v2_background_tasks(config),
         ]
 
     def _current_agent_event_monitor_background_tasks(self, config: Config) -> List[Dict[str, Any]]:
@@ -533,6 +607,43 @@ class RuntimeSchedulerService:
         return [{
             "task": cached["task"],
             "interval_seconds": _decision_signal_outcome_interval_seconds(config),
+            "run_immediately": run_immediately,
+            "name": name,
+        }]
+
+    def _current_decision_outcome_v2_background_tasks(
+        self,
+        config: Config,
+    ) -> List[Dict[str, Any]]:
+        name = "decision_outcomes_v2"
+        if not getattr(config, "decision_outcome_v2_enabled", False):
+            self._background_task_cache.pop(name, None)
+            self._background_task_registered_names.discard(name)
+            return []
+
+        cached = self._background_task_cache.get(name)
+        if cached is None:
+            entries = build_decision_outcome_v2_background_tasks(
+                config,
+                config_provider=self._reload_config,
+                durable_enabled=self._is_durable_mode(config),
+            )
+            if not entries:
+                self._background_task_cache.pop(name, None)
+                self._background_task_registered_names.discard(name)
+                return []
+            cached = dict(entries[0])
+            cached["name"] = name
+            self._background_task_cache[name] = cached
+
+        run_immediately = (
+            bool(cached.get("run_immediately", False))
+            and name not in self._background_task_registered_names
+        )
+        self._background_task_registered_names.add(name)
+        return [{
+            "task": cached["task"],
+            "interval_seconds": _decision_outcome_v2_interval_seconds(config),
             "run_immediately": run_immediately,
             "name": name,
         }]

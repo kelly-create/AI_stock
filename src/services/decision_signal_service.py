@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional, Tuple, get_args
 
 from data_provider.base import canonical_stock_code, normalize_stock_code
+from src.config import Config, get_config
 from src.core.trading_calendar import MarketPhase
 from src.repositories.decision_signal_repo import (
     DecisionSignalCreateResult,
@@ -34,6 +35,7 @@ from src.schemas.decision_profile import (
 )
 from src.schemas.decision_scale import action_for_score, score_action_conflicts_without_guardrail
 from src.services.portfolio_service import VALID_MARKETS
+from src.services.portfolio_policy_gate_service import PortfolioPolicyGateService
 from src.storage import (
     AnalysisHistory,
     DatabaseManager,
@@ -113,10 +115,14 @@ class DecisionSignalService:
         repo: Optional[DecisionSignalRepository] = None,
         portfolio_repo: Optional[PortfolioRepository] = None,
         db_manager: Optional[DatabaseManager] = None,
+        config: Optional[Config] = None,
+        policy_gate: Optional[PortfolioPolicyGateService] = None,
     ):
         self.repo = repo or DecisionSignalRepository(db_manager)
         self.portfolio_repo = portfolio_repo or PortfolioRepository(db_manager)
         self.db = db_manager or getattr(self.repo, "db", None) or DatabaseManager.get_instance()
+        self.config = config or get_config()
+        self.policy_gate = policy_gate or PortfolioPolicyGateService(config=self.config)
 
     def create_signal(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         outcome = self.create_signal_with_outcome(payload)
@@ -182,9 +188,25 @@ class DecisionSignalService:
             # an expired attempt must not invalidate or create account advice.
             durable_context.checkpoint()
         fields, lifecycle = self._normalize_payload(payload)
+        policy_result = self.policy_gate.evaluate(
+            payload=payload,
+            normalized_signal=fields,
+            job_id=(durable_context.job_id if durable_context is not None else None),
+            replay_contract=payload.get("policy_replay_contract"),
+        )
+        # Policy lineage is an immutable personal-research asset. Do not
+        # attach it to legacy DecisionSignal writers: doing so would silently
+        # change their retention/de-duplication contract and make ordinary
+        # report cleanup depend on an audit the legacy producer never asked
+        # for. Formal payloads still persist signal + evaluation atomically.
+        policy_evaluation_fields = None
+        if policy_result.formal_personal_research:
+            fields.update(policy_result.signal_fields)
+            policy_evaluation_fields = policy_result.evaluation_fields
         return self.repo.create_if_absent(
             fields,
             allow_relaxed_horizon_fill=lifecycle["horizon_defaulted"],
+            policy_evaluation_fields=policy_evaluation_fields,
         )
 
     def _write_outcome(
@@ -872,6 +894,31 @@ class DecisionSignalService:
             "catalyst_summary": self._optional_signal_text(payload.get("catalyst_summary")),
             "evidence_json": self._json_dumps(payload.get("evidence")),
             "data_quality_summary_json": self._json_dumps(payload.get("data_quality_summary")),
+            "research_snapshot_hash": self._optional_sha256(
+                payload.get("research_snapshot_hash"),
+                "research_snapshot_hash",
+            ),
+            "prompt_version": self._optional_identity_text(
+                payload.get("prompt_version"),
+                "prompt_version",
+                max_length=64,
+            ),
+            "catalysts_json": self._json_dumps(
+                self._optional_public_text_list(payload.get("catalysts"), "catalysts")
+            ),
+            "invalidators_json": self._json_dumps(
+                self._optional_public_text_list(payload.get("invalidators"), "invalidators")
+            ),
+            "unknowns_json": self._json_dumps(
+                self._optional_public_text_list(payload.get("unknowns"), "unknowns")
+            ),
+            "evidence_refs_json": self._json_dumps(
+                self._optional_public_text_list(
+                    payload.get("evidence_refs"),
+                    "evidence_refs",
+                    max_length=128,
+                )
+            ),
             "status": self._normalize_optional_enum(payload.get("status"), SIGNAL_STATUSES, "status") or "active",
             "expires_at": expires_at,
             "metadata_json": self._json_dumps(metadata),
@@ -1296,6 +1343,44 @@ class DecisionSignalService:
             raise ValueError(f"{field_name} must be a number") from exc
 
     @classmethod
+    def _optional_public_text_list(
+        cls,
+        value: Any,
+        field_name: str,
+        *,
+        max_items: int = 50,
+        max_length: int = 500,
+    ) -> Optional[List[str]]:
+        if value is None:
+            return None
+        if not isinstance(value, list):
+            raise ValueError(f"{field_name} must be an array")
+        if len(value) > max_items:
+            raise ValueError(f"{field_name} must contain at most {max_items} items")
+        normalized: List[str] = []
+        for index, item in enumerate(value):
+            text = cls._public_text(
+                item,
+                f"{field_name}[{index}]",
+                max_length=max_length,
+                required=True,
+            )
+            if text is not None:
+                normalized.append(text)
+        return normalized
+
+    @staticmethod
+    def _optional_sha256(value: Any, field_name: str) -> Optional[str]:
+        if value in (None, ""):
+            return None
+        normalized = str(value).strip().lower()
+        if len(normalized) != 64 or any(
+            character not in "0123456789abcdef" for character in normalized
+        ):
+            raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
+        return normalized
+
+    @classmethod
     def _optional_price_float(cls, value: Any, field_name: str) -> Optional[float]:
         number = cls._optional_float(value, field_name)
         if number is None:
@@ -1399,6 +1484,47 @@ class DecisionSignalService:
                 signal_id=row.id,
                 field_name="data_quality_summary_json",
             ),
+            "research_stance": row.research_stance,
+            "account_action": row.account_action,
+            "value_quality_score": row.value_quality_score,
+            "trend_timing_score": row.trend_timing_score,
+            "catalyst_score": row.catalyst_score,
+            "risk_score": row.risk_score,
+            "evidence_quality_score": row.evidence_quality_score,
+            "research_snapshot_hash": row.research_snapshot_hash,
+            "policy_version": row.policy_version,
+            "policy_hash": row.policy_hash,
+            "policy_evaluation_hash": row.policy_evaluation_hash,
+            "portfolio_snapshot_ref": row.portfolio_snapshot_ref,
+            "prompt_version": row.prompt_version,
+            "catalysts": self._json_loads(
+                row.catalysts_json,
+                signal_id=row.id,
+                field_name="catalysts_json",
+            ),
+            "invalidators": self._json_loads(
+                row.invalidators_json,
+                signal_id=row.id,
+                field_name="invalidators_json",
+            ),
+            "unknowns": self._json_loads(
+                row.unknowns_json,
+                signal_id=row.id,
+                field_name="unknowns_json",
+            ),
+            "evidence_refs": self._json_loads(
+                row.evidence_refs_json,
+                signal_id=row.id,
+                field_name="evidence_refs_json",
+            ),
+            "policy_mode": row.policy_mode,
+            "policy_decision": row.policy_decision,
+            "would_block": bool(row.would_block),
+            "policy_reasons": self._json_loads(
+                row.policy_reasons_json,
+                signal_id=row.id,
+                field_name="policy_reasons_json",
+            ) or [],
             "plan_quality": row.plan_quality,
             "status": row.status,
             "expires_at": row.expires_at.isoformat() if row.expires_at else None,

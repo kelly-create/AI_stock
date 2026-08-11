@@ -125,14 +125,18 @@ class PortfolioRiskService:
                 )
                 items = response.get("items", []) if isinstance(response, dict) else []
                 for item in items:
-                    if str(item.get("action") or "") not in defensive_actions:
+                    summary = summarize_decision_signal(item)
+                    if not summary:
+                        continue
+                    primary_action = str(summary.get("primary_action") or "")
+                    if primary_action not in defensive_actions:
                         continue
                     key = (
                         str(item.get("market") or "").strip().lower(),
                         str(item.get("stock_code") or "").strip().upper(),
                     )
                     if key[0] and key[1] and key not in latest_by_identity:
-                        latest_by_identity[key] = item
+                        latest_by_identity[key] = summary
                 total = int(response.get("total", 0) or 0) if isinstance(response, dict) else 0
                 if page * 100 >= total or not items:
                     break
@@ -142,11 +146,10 @@ class PortfolioRiskService:
             action_counts = {action: 0 for action in DEFENSIVE_DECISION_SIGNAL_ACTIONS}
             seen: set[Tuple[Optional[int], str, str, int]] = set()
             for position in held_positions:
-                signal = latest_by_identity.get((position["market"], position["signal_stock_code"]))
-                summary = summarize_decision_signal(signal)
+                summary = latest_by_identity.get((position["market"], position["signal_stock_code"]))
                 if not summary:
                     continue
-                action = str(summary.get("action") or "")
+                action = str(summary.get("primary_action") or "")
                 if action not in action_counts:
                     continue
                 signal_id = int(summary.get("id") or 0)

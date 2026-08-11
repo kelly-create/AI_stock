@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 try:
     import litellm  # noqa: F401
@@ -23,10 +24,10 @@ except ModuleNotFoundError:
 import src.auth as auth
 from api.app import create_app
 from src.analyzer import AnalysisResult
-from src.config import Config
+from src.config import Config, get_config
 from src.services.decision_signal_extractor import extract_and_persist_from_analysis_result
 from src.services.decision_signal_service import DecisionSignalService
-from src.storage import AnalysisHistory, DatabaseManager, DecisionSignalRecord, PortfolioAccount, PortfolioPosition, utc_naive_now
+from src.storage import AnalysisHistory, DatabaseManager, DecisionSignalRecord, PortfolioAccount, PortfolioPolicyEvaluationRecord, PortfolioPosition, utc_naive_now
 
 
 @contextmanager
@@ -253,6 +254,32 @@ def test_create_duplicate_list_detail_latest_and_status_update(client_and_db) ->
 
     missing_resp = client.get("/api/v1/decision-signals/999999")
     assert missing_resp.status_code == 404
+
+
+def test_generic_signal_api_rejects_server_owned_policy_context(client_and_db) -> None:
+    client, db = client_and_db
+    response = client.post(
+        "/api/v1/decision-signals",
+        json=_payload(
+            source_report_id=3091,
+            trace_id="trace-policy-forgery",
+            research_snapshot_hash="a" * 64,
+            policy_context={
+                "portfolio_complete": True,
+                "portfolio_snapshot_ref": "client-forged-snapshot",
+                "current_position_weight_pct": 0,
+                "projected_position_weight_pct": 1,
+                "projected_sector_weight_pct": 1,
+                "position_risk_pct": 0.1,
+            },
+        ),
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["error"] == "validation_error"
+    assert response.json()["detail"][0]["loc"] == ["body"]
+    with db.get_session() as session:
+        assert session.execute(select(PortfolioPolicyEvaluationRecord)).scalars().all() == []
 
 
 def test_create_rejects_explicit_null_decision_profile_and_accepts_null_metadata(client_and_db) -> None:

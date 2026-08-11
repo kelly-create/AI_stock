@@ -30,6 +30,7 @@ from src.services.research.runtime import (
     PreparedResearch,
     ResearchRuntimeContractError,
     ResearchRuntimeService,
+    _adapt_datasets_payload,
 )
 from src.schemas.analysis_context_pack import ContextFieldStatus
 from src.services.analysis_context_builder import (
@@ -89,6 +90,7 @@ class _Repository:
         self.factor_calls = []
         self.research_calls = []
         self._research_hashes = set()
+        self.job_research_snapshot = None
         self.lease_checks = []
         self.dataset_calls = []
         self.evidence_calls = []
@@ -137,6 +139,15 @@ class _Repository:
         if snapshot.debate_snapshot_hash is not None:
             payload["debate_snapshot_hash"] = snapshot.debate_snapshot_hash
         content_hash = canonical_hash(payload)
+        self.job_research_snapshot = {
+            "stock_code": snapshot.stock_code,
+            "market": snapshot.market,
+            "as_of": snapshot.as_of,
+            "factor_snapshot_hash": snapshot.factor_snapshot_hash,
+            "evidence_snapshot_hash": snapshot.evidence_snapshot_hash,
+            "debate_snapshot_hash": snapshot.debate_snapshot_hash,
+            "snapshot_hash": content_hash,
+        }
         created = content_hash not in self._research_hashes
         self._research_hashes.add(content_hash)
         result = SnapshotWriteResult(
@@ -147,6 +158,9 @@ class _Repository:
         if self.research_hook is not None:
             self.research_hook()
         return result
+
+    def get_job_research_snapshot(self, **_kwargs):
+        return self.job_research_snapshot
 
     def write_dataset(self, snapshot, *, lease, now=None):
         self.dataset_calls.append((snapshot, lease, now))
@@ -410,6 +424,27 @@ def _collection(*, available_at=AVAILABLE_AT, rows_by_dataset=None):
         as_of=AS_OF,
         datasets=tuple(datasets),
     )
+
+
+def test_dataset_projection_rows_are_deduplicated_and_stably_ordered():
+    rows = (
+        {"trade_date": "20250630", "close": 3.0},
+        {"trade_date": "20250629", "close": 2.0},
+        {"trade_date": "20250630", "close": 3.0},
+    )
+    collection = _collection(rows_by_dataset={"daily": list(rows)})
+
+    payload = _adapt_datasets_payload(
+        collection,
+        {"daily": rows},
+        as_of=collection.as_of,
+    )["daily"]
+
+    assert payload["row_count"] == 2
+    assert payload["rows"] == [
+        {"trade_date": "20250629", "close": 2.0},
+        {"trade_date": "20250630", "close": 3.0},
+    ]
 
 
 def _complete_rows():
@@ -693,7 +728,22 @@ def test_live_evidence_advances_boundary_persists_once_and_retry_reuses(
     assert first.evidence_context["evidence_hash"] == first.evidence_snapshot.evidence_hash
     assert "DSA_UNTRUSTED_EXTERNAL_DATA_BEGIN" in first.evidence_prompt_context
     assert len(first.evidence_prompt_context) <= 12_000
-    assert first.datasets_payload["news_search"]["content_hash"]
+    news_payload = first.datasets_payload["news_search"]
+    assert news_payload["content_hash"]
+    assert set(news_payload) == {
+        "dataset",
+        "status",
+        "row_count",
+        "available_at",
+        "data_as_of",
+        "content_hash",
+        "content_hashes",
+        "raw_ref",
+        "rows",
+    }
+    assert news_payload["row_count"] == 1
+    assert news_payload["rows"][0]["schema_version"] == "news-search-snippet-v1"
+    assert news_payload["content_hashes"] == [news_payload["content_hash"]]
     assert len(first.rows_by_dataset["news_search"]) == 1
     assert len(search_calls) == 1
     assert search_calls[0] == {
@@ -757,7 +807,7 @@ def _prepare_debate_fixture(tmp_path):
 
     service = ResearchRuntimeService(
         _config(tmp_path, evidence=True, debate=True),
-        collector=_Collector(_collection()),
+        collector=_Collector(_collection(rows_by_dataset=_complete_rows())),
         repository=repository,
         evidence_collector=EvidenceCollector(clock=lambda: observed_at),
         durable_context_getter=lambda: context,
@@ -768,6 +818,7 @@ def _prepare_debate_fixture(tmp_path):
         AS_OF,
         reference_mode="live",
         evidence_search=search,
+        requested_mode="debate",
     )
     assert prepared is not None
     return service, prepared, repository
@@ -1229,6 +1280,37 @@ def test_prepare_and_freeze_are_hash_stable_and_persist_diagnostic_hash(tmp_path
         prepared.lease,
     ]
     assert diagnostics == [first.snapshot_hash, second.snapshot_hash]
+
+
+def test_bound_research_snapshot_is_recovered_with_exact_prepared_lineage(tmp_path):
+    service, _, _, _, _ = _service(tmp_path)
+    prepared = _prepare(service)
+    frozen = _freeze(service, prepared)
+
+    recovered = service.get_bound_research_snapshot(prepared)
+
+    assert recovered is not None
+    assert recovered["snapshot_hash"] == frozen.snapshot_hash
+
+
+def test_retry_freeze_fails_before_write_when_bound_snapshot_hash_differs(tmp_path):
+    service, _, _, repository, diagnostics = _service(tmp_path)
+    prepared = _prepare(service)
+    first = _freeze(service, prepared)
+
+    with pytest.raises(
+        ResearchRuntimeContractError,
+        match="task-bound final Research snapshot",
+    ):
+        _freeze(
+            service,
+            prepared,
+            prompt={"system": "retry drift"},
+            expected_snapshot_hash=first.snapshot_hash,
+        )
+
+    assert len(repository.research_calls) == 1
+    assert diagnostics == [first.snapshot_hash]
 
 
 def test_data_prompt_route_and_full_policy_payload_each_change_snapshot_hash(

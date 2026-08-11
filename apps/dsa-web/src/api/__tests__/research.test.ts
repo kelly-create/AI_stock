@@ -1,21 +1,193 @@
 import { beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
-import { researchApi } from '../research';
+import { researchApi, researchWatchlistApi } from '../research';
 import type {
   ResearchDatasetListResponse,
   ResearchDatasetParams,
+  ResearchUniverseResponse,
+  ResearchWatchlistResponse,
 } from '../../types/research';
 
-const { get } = vi.hoisted(() => ({
+const { get, put, deleteRequest } = vi.hoisted(() => ({
   get: vi.fn(),
+  put: vi.fn(),
+  deleteRequest: vi.fn(),
 }));
 
 vi.mock('../index', () => ({
-  default: { get },
+  default: { get, put, delete: deleteRequest },
 }));
 
 describe('researchApi', () => {
   beforeEach(() => {
     get.mockReset();
+    put.mockReset();
+    deleteRequest.mockReset();
+  });
+
+  it('gets the enhanced watchlist and converts metadata to camel case', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        items: [{
+          stock_code: '600519',
+          market: 'cn',
+          sources: ['enhanced'],
+          reason: 'quality compounder',
+          priority: 80,
+          analysis_tier: 'deep',
+          next_review_at: '2026-08-12T09:30:00+08:00',
+          is_active: true,
+          is_holding: false,
+        }],
+        holdings_freshness: 'ledger',
+      },
+    });
+
+    const result = await researchWatchlistApi.getWatchlist();
+
+    expectTypeOf(result).toEqualTypeOf<ResearchWatchlistResponse>();
+    expect(get).toHaveBeenCalledWith('/api/v1/research/watchlist');
+    expect(result).toEqual({
+      items: [{
+        stockCode: '600519',
+        market: 'cn',
+        sources: ['enhanced'],
+        reason: 'quality compounder',
+        priority: 80,
+        analysisTier: 'deep',
+        nextReviewAt: '2026-08-12T09:30:00+08:00',
+        isActive: true,
+        isHolding: false,
+      }],
+      holdingsFreshness: 'ledger',
+    });
+  });
+
+  it('gets the effective research universe including holding provenance', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        items: [{
+          stock_code: '00700',
+          market: 'hk',
+          sources: ['legacy', 'holding'],
+          reason: null,
+          priority: 0,
+          analysis_tier: 'quick',
+          next_review_at: null,
+          is_active: true,
+          is_holding: true,
+        }],
+        holdings_freshness: 'ledger',
+      },
+    });
+
+    const result = await researchWatchlistApi.getUniverse();
+
+    expectTypeOf(result).toEqualTypeOf<ResearchUniverseResponse>();
+    expect(get).toHaveBeenCalledWith('/api/v1/research/universe');
+    expect(result.items[0]).toMatchObject({
+      stockCode: '00700',
+      market: 'hk',
+      sources: ['legacy', 'holding'],
+      isHolding: true,
+      nextReviewAt: null,
+    });
+    expect(result.holdingsFreshness).toBe('ledger');
+  });
+
+  it('replaces complete watchlist metadata using snake-case fields', async () => {
+    put.mockResolvedValueOnce({
+      data: {
+        stock_code: 'BRK.B',
+        market: 'us',
+        sources: ['enhanced'],
+        reason: null,
+        priority: 65,
+        analysis_tier: 'standard',
+        next_review_at: null,
+        is_active: true,
+        is_holding: false,
+      },
+    });
+
+    const result = await researchWatchlistApi.upsertItem(
+      'us',
+      'BRK.B',
+      {
+        reason: null,
+        priority: 65,
+        analysisTier: 'standard',
+        nextReviewAt: null,
+      },
+    );
+
+    expect(put).toHaveBeenCalledWith(
+      '/api/v1/research/watchlist/us/BRK.B',
+      {
+        reason: null,
+        priority: 65,
+        analysis_tier: 'standard',
+        next_review_at: null,
+      },
+    );
+    expect(result).toMatchObject({
+      stockCode: 'BRK.B',
+      analysisTier: 'standard',
+      nextReviewAt: null,
+    });
+  });
+
+  it('removes an item by identity and requires body-level deletion confirmation', async () => {
+    deleteRequest.mockResolvedValueOnce({ data: { deleted: 1 } });
+
+    const removed = await researchWatchlistApi.removeItem(
+      'cn',
+      '600519.SH',
+    );
+    expect(deleteRequest).toHaveBeenCalledWith(
+      '/api/v1/research/watchlist/cn/600519.SH',
+    );
+    expect(removed.deleted).toBe(1);
+
+    deleteRequest.mockResolvedValueOnce({ data: { deleted: 0 } });
+    await expect(
+      researchWatchlistApi.removeItem('cn', '600519'),
+    ).rejects.toThrow('Research watchlist delete response did not confirm deletion');
+  });
+
+  it('rejects malformed watchlist responses and item provenance', async () => {
+    get
+      .mockResolvedValueOnce({ data: { holdings_freshness: null } })
+      .mockResolvedValueOnce({
+        data: {
+          items: [{ stock_code: '600519', sources: null }],
+          holdings_freshness: null,
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          items: [{ stock_code: '600519', sources: ['portfolio'] }],
+          holdings_freshness: 'ledger',
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          items: [],
+          holdings_freshness: 'cached',
+        },
+      });
+
+    await expect(researchWatchlistApi.getWatchlist()).rejects.toThrow(
+      'Research watchlist response items must be an array',
+    );
+    await expect(researchWatchlistApi.getUniverse()).rejects.toThrow(
+      'Research watchlist item sources must be an array',
+    );
+    await expect(researchWatchlistApi.getUniverse()).rejects.toThrow(
+      'Research watchlist item contains an unknown source',
+    );
+    await expect(researchWatchlistApi.getUniverse()).rejects.toThrow(
+      'Research watchlist response must confirm ledger freshness',
+    );
   });
 
   it('gets factors with encoded stock code and snake-case query parameters', async () => {
@@ -519,5 +691,189 @@ describe('researchApi', () => {
     await expect(researchApi.getDebate('malformed-failure')).rejects.toThrow(
       'Research debate detail response is malformed',
     );
+  });
+
+  it('reads a formal Personal Research Thesis and follows its immutable lineage', async () => {
+    const skillIds = [
+      'personal-value-quality',
+      'personal-trend-timing',
+      'personal-catalyst',
+      'personal-risk',
+      'personal-evidence-quality',
+    ];
+    const skillHashes = Object.fromEntries(
+      skillIds.map((skillId, index) => [skillId, String(index + 1).repeat(64)]),
+    );
+    const thesis = {
+      contract: 'personal-research-thesis',
+      version: 'personal-research-thesis-v1',
+      thesis_hash: 'a'.repeat(64),
+      content_hash: 'b'.repeat(64),
+      lineage: {
+        task_id: 'task / 1',
+        market: 'cn',
+        stock_code: '600519',
+        research_snapshot_hash: 'c'.repeat(64),
+        skill_execution_hashes: skillHashes,
+        debate_snapshot_hash: 'd'.repeat(64),
+        debate_review_hash: 'e'.repeat(64),
+        decision_signal_id: 42,
+        policy_evaluation_hash: null,
+        policy_version: null,
+        policy_hash: null,
+        portfolio_snapshot_ref: null,
+        supersedes_thesis_hash: null,
+      },
+      stance: 'bullish',
+      account_action: 'open_candidate',
+      scores: {
+        value_quality_score: 70,
+        trend_timing_score: 71,
+        catalyst_score: 72,
+        risk_score: 73,
+        evidence_quality_score: 74,
+      },
+      catalysts: ['earnings'],
+      invalidators: ['margin decline'],
+      unknowns: ['guidance'],
+      evidence_refs: ['citation-1'],
+      content: { contract: 'formal-thesis-content-v1' },
+      created_at: '2026-08-10T08:00:00Z',
+    };
+    const execution = {
+      contract: 'personal-research-skill-execution',
+      version: 'v1',
+      execution_hash: skillHashes['personal-value-quality'],
+      skill_contract: {
+        skill_id: 'personal-value-quality',
+        version: 'value-quality-v1',
+        contract_hash: 'f'.repeat(64),
+        score_field: 'value_quality_score',
+      },
+      lineage: {
+        task_id: 'task / 1',
+        market: 'cn',
+        stock_code: '600519',
+        research_snapshot_hash: 'c'.repeat(64),
+        factor_snapshot_hash: '1'.repeat(64),
+        evidence_snapshot_hash: '2'.repeat(64),
+        dataset_snapshot_hashes: ['3'.repeat(64)],
+        dataset_lineage_hash: '4'.repeat(64),
+        input_hash: '5'.repeat(64),
+        output_hash: '6'.repeat(64),
+      },
+      input: { contract: 'input-v1' },
+      result: { status: 'succeeded', score: 70, output: { evidence_refs: ['citation-1'] } },
+      created_at: '2026-08-10T08:00:00Z',
+    };
+    const executionList = {
+      contract: 'personal-research-skill-execution-collection',
+      version: 'v1',
+      lineage: { task_id: 'task / 1', market: 'cn', stock_code: '600519' },
+      expected_skill_ids: skillIds,
+      missing_skill_ids: skillIds.slice(1),
+      complete: false,
+      executions: [execution],
+    };
+    const review = {
+      contract: 'personal-research-debate-review',
+      version: 'v1',
+      review_hash: 'e'.repeat(64),
+      lineage: {
+        task_id: 'task / 1',
+        market: 'cn',
+        stock_code: '600519',
+        debate_snapshot_hash: 'd'.repeat(64),
+        evidence_snapshot_hash: '2'.repeat(64),
+      },
+      verifier: {
+        version: 'verifier-v1',
+        input_hash: '1'.repeat(64),
+        output_hash: '2'.repeat(64),
+        valid: true,
+        fail_closed: false,
+        reason_codes: [],
+        input: {},
+        output: {},
+      },
+      judge: {
+        version: 'judge-v1',
+        policy_hash: '3'.repeat(64),
+        input_hash: '4'.repeat(64),
+        output_hash: '5'.repeat(64),
+        fail_closed: false,
+        reason_codes: ['balanced_evidence'],
+        verdict: 'balanced',
+        winner: null,
+        input: {},
+        output: {},
+      },
+      created_at: '2026-08-10T08:00:00Z',
+    };
+    get
+      .mockResolvedValueOnce({ data: thesis })
+      .mockResolvedValueOnce({ data: executionList })
+      .mockResolvedValueOnce({ data: review });
+
+    const thesisResult = await researchApi.getLatestPersonalResearchThesisBySignal(42);
+    const skillsResult = await researchApi.listPersonalResearchSkillExecutions(
+      thesisResult.lineage.taskId,
+      thesisResult.lineage.market,
+      thesisResult.lineage.stockCode,
+    );
+    const reviewResult = await researchApi.getPersonalResearchDebateReview(
+      thesisResult.lineage.debateReviewHash!,
+    );
+
+    expect(get).toHaveBeenNthCalledWith(
+      1,
+      '/api/v1/research/personal/artifacts/theses/by-signal/42',
+    );
+    expect(get).toHaveBeenNthCalledWith(
+      2,
+      '/api/v1/research/personal/artifacts/skills/tasks/task%20%2F%201/stocks/cn/600519',
+    );
+    expect(get).toHaveBeenNthCalledWith(
+      3,
+      `/api/v1/research/personal/artifacts/debate-reviews/${'e'.repeat(64)}`,
+    );
+    expect(thesisResult.lineage.skillExecutionHashes['personal-value-quality'])
+      .toBe('1'.repeat(64));
+    expect(skillsResult.executions[0].skillContract.version).toBe('value-quality-v1');
+    expect(reviewResult.verifier.valid).toBe(true);
+    expect(reviewResult.judge.reasonCodes).toEqual(['balanced_evidence']);
+  });
+
+  it('rejects malformed Personal Research artifact lineage instead of inventing values', async () => {
+    get
+      .mockResolvedValueOnce({
+        data: {
+          contract: 'personal-research-thesis',
+          version: 'v1',
+          lineage: { skill_execution_hashes: {} },
+          catalysts: [],
+          invalidators: [],
+          unknowns: [],
+          evidence_refs: [],
+          scores: {},
+          content: {},
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          contract: 'personal-research-skill-execution-collection',
+          version: 'v1',
+          expected_skill_ids: [],
+          missing_skill_ids: [],
+          executions: {},
+        },
+      });
+
+    await expect(researchApi.getLatestPersonalResearchThesisBySignal(42)).rejects.toThrow(
+      'Personal Research Thesis response is malformed',
+    );
+    await expect(
+      researchApi.listPersonalResearchSkillExecutions('task-1', 'cn', '600519'),
+    ).rejects.toThrow('Personal Research Skill execution collection is malformed');
   });
 });

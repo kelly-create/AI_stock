@@ -12,7 +12,11 @@ import {
 import { EmptyState, InlineAlert } from '../common';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
 import type { UiLanguage, UiTextKey } from '../../i18n/uiText';
-import type { DecisionSignalItem, DecisionSignalStatus } from '../../types/decisionSignals';
+import type {
+  DecisionSignalAccountAction,
+  DecisionSignalItem,
+  DecisionSignalStatus,
+} from '../../types/decisionSignals';
 import { buildDecisionActionLabelMap, getDecisionActionLabel } from '../../utils/decisionAction';
 import { getDecisionSignalProfileLabel } from '../../utils/decisionSignalProfile';
 import {
@@ -37,6 +41,15 @@ const STATUS_LABEL_KEYS: Record<DecisionSignalStatus, UiTextKey> = {
   invalidated: 'decisionSignals.invalidated',
   closed: 'decisionSignals.closed',
   archived: 'decisionSignals.archived',
+};
+
+const ACCOUNT_ACTION_LABEL_KEYS: Record<DecisionSignalAccountAction, UiTextKey> = {
+  observe: 'decisionSignals.accountAction.observe',
+  open_candidate: 'decisionSignals.accountAction.openCandidate',
+  add_candidate: 'decisionSignals.accountAction.addCandidate',
+  hold: 'decisionSignals.accountAction.hold',
+  reduce_candidate: 'decisionSignals.accountAction.reduceCandidate',
+  exit_candidate: 'decisionSignals.accountAction.exitCandidate',
 };
 
 const LOCALE_BY_LANGUAGE: Record<UiLanguage, string> = {
@@ -160,19 +173,24 @@ export const TimelineTooltip: React.FC<TimelineTooltipProps> = ({ active, payloa
   if (!active || !payload?.[0]?.payload) return null;
   const datum = payload[0].payload;
   const item = datum.item;
-  const actionLabel = getDecisionActionLabel(
-    item.action,
-    item.actionLabel,
-    null,
-    t('decisionSignals.action'),
-    actionLabels,
-  ) ?? item.action;
+  const actionLabel = item.accountAction
+    ? t(ACCOUNT_ACTION_LABEL_KEYS[item.accountAction])
+    : getDecisionActionLabel(
+      item.action,
+      item.actionLabel,
+      null,
+      t('decisionSignals.action'),
+      actionLabels,
+    ) ?? item.action;
+  const actionTitle = item.accountAction
+    ? t('decisionSignals.accountAction')
+    : t('decisionSignals.action');
   return (
     <div className="rounded-xl border border-border/70 bg-card/95 px-3 py-2 text-xs shadow-card">
       <div className="font-semibold text-foreground">{item.stockName || item.stockCode}</div>
       <div className="mt-2 grid gap-1 text-secondary-text">
         <span>{t('decisionSignals.createdAt')}: {formatDateTime(item.createdAt, language)}</span>
-        <span>{t('decisionSignals.action')}: {actionLabel}</span>
+        <span>{actionTitle}: {actionLabel}</span>
         <span>{t('decisionSignals.score')}: {formatNumber(item.score)}</span>
         <span>{t('decisionSignals.confidence')}: {formatConfidence(item.confidence)}</span>
         <span>{t('decisionSignals.horizon')}: {getDecisionSignalHorizonLabel(item.horizon, t)}</span>

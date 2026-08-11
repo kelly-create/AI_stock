@@ -88,20 +88,23 @@ export const GenerationBackendStatusPanel: React.FC<GenerationBackendStatusPanel
 }) => {
   const { t } = useUiLanguage();
   const [status, setStatus] = useState<GenerationBackendStatusResponse | null>(null);
-  const [smokeResult, setSmokeResult] = useState<TestGenerationBackendResponse | null>(null);
+  const [smokeState, setSmokeState] = useState<{
+    fingerprint: string;
+    result: TestGenerationBackendResponse | null;
+    loading: boolean;
+  }>({ fingerprint: '', result: null, loading: false });
   const [isLoading, setIsLoading] = useState(false);
-  const [isSmoking, setIsSmoking] = useState(false);
   const [error, setError] = useState<ParsedApiError | null>(null);
   const refreshRequestIdRef = useRef(0);
   const smokeRequestIdRef = useRef(0);
   const hasDraft = items.length > 0;
   const requestItems = useMemo(() => items.map((item) => ({ key: item.key, value: item.value })), [items]);
   const requestItemsFingerprint = useMemo(() => JSON.stringify(requestItems), [requestItems]);
+  const smokeResult = smokeState.fingerprint === requestItemsFingerprint ? smokeState.result : null;
+  const isSmoking = smokeState.fingerprint === requestItemsFingerprint && smokeState.loading;
 
   useEffect(() => {
     smokeRequestIdRef.current += 1;
-    setSmokeResult(null);
-    setIsSmoking(false);
   }, [requestItemsFingerprint]);
 
   const refresh = useCallback(async () => {
@@ -109,9 +112,8 @@ export const GenerationBackendStatusPanel: React.FC<GenerationBackendStatusPanel
     refreshRequestIdRef.current = requestId;
     smokeRequestIdRef.current += 1;
     setIsLoading(true);
-    setIsSmoking(false);
+    setSmokeState({ fingerprint: requestItemsFingerprint, result: null, loading: false });
     setError(null);
-    setSmokeResult(null);
     try {
       const next = hasDraft
         ? await systemConfigApi.previewGenerationBackendStatus({ items: requestItems, maskToken })
@@ -125,17 +127,25 @@ export const GenerationBackendStatusPanel: React.FC<GenerationBackendStatusPanel
         return;
       }
       setStatus(null);
-      setSmokeResult(null);
+      setSmokeState({ fingerprint: requestItemsFingerprint, result: null, loading: false });
       setError(getParsedApiError(err));
     } finally {
       if (refreshRequestIdRef.current === requestId) {
         setIsLoading(false);
       }
     }
-  }, [hasDraft, maskToken, requestItems]);
+  }, [hasDraft, maskToken, requestItems, requestItemsFingerprint]);
 
   useEffect(() => {
-    void refresh();
+    let active = true;
+    const expectedRequestId = refreshRequestIdRef.current;
+    queueMicrotask(() => {
+      if (active && refreshRequestIdRef.current === expectedRequestId) void refresh();
+    });
+    return () => {
+      active = false;
+      refreshRequestIdRef.current += 1;
+    };
   }, [refresh]);
 
   const runSmoke = useCallback(async () => {
@@ -143,9 +153,8 @@ export const GenerationBackendStatusPanel: React.FC<GenerationBackendStatusPanel
     smokeRequestIdRef.current = requestId;
     refreshRequestIdRef.current += 1;
     setIsLoading(false);
-    setIsSmoking(true);
+    setSmokeState({ fingerprint: requestItemsFingerprint, result: null, loading: true });
     setError(null);
-    setSmokeResult(null);
     try {
       const result = await systemConfigApi.testGenerationBackend({
         mode: 'json',
@@ -155,7 +164,7 @@ export const GenerationBackendStatusPanel: React.FC<GenerationBackendStatusPanel
       if (smokeRequestIdRef.current !== requestId) {
         return;
       }
-      setSmokeResult(result);
+      setSmokeState({ fingerprint: requestItemsFingerprint, result, loading: false });
       setStatus((prev) => ({
         primaryBackendId: result.status.backendId,
         fallbackBackendId: prev?.fallbackBackendId ?? null,
@@ -170,14 +179,18 @@ export const GenerationBackendStatusPanel: React.FC<GenerationBackendStatusPanel
         return;
       }
       setStatus(null);
-      setSmokeResult(null);
+      setSmokeState({ fingerprint: requestItemsFingerprint, result: null, loading: false });
       setError(getParsedApiError(err));
     } finally {
       if (smokeRequestIdRef.current === requestId) {
-        setIsSmoking(false);
+        setSmokeState((current) => (
+          current.fingerprint === requestItemsFingerprint
+            ? { ...current, loading: false }
+            : current
+        ));
       }
     }
-  }, [maskToken, requestItems]);
+  }, [maskToken, requestItems, requestItemsFingerprint]);
 
   return (
     <div data-testid="generation-backend-status-panel" className="space-y-3 rounded-xl border settings-border bg-card/70 p-4">

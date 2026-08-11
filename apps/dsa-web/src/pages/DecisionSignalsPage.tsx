@@ -24,6 +24,8 @@ import {
 } from '../components/decision-signals/DecisionSignalDisplay';
 import { DecisionSignalProfileCalibration } from '../components/decision-signals/DecisionSignalProfileCalibration';
 import { DecisionSignalTimeline } from '../components/decision-signals/DecisionSignalTimeline';
+import { DecisionOutcomeV2Panel } from '../components/decision-signals/DecisionOutcomeV2Panel';
+import { PersonalResearchThesisPanel } from '../components/decision-signals/PersonalResearchThesisPanel';
 import { StockAutocomplete } from '../components/StockAutocomplete';
 import { useUiLanguage } from '../contexts/UiLanguageContext';
 import { useStockIndex } from '../hooks/useStockIndex';
@@ -544,15 +546,23 @@ const DecisionSignalsPage: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    void loadSignals();
+    let active = true;
+    queueMicrotask(() => {
+      if (active) void loadSignals();
+    });
     return () => {
+      active = false;
       requestIdRef.current += 1;
     };
   }, [loadSignals]);
 
   useEffect(() => {
-    void loadOutcomeStats();
+    let active = true;
+    queueMicrotask(() => {
+      if (active) void loadOutcomeStats();
+    });
     return () => {
+      active = false;
       statsRequestIdRef.current += 1;
     };
   }, [loadOutcomeStats]);
@@ -569,53 +579,67 @@ const DecisionSignalsPage: React.FC = () => {
     selectedSignalIdRef.current = selected?.item.id ?? null;
     if (!selected) {
       detailRequestIdRef.current += 1;
-      setSelectedOutcomes([]);
-      setSelectedOutcomesError(null);
-      setSelectedFeedback(null);
-      setSelectedFeedbackError(null);
-      setSelectedOutcomesLoading(false);
-      setSelectedFeedbackLoading(false);
-      return;
+      let active = true;
+      queueMicrotask(() => {
+        if (!active) return;
+        setSelectedOutcomes([]);
+        setSelectedOutcomesError(null);
+        setSelectedFeedback(null);
+        setSelectedFeedbackError(null);
+        setSelectedOutcomesLoading(false);
+        setSelectedFeedbackLoading(false);
+      });
+      return () => {
+        active = false;
+      };
     }
 
     const requestId = detailRequestIdRef.current + 1;
     detailRequestIdRef.current = requestId;
-    setSelectedOutcomesLoading(true);
-    setSelectedFeedbackLoading(true);
-    setSelectedOutcomesError(null);
-    setSelectedFeedbackError(null);
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      setSelectedOutcomesLoading(true);
+      setSelectedFeedbackLoading(true);
+      setSelectedOutcomesError(null);
+      setSelectedFeedbackError(null);
 
-    void decisionSignalsApi.getSignalOutcomes(selected.item.id)
-      .then((response) => {
-        if (detailRequestIdRef.current !== requestId) return;
-        setSelectedOutcomes(response.items);
-      })
-      .catch((err) => {
-        if (detailRequestIdRef.current !== requestId) return;
-        setSelectedOutcomes([]);
-        setSelectedOutcomesError(getParsedApiError(err));
-      })
-      .finally(() => {
-        if (detailRequestIdRef.current === requestId) {
-          setSelectedOutcomesLoading(false);
-        }
-      });
+      void decisionSignalsApi.getSignalOutcomes(selected.item.id)
+        .then((response) => {
+          if (detailRequestIdRef.current !== requestId) return;
+          setSelectedOutcomes(response.items);
+        })
+        .catch((err) => {
+          if (detailRequestIdRef.current !== requestId) return;
+          setSelectedOutcomes([]);
+          setSelectedOutcomesError(getParsedApiError(err));
+        })
+        .finally(() => {
+          if (detailRequestIdRef.current === requestId) {
+            setSelectedOutcomesLoading(false);
+          }
+        });
 
-    void decisionSignalsApi.getFeedback(selected.item.id)
-      .then((response) => {
-        if (detailRequestIdRef.current !== requestId) return;
-        setSelectedFeedback(response);
-      })
-      .catch((err) => {
-        if (detailRequestIdRef.current !== requestId) return;
-        setSelectedFeedback(null);
-        setSelectedFeedbackError(getParsedApiError(err));
-      })
-      .finally(() => {
-        if (detailRequestIdRef.current === requestId) {
-          setSelectedFeedbackLoading(false);
-        }
-      });
+      void decisionSignalsApi.getFeedback(selected.item.id)
+        .then((response) => {
+          if (detailRequestIdRef.current !== requestId) return;
+          setSelectedFeedback(response);
+        })
+        .catch((err) => {
+          if (detailRequestIdRef.current !== requestId) return;
+          setSelectedFeedback(null);
+          setSelectedFeedbackError(getParsedApiError(err));
+        })
+        .finally(() => {
+          if (detailRequestIdRef.current === requestId) {
+            setSelectedFeedbackLoading(false);
+          }
+        });
+    });
+    return () => {
+      active = false;
+      detailRequestIdRef.current += 1;
+    };
   }, [selected]);
 
   const appliedSourceReportId = parseSourceReportId(appliedFilters.sourceReportId);
@@ -628,12 +652,19 @@ const DecisionSignalsPage: React.FC = () => {
 
   useEffect(() => {
     reassessRequestIdRef.current += 1;
-    setReassessResponse(null);
-    setReassessError(null);
-    setReassessLoading(false);
-    setReassessPersisting(false);
-    setReassessPersistConfirm(false);
-    setReassessPersistBlocked(null);
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      setReassessResponse(null);
+      setReassessError(null);
+      setReassessLoading(false);
+      setReassessPersisting(false);
+      setReassessPersistConfirm(false);
+      setReassessPersistBlocked(null);
+    });
+    return () => {
+      active = false;
+    };
   }, [reassessContextKey]);
 
   const handleReassess = useCallback(async () => {
@@ -1406,6 +1437,14 @@ const DecisionSignalsPage: React.FC = () => {
           )}
         </Card>
 
+        <Card
+          title={t('decisionSignals.outcomeV2.title')}
+          subtitle={t('decisionSignals.outcomeV2.description')}
+          padding="md"
+        >
+          <DecisionOutcomeV2Panel />
+        </Card>
+
         <Card title={t('decisionSignals.latestTitle')} subtitle={t('decisionSignals.latestDescription')} padding="md">
           {!activeStockContext ? (
             <EmptyState
@@ -1592,6 +1631,7 @@ const DecisionSignalsPage: React.FC = () => {
                 </button>
               ))}
             />
+            <PersonalResearchThesisPanel signalId={selected.item.id} />
           </div>
         ) : null}
       </Drawer>

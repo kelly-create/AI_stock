@@ -11,10 +11,18 @@ PR1 起默认核心表还强制包含 `analysis_jobs`、`job_events`、`notifica
 `provider_health`，避免只备份业务结果却遗漏正在执行的任务、通知或组件健康状态。
 PR2 起还强制包含 `research_dataset_snapshots`、`research_factor_snapshots` 和
 `research_snapshots`，使迁移、恢复和生产切换能够逐表核对研究数据、确定性因子与冻结快照行数。
+个人投研 PR3–PR5 起还强制包含关注池、Reconciliation 主表与调整明细、研究预算、Portfolio Policy
+Evaluation、Skill Contract/Execution、Debate Review、Thesis 和 Decision Outcome v2。备份与恢复验收会逐表
+核对这些表的存在性和行数；只验证旧业务报告表或只验证数据库文件哈希，均不能作为本阶段的生产恢复证据。
 manifest 另含一个排除自身字段后计算的 canonical SHA-256，用于发现文件内容的意外改写；它不是签名，不能替代
 对 manifest 文件本身的只读保管或外部校验和记录。
 
 ## 创建备份
+
+跨迁移发布必须保留两份不同阶段的证据：迁移前旧生产库使用**当前已部署版本**的密封备份工具及其旧 Schema
+核心表清单创建 rollback 备份；迁移完成后，再使用**候选版本**的默认清单创建 post-migration 备份，并确认上述
+PR3–PR5 新表全部存在且行数已记录。候选版本的新默认清单会在尚未迁移的旧库上因缺表而正确失败，不得通过
+临时缩减候选清单来伪装成迁移前备份。两份 manifest、工具版本/源码哈希和外部校验和都必须进入验收记录。
 
 输出目录必须已经存在，备份和 manifest 必须位于同一目录，两个目标都必须不存在：
 
@@ -65,7 +73,8 @@ python scripts/sqlite_backup.py restore \
 
 恢复前会完整验证源备份，写入同目录临时文件并再次验证，最后才以不覆盖方式原子发布目标。已有目标文件以及同名
 `-wal`、`-shm`、`-journal` sidecar 会被拒绝，工具不会覆盖或删除它们。恢复后应使用应用候选镜像只读检查
-核心 API、历史报告、Portfolio、Decision Signal 和 Outcome v1。
+核心 API、历史报告、Portfolio、Decision Signal、Outcome v1，以及个人投研关注池/Reconciliation、
+Policy/Skill/Thesis 和 Outcome v2 的只读查询与 lineage 闭包。
 
 ## 显式替换生产数据库
 

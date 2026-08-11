@@ -4417,6 +4417,32 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertEqual(current_map["DECISION_SIGNAL_OUTCOME_INTERVAL_MINUTES"], "45")
         self.assertEqual(current_map["DECISION_SIGNAL_OUTCOME_BATCH_LIMIT"], "50")
 
+    def test_update_outcome_v2_config_reconciles_runtime_scheduler_once(self) -> None:
+        runtime_scheduler = Mock()
+        service = SystemConfigService(
+            manager=self.manager,
+            runtime_scheduler=runtime_scheduler,
+        )
+
+        response = service.update(
+            config_version=self.manager.get_config_version(),
+            items=[
+                {"key": "DECISION_OUTCOME_V2_ENABLED", "value": "false"},
+                {"key": "DECISION_OUTCOME_V2_INTERVAL_MINUTES", "value": "45"},
+                {"key": "DECISION_OUTCOME_V2_BATCH_LIMIT", "value": "50"},
+            ],
+            reload_now=False,
+        )
+
+        self.assertTrue(response["success"])
+        runtime_scheduler.reconcile_from_config.assert_called_once_with(
+            clear_enabled_override=False,
+        )
+        current_map = self.manager.read_config_map()
+        self.assertEqual(current_map["DECISION_OUTCOME_V2_ENABLED"], "false")
+        self.assertEqual(current_map["DECISION_OUTCOME_V2_INTERVAL_MINUTES"], "45")
+        self.assertEqual(current_map["DECISION_OUTCOME_V2_BATCH_LIMIT"], "50")
+
     def test_update_schedule_time_blank_warning_reports_effective_default(self) -> None:
         response = self.service.update(
             config_version=self.manager.get_config_version(),

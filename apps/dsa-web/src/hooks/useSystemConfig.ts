@@ -104,7 +104,6 @@ export function useSystemConfig() {
     for (const item of serverItems) {
       map[item.key] = item;
     }
-    serverItemByKeyRef.current = map;
     return map;
   }, [serverItems]);
 
@@ -183,6 +182,7 @@ export function useSystemConfig() {
     ) => {
       const sorted = sortItemsByOrder(items);
       const previousServerMap = serverItemByKeyRef.current;
+      serverItemByKeyRef.current = Object.fromEntries(sorted.map((item) => [item.key, item]));
       const committedKeys = new Set(options?.committedKeys ?? []);
       const preserveDirty = options?.preserveDirty ?? false;
 

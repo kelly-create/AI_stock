@@ -401,6 +401,7 @@ export function useTaskStream(options: UseTaskStreamOptions = {}): UseTaskStream
   // Connect or disconnect when the hook is enabled or disabled.
   useEffect(() => {
     if (enabled) {
+      let active = true;
       const subscriberId = nextSubscriberId++;
       subscriberIdRef.current = subscriberId;
       subscribers.set(subscriberId, {
@@ -409,12 +410,15 @@ export function useTaskStream(options: UseTaskStreamOptions = {}): UseTaskStream
         autoReconnect,
         reconnectDelay,
       });
-      setIsConnected(sharedConnected);
+      queueMicrotask(() => {
+        if (active) setIsConnected(sharedConnected);
+      });
       connectTimerRef.current = window.setTimeout(() => {
         connectTimerRef.current = null;
         connectSharedStream();
       }, 0);
       return () => {
+        active = false;
         disconnect();
       };
     }

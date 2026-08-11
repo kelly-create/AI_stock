@@ -40,6 +40,8 @@ def test_summarize_decision_signal_keeps_only_low_sensitive_fields() -> None:
         "market",
         "action",
         "action_label",
+        "primary_action",
+        "primary_action_source",
         "horizon",
         "status",
         "source_type",
@@ -53,6 +55,33 @@ def test_summarize_decision_signal_keeps_only_low_sensitive_fields() -> None:
     assert summary["reason"] == "token=[REDACTED] 触发止损"
     assert summary["watch_conditions"] == ["观察量能", "password=[REDACTED]"]
     assert summary["risk_summary"] == {"drawdown": "webhook=[REDACTED_URL]"}
+    assert summary["primary_action"] == "sell"
+    assert summary["primary_action_source"] == "legacy_action"
+
+
+def test_summarize_decision_signal_prefers_formal_account_action_and_keeps_policy_verdict() -> None:
+    summary = summarize_decision_signal({
+        "id": 43,
+        "stock_code": "600519",
+        "market": "cn",
+        "action": "buy",
+        "action_label": "Buy",
+        "account_action": "observe",
+        "policy_mode": "enforce",
+        "policy_decision": "block",
+        "would_block": True,
+        "policy_reasons": ["position_hard_limit_exceeded"],
+    })
+
+    assert summary is not None
+    assert summary["action"] == "buy"
+    assert summary["account_action"] == "observe"
+    assert summary["primary_action"] == "watch"
+    assert summary["primary_action_source"] == "account_action"
+    assert summary["policy_mode"] == "enforce"
+    assert summary["policy_decision"] == "block"
+    assert summary["would_block"] is True
+    assert summary["policy_reasons"] == ["position_hard_limit_exceeded"]
 
 
 def test_summarize_decision_signal_rejects_non_dict_and_empty_payload() -> None:

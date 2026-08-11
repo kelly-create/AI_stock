@@ -31,6 +31,12 @@ from api.v1.schemas.portfolio import (
     PortfolioImportTradeItem,
     PortfolioPositionAnalysisRequest,
     PortfolioRiskResponse,
+    PortfolioReconciliationApplyRequest,
+    PortfolioReconciliationDetailResponse,
+    PortfolioReconciliationItem,
+    PortfolioReconciliationListResponse,
+    PortfolioReconciliationPreviewRequest,
+    PortfolioReconciliationPreviewResponse,
     PortfolioSnapshotResponse,
     PortfolioTradeListResponse,
     PortfolioTradeCreateRequest,
@@ -43,6 +49,10 @@ from src.services.portfolio_service import (
     PortfolioConflictError,
     PortfolioOversellError,
     PortfolioService,
+)
+from src.services.portfolio_reconciliation_service import (
+    PortfolioReconciliationConflictError,
+    PortfolioReconciliationService,
 )
 
 logger = logging.getLogger(__name__)
@@ -409,6 +419,132 @@ def delete_corporate_action(action_id: int) -> PortfolioDeleteResponse:
         raise
     except Exception as exc:
         raise _internal_error("Delete corporate action event failed", exc)
+
+
+@router.post(
+    "/accounts/{account_id}/reconciliations/preview",
+    response_model=PortfolioReconciliationPreviewResponse,
+    responses={
+        400: {"model": ErrorResponse},
+        409: {"model": ErrorResponse},
+        500: {"model": ErrorResponse},
+    },
+    summary="Preview an absolute Portfolio opening or reconciliation",
+)
+def preview_reconciliation(
+    account_id: int,
+    request: PortfolioReconciliationPreviewRequest,
+) -> PortfolioReconciliationPreviewResponse:
+    service = PortfolioReconciliationService()
+    try:
+        data = service.preview(
+            account_id=account_id,
+            event_type=request.event_type,
+            effective_date=request.effective_date,
+            cash=[item.model_dump() for item in request.cash],
+            positions=[item.model_dump() for item in request.positions],
+            source=request.source,
+            note=request.note,
+        )
+        return PortfolioReconciliationPreviewResponse(**data)
+    except PortfolioBusyError as exc:
+        raise _conflict_error(error="portfolio_busy", message=str(exc))
+    except PortfolioReconciliationConflictError as exc:
+        raise _conflict_error(error=exc.code, message=str(exc))
+    except ValueError as exc:
+        raise _bad_request(exc)
+    except Exception as exc:
+        raise _internal_error("Preview Portfolio reconciliation failed", exc)
+
+
+@router.post(
+    "/accounts/{account_id}/reconciliations/apply",
+    response_model=PortfolioReconciliationItem,
+    responses={
+        400: {"model": ErrorResponse},
+        409: {"model": ErrorResponse},
+        500: {"model": ErrorResponse},
+    },
+    summary="Atomically apply a non-stale Portfolio reconciliation preview",
+)
+def apply_reconciliation(
+    account_id: int,
+    request: PortfolioReconciliationApplyRequest,
+) -> PortfolioReconciliationItem:
+    service = PortfolioReconciliationService()
+    try:
+        data = service.apply(
+            account_id=account_id,
+            preview_token=request.preview_token,
+            idempotency_key=request.idempotency_key,
+        )
+        return PortfolioReconciliationItem(**data)
+    except PortfolioBusyError as exc:
+        raise _conflict_error(error="portfolio_busy", message=str(exc))
+    except PortfolioReconciliationConflictError as exc:
+        raise _conflict_error(error=exc.code, message=str(exc))
+    except ValueError as exc:
+        raise _bad_request(exc)
+    except Exception as exc:
+        raise _internal_error("Apply Portfolio reconciliation failed", exc)
+
+
+@router.get(
+    "/accounts/{account_id}/reconciliations",
+    response_model=PortfolioReconciliationListResponse,
+    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    summary="List immutable Portfolio reconciliations",
+)
+def list_reconciliations(
+    account_id: int,
+    include_previews: bool = Query(False),
+) -> PortfolioReconciliationListResponse:
+    try:
+        items = PortfolioReconciliationService().list_records(
+            account_id=account_id,
+            include_previews=include_previews,
+        )
+        return PortfolioReconciliationListResponse(
+            items=[PortfolioReconciliationItem(**item) for item in items]
+        )
+    except PortfolioBusyError as exc:
+        raise _conflict_error(error="portfolio_busy", message=str(exc))
+    except ValueError as exc:
+        raise _bad_request(exc)
+    except Exception as exc:
+        raise _internal_error("List Portfolio reconciliations failed", exc)
+
+
+@router.get(
+    "/accounts/{account_id}/reconciliations/{reconciliation_id}",
+    response_model=PortfolioReconciliationDetailResponse,
+    responses={
+        400: {"model": ErrorResponse},
+        404: {"model": ErrorResponse},
+        500: {"model": ErrorResponse},
+    },
+    summary="Get one immutable Portfolio reconciliation with before/after audit",
+)
+def get_reconciliation(
+    account_id: int,
+    reconciliation_id: int,
+) -> PortfolioReconciliationDetailResponse:
+    try:
+        item = PortfolioReconciliationService().get_record(
+            account_id=account_id,
+            reconciliation_id=reconciliation_id,
+        )
+        if item is None:
+            raise api_error(404, "not_found", "Portfolio reconciliation not found")
+        return PortfolioReconciliationDetailResponse(**item)
+    except HTTPException:
+        raise
+    except PortfolioBusyError as exc:
+        raise _conflict_error(error="portfolio_busy", message=str(exc))
+    except ValueError as exc:
+        raise _bad_request(exc)
+    except Exception as exc:
+        raise _internal_error("Get Portfolio reconciliation failed", exc)
 
 
 @router.get(

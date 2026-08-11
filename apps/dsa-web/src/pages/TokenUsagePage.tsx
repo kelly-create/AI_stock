@@ -131,8 +131,12 @@ const TokenUsagePage: React.FC = () => {
   }, [period, t]);
 
   useEffect(() => {
-    void loadDashboard();
+    let active = true;
+    queueMicrotask(() => {
+      if (active) void loadDashboard();
+    });
     return () => {
+      active = false;
       requestSeqRef.current += 1;
     };
   }, [loadDashboard]);

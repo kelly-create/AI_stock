@@ -534,7 +534,15 @@ class PortfolioPr2TestCase(unittest.TestCase):
             amount=100000.0,
             currency="CNY",
         )
-        for symbol in ("SH600519", "300750", "000001", "000002", "000003"):
+        for symbol in (
+            "SH600519",
+            "300750",
+            "000001",
+            "000002",
+            "000003",
+            "000004",
+            "000005",
+        ):
             self._create_position(aid, symbol)
 
         self._create_signal("600519.SH", "sell")
@@ -542,6 +550,22 @@ class PortfolioPr2TestCase(unittest.TestCase):
         self._create_signal("000001", "alert")
         self._create_signal("000002", "buy")
         self._create_signal("000003", "watch")
+        # A formal Policy action is authoritative. Even a defensive legacy
+        # action must not leak into the risk block after Policy says observe.
+        self._create_signal(
+            "000004",
+            "sell",
+            account_action="observe",
+            research_stance="watch",
+        )
+        # Conversely, a formal exit must be included even when the upstream
+        # research action itself was not defensive.
+        self._create_signal(
+            "000005",
+            "buy",
+            account_action="exit_candidate",
+            research_stance="bearish",
+        )
         self._create_signal("002000", "sell")
         self._create_signal("600519", "alert", status="expired", trace_id="expired-alert-600519")
 
@@ -549,10 +573,16 @@ class PortfolioPr2TestCase(unittest.TestCase):
 
         block = report["decision_signal_risk"]
         self.assertTrue(block["available"])
-        self.assertEqual(block["total"], 3)
-        self.assertEqual(block["actions"], {"sell": 1, "reduce": 1, "alert": 1})
+        self.assertEqual(block["total"], 4)
+        self.assertEqual(block["actions"], {"sell": 2, "reduce": 1, "alert": 1})
         symbols = {item["symbol"] for item in block["items"]}
-        self.assertEqual(symbols, {"SH600519", "300750", "000001"})
+        self.assertEqual(symbols, {"SH600519", "300750", "000001", "000005"})
+        self.assertNotIn("000004", symbols)
+        formal_exit = next(item for item in block["items"] if item["symbol"] == "000005")
+        self.assertEqual(formal_exit["signal"]["action"], "buy")
+        self.assertEqual(formal_exit["signal"]["account_action"], "exit_candidate")
+        self.assertEqual(formal_exit["signal"]["primary_action"], "sell")
+        self.assertEqual(formal_exit["signal"]["primary_action_source"], "account_action")
         signal_actions = {item["symbol"]: item["signal"]["action"] for item in block["items"]}
         self.assertNotIn("000002", signal_actions)
         self.assertNotIn("000003", signal_actions)

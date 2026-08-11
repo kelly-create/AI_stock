@@ -98,7 +98,14 @@ export function AgentBackendStatusPanel({
   }, [hasArchitectureConflict, hasDraft, maskToken, requestItems]);
 
   useEffect(() => {
-    void refresh();
+    let active = true;
+    queueMicrotask(() => {
+      if (active) void refresh();
+    });
+    return () => {
+      active = false;
+      refreshRequestIdRef.current += 1;
+    };
   }, [refresh]);
 
   const status = statusResponse;

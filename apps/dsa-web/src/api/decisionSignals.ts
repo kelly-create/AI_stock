@@ -44,6 +44,20 @@ function serializeRepeatedQueryParams(params: Record<string, unknown>): string {
 
 function toDecisionSignalItem(data: Record<string, unknown>): DecisionSignalItem {
   const item = toCamelCase<DecisionSignalItem>(data);
+  for (const field of [
+    'catalysts',
+    'invalidators',
+    'unknowns',
+    'evidence_refs',
+    'policy_reasons',
+  ]) {
+    const value = data[field];
+    if (value !== undefined && value !== null && (
+      !Array.isArray(value) || value.some((entry) => typeof entry !== 'string')
+    )) {
+      throw new Error(`DecisionSignal ${field} must be a string array`);
+    }
+  }
   if ('evidence' in data) item.evidence = data.evidence;
   if ('data_quality_summary' in data) item.dataQualitySummary = data.data_quality_summary;
   if ('metadata' in data) item.metadata = data.metadata;

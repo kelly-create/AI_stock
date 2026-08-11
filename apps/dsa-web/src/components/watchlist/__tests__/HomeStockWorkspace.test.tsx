@@ -16,6 +16,7 @@ function renderWorkspace({
 }) {
   const onHistoryItemClick = vi.fn();
   const onRemoveFromWatchlist = vi.fn().mockResolvedValue(undefined);
+  const onRemoveResearchWatchlist = vi.fn().mockResolvedValue(undefined);
   window.localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, 'zh');
 
   const renderView = (rows: HomeWatchlistRow[]) => (
@@ -29,6 +30,7 @@ function renderWorkspace({
         watchlistMessage={null}
         onAddToWatchlist={vi.fn().mockResolvedValue(undefined)}
         onRemoveFromWatchlist={onRemoveFromWatchlist}
+        onRemoveResearchWatchlist={onRemoveResearchWatchlist}
         onRefreshWatchlist={vi.fn().mockResolvedValue(undefined)}
         onAnalyzeWatchlist={vi.fn().mockResolvedValue(undefined)}
         isBatchAnalyzing={false}
@@ -50,6 +52,7 @@ function renderWorkspace({
   return {
     onHistoryItemClick,
     onRemoveFromWatchlist,
+    onRemoveResearchWatchlist,
     rerenderWatchlistRows: (rows: HomeWatchlistRow[]) => view.rerender(renderView(rows)),
   };
 }
@@ -300,5 +303,65 @@ describe('HomeStockWorkspace', () => {
     });
 
     expect(screen.getByRole('button', { name: '打开 HK700 最新分析详情' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('shows research source, priority, tier, and next-review metadata', () => {
+    renderWorkspace({
+      watchlistRows: [{
+        code: '600519',
+        market: 'cn',
+        sources: ['enhanced', 'holding'],
+        priority: 80,
+        analysisTier: 'deep',
+        nextReviewAt: '2026-08-12T09:30:00+08:00',
+        isHolding: true,
+        analyzedToday: false,
+      }],
+    });
+
+    const metadata = screen.getByTestId('watchlist-metadata-600519');
+    expect(metadata).toHaveTextContent('增强关注');
+    expect(metadata).toHaveTextContent('当前持仓');
+    expect(metadata).toHaveTextContent('优先级 80');
+    expect(metadata).toHaveTextContent('研究层级 深度');
+    expect(metadata).toHaveTextContent('下次复核');
+  });
+
+  it('removes a mixed effective row through the research endpoint', async () => {
+    const { onRemoveFromWatchlist, onRemoveResearchWatchlist } = renderWorkspace({
+      watchlistRows: [{
+        code: '600519',
+        market: 'cn',
+        sources: ['enhanced', 'holding'],
+        priority: 80,
+        analysisTier: 'deep',
+        isHolding: true,
+        analyzedToday: false,
+      }],
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '从自选股移除 600519' }));
+
+    await waitFor(() => {
+      expect(onRemoveResearchWatchlist).toHaveBeenCalledWith('cn', '600519');
+    });
+    expect(onRemoveFromWatchlist).not.toHaveBeenCalled();
+  });
+
+  it('does not show a remove action for a holding-only effective row', () => {
+    renderWorkspace({
+      watchlistRows: [{
+        code: 'AAPL',
+        market: 'us',
+        sources: ['holding'],
+        priority: 0,
+        analysisTier: 'quick',
+        isHolding: true,
+        analyzedToday: false,
+      }],
+    });
+
+    expect(screen.getByText('当前持仓')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '从自选股移除 AAPL' })).not.toBeInTheDocument();
   });
 });

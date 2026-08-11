@@ -39,8 +39,11 @@ from src.services.import_parser import (
     parse_import_from_text,
 )
 from src.services.stock_service import StockService
+from src.services.research_watchlist_service import ResearchWatchlistService
+from src.services.stock_list_parser import ParseStatus, parse_analysis_target
+from src.storage import DatabaseManager
 from src.services.stock_list_parser import split_stock_list
-from src.services.system_config_service import SystemConfigService
+from src.services.system_config_service import ConfigConflictError, SystemConfigService
 from data_provider.base import normalize_stock_code
 
 logger = logging.getLogger(__name__)
@@ -51,7 +54,27 @@ router = APIRouter()
 ALLOWED_MIME_STR = ", ".join(ALLOWED_MIME)
 
 
-def _read_watchlist_codes(service: SystemConfigService) -> list:
+def _sync_research_watchlist_overlay(stock_code: str, *, active: bool) -> None:
+    """Bridge legacy stock membership without rejecting legacy index entries."""
+
+    # The compatibility endpoint must not bootstrap or migrate the database on
+    # its own (notably for CLI/config-only callers). The FastAPI app initializes
+    # DatabaseManager before serving requests, so normal runtime calls still
+    # perform the bridge.
+    if DatabaseManager._instance is None:
+        return
+    target = parse_analysis_target(stock_code)
+    if target.asset_type != ParseStatus.STOCK:
+        return
+    ResearchWatchlistService().set_active(
+        stock_code=stock_code,
+        market=None,
+        active=active,
+        source="legacy",
+    )
+
+
+def _read_watchlist_snapshot(service: SystemConfigService) -> tuple[list, str]:
     """Read STOCK_LIST codes as-is (no normalization)."""
     config_data = service.get_config(include_schema=False)
     stock_list_str = ""
@@ -59,13 +82,21 @@ def _read_watchlist_codes(service: SystemConfigService) -> list:
         if item.get("key") == "STOCK_LIST":
             stock_list_str = str(item.get("value", ""))
             break
-    return split_stock_list(stock_list_str)
+    return split_stock_list(stock_list_str), str(config_data.get("config_version") or "")
 
 
-def _write_watchlist_codes(service: SystemConfigService, codes: list) -> None:
+def _read_watchlist_codes(service: SystemConfigService) -> list:
+    codes, _ = _read_watchlist_snapshot(service)
+    return codes
+
+
+def _write_watchlist_codes(
+    service: SystemConfigService,
+    codes: list,
+    *,
+    config_version: str,
+) -> None:
     """Persist stock codes to STOCK_LIST as-is (no normalization)."""
-    config_data = service.get_config(include_schema=False)
-    config_version = config_data.get("config_version", "")
     service.update(
         config_version=config_version,
         items=[{"key": "STOCK_LIST", "value": ",".join(codes)}],
@@ -343,6 +374,7 @@ def get_watchlist(
     responses={
         200: {"description": "已加入自选"},
         400: {"description": "参数错误", "model": ErrorResponse},
+        409: {"description": "配置版本冲突", "model": ErrorResponse},
         500: {"description": "服务器错误", "model": ErrorResponse},
     },
     summary="加入自选队列",
@@ -354,12 +386,18 @@ def add_to_watchlist(
 ) -> WatchlistResponse:
     try:
         validated = _validate_and_normalize_stock_code(request.stock_code)
-        codes = _read_watchlist_codes(service)
+        codes, config_version = _read_watchlist_snapshot(service)
         existing_keys = [_watchlist_match_key(c) for c in codes]
+        _sync_research_watchlist_overlay(validated, active=True)
         if _watchlist_match_key(validated) not in existing_keys:
             codes.append(request.stock_code.strip())
-            _write_watchlist_codes(service, codes)
+            _write_watchlist_codes(service, codes, config_version=config_version)
         return WatchlistResponse(stock_codes=codes, message=f"已加入 {request.stock_code.strip()}")
+    except ConfigConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "config_conflict", "message": "STOCK_LIST 已变化，请刷新后重试"},
+        ) from exc
     except HTTPException:
         raise
     except Exception as e:
@@ -376,6 +414,7 @@ def add_to_watchlist(
     responses={
         200: {"description": "已从自选删除"},
         400: {"description": "参数错误", "model": ErrorResponse},
+        409: {"description": "配置版本冲突", "model": ErrorResponse},
         500: {"description": "服务器错误", "model": ErrorResponse},
     },
     summary="从自选队列删除",
@@ -387,14 +426,20 @@ def remove_from_watchlist(
 ) -> WatchlistResponse:
     try:
         validated = _validate_and_normalize_stock_code(request.stock_code)
-        codes = _read_watchlist_codes(service)
+        codes, config_version = _read_watchlist_snapshot(service)
         existing_keys = [_watchlist_match_key(c) for c in codes]
         requested_key = _watchlist_match_key(validated)
+        _sync_research_watchlist_overlay(validated, active=False)
         if requested_key in existing_keys:
             idx = existing_keys.index(requested_key)
             codes.pop(idx)
-            _write_watchlist_codes(service, codes)
+            _write_watchlist_codes(service, codes, config_version=config_version)
         return WatchlistResponse(stock_codes=codes, message=f"已移除 {request.stock_code.strip()}")
+    except ConfigConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "config_conflict", "message": "STOCK_LIST 已变化，请刷新后重试"},
+        ) from exc
     except HTTPException:
         raise
     except Exception as e:

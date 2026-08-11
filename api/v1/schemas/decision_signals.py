@@ -6,7 +6,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from api.v1.schemas.market_phase import MarketPhaseValue
 from src.schemas.decision_action import DecisionAction
@@ -22,6 +22,38 @@ DecisionSignalOutcomeStatus = Literal["completed", "unable"]
 DecisionSignalOutcomeValue = Literal["hit", "miss", "neutral"]
 DecisionSignalFeedbackValue = Literal["useful", "not_useful"]
 DecisionSignalFeedbackSource = Literal["web", "api"]
+DecisionSignalResearchStance = Literal[
+    "strong_bullish", "bullish", "watch", "neutral", "bearish", "avoid"
+]
+DecisionSignalAccountAction = Literal[
+    "observe",
+    "open_candidate",
+    "add_candidate",
+    "hold",
+    "reduce_candidate",
+    "exit_candidate",
+]
+DecisionSignalPolicyMode = Literal["off", "shadow", "enforce"]
+DecisionSignalPolicyDecision = Literal["allow", "downgrade", "block", "no_action"]
+
+_SERVER_OWNED_PERSONAL_RESEARCH_FIELDS = frozenset(
+    {
+        "research_stance",
+        "account_action",
+        "value_quality_score",
+        "trend_timing_score",
+        "catalyst_score",
+        "risk_score",
+        "evidence_quality_score",
+        "research_snapshot_hash",
+        "prompt_version",
+        "catalysts",
+        "invalidators",
+        "unknowns",
+        "evidence_refs",
+        "policy_context",
+    }
+)
 
 
 class DecisionSignalCreateRequest(BaseModel):
@@ -62,6 +94,27 @@ class DecisionSignalCreateRequest(BaseModel):
         description="Optional metadata object. Omitted or null values are treated as absent.",
     )
     report_language: Optional[Literal["zh", "en", "ko"]] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_server_owned_personal_research_fields(cls, value: Any) -> Any:
+        """Keep formal lineage and portfolio facts server-derived.
+
+        The generic DecisionSignal endpoint remains a legacy/manual writer.
+        Formal personal research must be submitted through the durable
+        ``/api/v1/research/personal/runs`` endpoint, which derives snapshots,
+        scores, and Policy context inside the trusted server pipeline.
+        """
+
+        if isinstance(value, dict):
+            forbidden = sorted(_SERVER_OWNED_PERSONAL_RESEARCH_FIELDS.intersection(value))
+            if forbidden:
+                raise ValueError(
+                    "formal personal-research fields are server-owned; "
+                    "submit /api/v1/research/personal/runs instead: "
+                    + ",".join(forbidden)
+                )
+        return value
 
 
 class DecisionSignalReassessRequest(BaseModel):
@@ -278,6 +331,27 @@ class DecisionSignalItem(BaseModel):
     catalyst_summary: Optional[str] = None
     evidence: Optional[Any] = None
     data_quality_summary: Optional[Any] = None
+    research_stance: Optional[DecisionSignalResearchStance] = None
+    account_action: Optional[DecisionSignalAccountAction] = None
+    value_quality_score: Optional[float] = None
+    trend_timing_score: Optional[float] = None
+    catalyst_score: Optional[float] = None
+    risk_score: Optional[float] = None
+    evidence_quality_score: Optional[float] = None
+    research_snapshot_hash: Optional[str] = None
+    policy_version: Optional[str] = None
+    policy_hash: Optional[str] = None
+    policy_evaluation_hash: Optional[str] = None
+    portfolio_snapshot_ref: Optional[str] = None
+    prompt_version: Optional[str] = None
+    catalysts: Optional[List[str]] = None
+    invalidators: Optional[List[str]] = None
+    unknowns: Optional[List[str]] = None
+    evidence_refs: Optional[List[str]] = None
+    policy_mode: Optional[DecisionSignalPolicyMode] = None
+    policy_decision: Optional[DecisionSignalPolicyDecision] = None
+    would_block: bool = False
+    policy_reasons: List[str] = Field(default_factory=list)
     plan_quality: str
     status: str
     expires_at: Optional[str] = None

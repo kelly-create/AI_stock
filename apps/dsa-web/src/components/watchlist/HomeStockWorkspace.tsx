@@ -18,6 +18,11 @@ import { DashboardPanelHeader, DashboardStateBlock } from '../dashboard';
 import { StockBar } from '../history';
 import type { StockBarItem, TaskInfo } from '../../types/analysis';
 import { getSentimentColor } from '../../types/analysis';
+import type {
+  ResearchWatchlistAnalysisTier,
+  ResearchWatchlistMarket,
+  ResearchWatchlistSource,
+} from '../../types/research';
 import { buildDecisionActionLabelMap, getDecisionActionLabel } from '../../utils/decisionAction';
 import { formatDateTime } from '../../utils/format';
 import { areStockCodesEquivalent } from '../../utils/stockCode';
@@ -30,6 +35,13 @@ export type WatchlistAnalyzeMode = 'all' | 'pending';
 
 export interface HomeWatchlistRow {
   code: string;
+  market?: ResearchWatchlistMarket | '';
+  sources?: ResearchWatchlistSource[];
+  reason?: string | null;
+  priority?: number;
+  analysisTier?: ResearchWatchlistAnalysisTier;
+  nextReviewAt?: string | null;
+  isHolding?: boolean;
   latestItem?: StockBarItem;
   analyzedToday: boolean;
   isTodayStatusLoading?: boolean;
@@ -51,6 +63,7 @@ interface HomeStockWorkspaceProps {
   watchlistMessage: string | null;
   onAddToWatchlist: (code: string) => Promise<void>;
   onRemoveFromWatchlist: (code: string) => Promise<void>;
+  onRemoveResearchWatchlist?: (market: ResearchWatchlistMarket, code: string) => Promise<void>;
   onRefreshWatchlist: () => Promise<void>;
   onAnalyzeWatchlist: (mode: WatchlistAnalyzeMode) => Promise<void>;
   isBatchAnalyzing: boolean;
@@ -75,6 +88,22 @@ function getTaskStatusLabel(task: TaskInfo | undefined, t: (key: UiTextKey, para
   if (task.status === 'pending') return t('taskPanel.pending');
   if (task.status === 'cancel_requested') return t('taskPanel.cancelRequested');
   return task.status;
+}
+
+const WATCHLIST_SOURCE_LABEL_KEYS: Record<ResearchWatchlistSource, UiTextKey> = {
+  enhanced: 'watchlist.sourceEnhanced',
+  legacy: 'watchlist.sourceLegacy',
+  holding: 'watchlist.sourceHolding',
+};
+
+function getAnalysisTierLabel(
+  tier: ResearchWatchlistAnalysisTier | undefined,
+  t: (key: UiTextKey, params?: UiTextParams) => string,
+): string {
+  if (tier === 'quick') return t('watchlist.tierQuick');
+  if (tier === 'standard') return t('watchlist.tierStandard');
+  if (tier === 'deep') return t('watchlist.tierDeep');
+  return tier || t('common.noData');
 }
 
 const ScoreBadge: React.FC<{ item?: StockBarItem }> = ({ item }) => {
@@ -112,7 +141,7 @@ const ScoreBadge: React.FC<{ item?: StockBarItem }> = ({ item }) => {
 
 const WatchlistRowItem: React.FC<{
   row: HomeWatchlistRow;
-  onRemove: (code: string) => Promise<void>;
+  onRemove: (row: HomeWatchlistRow) => Promise<void>;
   onOpenDetail: (row: HomeWatchlistRow) => void;
   disabled: boolean;
   selected: boolean;
@@ -124,6 +153,10 @@ const WatchlistRowItem: React.FC<{
   const item = isLatestDetailLoading || isLatestDetailUnavailable ? undefined : row.latestItem;
   const stockName = row.latestItem?.stockName || row.code;
   const canOpenDetail = typeof item?.id === 'number';
+  const isHoldingOnly = Boolean(
+    row.sources?.length === 1
+    && row.sources[0] === 'holding',
+  );
 
   const handleOpenDetail = () => {
     onOpenDetail(row);
@@ -175,6 +208,30 @@ const WatchlistRowItem: React.FC<{
               </>
             ) : null}
           </div>
+          {row.sources?.length || typeof row.priority === 'number' || row.analysisTier || row.nextReviewAt ? (
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5" data-testid={`watchlist-metadata-${row.code}`}>
+              {row.sources?.map((source) => (
+                <Badge key={source} variant={source === 'holding' ? 'info' : 'default'} className="px-1.5 py-0 text-[10px] shadow-none">
+                  {t(WATCHLIST_SOURCE_LABEL_KEYS[source])}
+                </Badge>
+              ))}
+              {typeof row.priority === 'number' ? (
+                <Badge variant="default" className="px-1.5 py-0 text-[10px] shadow-none">
+                  {t('watchlist.priority', { priority: row.priority })}
+                </Badge>
+              ) : null}
+              {row.analysisTier ? (
+                <Badge variant="default" className="px-1.5 py-0 text-[10px] shadow-none">
+                  {t('watchlist.analysisTier', { tier: getAnalysisTierLabel(row.analysisTier, t) })}
+                </Badge>
+              ) : null}
+              {row.nextReviewAt ? (
+                <span className="text-[10px] text-muted-text">
+                  {t('watchlist.nextReviewAt', { time: formatDateTime(row.nextReviewAt) })}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
           <div className="flex min-w-0 items-center justify-between gap-2 text-[11px]">
             <span className={`truncate ${canOpenDetail ? 'text-primary' : isLatestDetailLoading ? 'text-muted-text' : 'text-warning'}`}>
               {canOpenDetail
@@ -200,17 +257,19 @@ const WatchlistRowItem: React.FC<{
       </button>
       <div className="flex shrink-0 items-start gap-1.5">
         <ScoreBadge item={item} />
-        <Button
-          type="button"
-          variant="ghost"
-          size="xsm"
-          className="h-7 w-7 px-0"
-          disabled={disabled}
-          aria-label={t('watchlist.removeAria', { code: row.code })}
-          onClick={() => void onRemove(row.code)}
-        >
-          <Trash2 className="h-3.5 w-3.5 text-danger" aria-hidden="true" />
-        </Button>
+        {isHoldingOnly ? null : (
+          <Button
+            type="button"
+            variant="ghost"
+            size="xsm"
+            className="h-7 w-7 px-0"
+            disabled={disabled}
+            aria-label={t('watchlist.removeAria', { code: row.code })}
+            onClick={() => void onRemove(row)}
+          >
+            <Trash2 className="h-3.5 w-3.5 text-danger" aria-hidden="true" />
+          </Button>
+        )}
       </div>
     </div>
   );
@@ -247,6 +306,7 @@ export const HomeStockWorkspace: React.FC<HomeStockWorkspaceProps> = ({
   watchlistMessage,
   onAddToWatchlist,
   onRemoveFromWatchlist,
+  onRemoveResearchWatchlist,
   onRefreshWatchlist,
   onAnalyzeWatchlist,
   isBatchAnalyzing,
@@ -507,11 +567,15 @@ export const HomeStockWorkspace: React.FC<HomeStockWorkspaceProps> = ({
               </div>
               {watchlistRows.map((row) => (
                 <WatchlistRowItem
-                  key={row.code}
+                  key={`${row.market ?? ''}:${row.code}`}
                   row={row}
-                  onRemove={async (code) => {
+                  onRemove={async (item) => {
                     setWorkspaceNoticeCode(null);
-                    await onRemoveFromWatchlist(code);
+                    if (item.market && onRemoveResearchWatchlist) {
+                      await onRemoveResearchWatchlist(item.market, item.code);
+                      return;
+                    }
+                    await onRemoveFromWatchlist(item.code);
                   }}
                   onOpenDetail={handleWatchlistRowOpen}
                   disabled={watchlistActioning}
