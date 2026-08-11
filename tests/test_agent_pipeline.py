@@ -2716,10 +2716,15 @@ class TestAgentConstructionChain(unittest.TestCase):
                 [],
                 "openai/kimi-k2.6",
                 temperature=0.2,
+                response_format={"type": "json_object"},
             )
 
         self.assertEqual(result.content, "agent ok")
         self.assertEqual(mock_completion.call_args.kwargs["temperature"], 1.0)
+        self.assertEqual(
+            mock_completion.call_args.kwargs["response_format"],
+            {"type": "json_object"},
+        )
 
     @patch("src.agent.llm_adapter.Router")
     def test_llm_adapter_normalizes_kimi_k26_temperature_for_yaml_alias(self, _mock_router):

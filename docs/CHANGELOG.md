@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] 个人投研 Debate 的 Agent 与传统 LiteLLM 路径向每个候选模型传递严格 JSON-object 响应格式，同时保留完整业务 validator 和模型回退，避免路由快照声明结构化输出但实际请求仅依赖提示词。
 - [修复] 将 Bounded Debate Prompt 升级为 v2，并与 Judge 的 0.5 平均置信度门槛共用同一合同；低置信度候选观点保留为限制或开放问题，禁止抬高分数或降低 fail-closed 安全阈值。
 
 - [修复] YFinance TTM 分红窗口按除权日的自然日边界计算，完整包含恰好 365 天前的事件，避免测试和生产结果随当天执行时刻漂移。

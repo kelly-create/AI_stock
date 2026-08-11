@@ -168,6 +168,8 @@ def _assert_debate_route(route: dict[str, object], *, channel: str) -> None:
     assert route["temperature"] == 0.2
     assert route["max_tokens"] == 2048
     assert route["timeout_seconds"] == 60.0
+    assert route["response_format"] == {"type": "json_object"}
+    assert route["response_contract"] == "research-debate-output-v1"
 
 
 class _PipelineDebateRuntime:
@@ -234,6 +236,7 @@ class _RecordingDebateTextAdapter:
             "max_tokens": 2048,
             "timeout": 60.0,
             "raise_on_failure": True,
+            "response_format": {"type": "json_object"},
         }
         return SimpleNamespace(
             content="{}",
@@ -833,6 +836,7 @@ class TestResearchAnalyzeStockIntegration:
                 "timeout": 60.0,
                 "call_type": "research_debate",
                 "stock_code": "600519",
+                "response_format": {"type": "json_object"},
             }
             return "{}", "provider/debate-model", {"total_tokens": 1}
 

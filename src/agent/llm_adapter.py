@@ -11,7 +11,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import litellm
 from litellm import Router
@@ -42,7 +42,11 @@ from src.llm.backend_registry import (
     resolve_agent_generation_backend_id,
 )
 from src.llm.generation_backend import GenerationError, GenerationErrorCode
-from src.llm.generation_params import apply_litellm_generation_params, resolve_litellm_wire_model
+from src.llm.generation_params import (
+    apply_litellm_generation_params,
+    normalize_litellm_response_format,
+    resolve_litellm_wire_model,
+)
 from src.llm.usage import attach_message_hmacs, extract_usage_payload, normalize_litellm_usage
 from src.llm.provider_cache import (
     build_provider_cache_route_context,
@@ -369,6 +373,7 @@ class LLMToolAdapter:
                 logger.debug(f"Registered custom pricing for {model_name}")
             except Exception as e:
                 logger.debug(f"Model {model_name} may already be registered or pricing error: {e}")
+
     def _has_channel_config(self) -> bool:
         """Check if multi-channel config (channels / YAML) is active."""
         return bool(self._config.llm_model_list) and not all(
@@ -574,6 +579,7 @@ class LLMToolAdapter:
         timeout: Optional[float] = None,
         raise_on_failure: bool = False,
         response_validator: Optional[Callable[[str], None]] = None,
+        response_format: Optional[Mapping[str, Any]] = None,
     ) -> LLMResponse:
         """Send a text-only completion through the shared routing stack."""
         return self.call_completion(
@@ -585,6 +591,7 @@ class LLMToolAdapter:
             timeout=timeout,
             raise_on_failure=raise_on_failure,
             response_validator=response_validator,
+            response_format=response_format,
         )
 
     def call_completion(
@@ -598,6 +605,7 @@ class LLMToolAdapter:
         timeout: Optional[float] = None,
         raise_on_failure: bool = False,
         response_validator: Optional[Callable[[str], None]] = None,
+        response_format: Optional[Mapping[str, Any]] = None,
     ) -> LLMResponse:
         """Shared completion path for both tool and text-only calls."""
         config = self._config
@@ -624,6 +632,9 @@ class LLMToolAdapter:
         hit_rate_limit = False
         if response_validator is not None and not callable(response_validator):
             raise TypeError("response_validator must be callable")
+        normalized_response_format = normalize_litellm_response_format(
+            response_format
+        )
         for idx, model in enumerate(models_to_try):
             remaining_timeout = timeout
             if timeout is not None and timeout > 0:
@@ -634,13 +645,18 @@ class LLMToolAdapter:
                     )
                     break
             try:
+                call_options: Dict[str, Any] = {
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "timeout": remaining_timeout,
+                }
+                if normalized_response_format is not None:
+                    call_options["response_format"] = normalized_response_format
                 response = self._call_litellm_model(
                     messages,
                     tools or [],
                     model,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    timeout=remaining_timeout,
+                    **call_options,
                 )
                 if response_validator is not None:
                     response_validator(str(response.content or ""))
@@ -697,6 +713,7 @@ class LLMToolAdapter:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
+        response_format: Optional[Mapping[str, Any]] = None,
     ) -> LLMResponse:
         """Call a specific litellm model with OpenAI-format messages and tools."""
         openai_messages = self._convert_messages(messages, target_model=model)
@@ -713,6 +730,11 @@ class LLMToolAdapter:
             call_kwargs["max_tokens"] = max_tokens
         if timeout is not None:
             call_kwargs["timeout"] = timeout
+        normalized_response_format = normalize_litellm_response_format(
+            response_format
+        )
+        if normalized_response_format is not None:
+            call_kwargs["response_format"] = normalized_response_format
 
         if extra:
             call_kwargs["extra_body"] = extra

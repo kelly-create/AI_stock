@@ -101,7 +101,7 @@ Skill 不调用模型，不读取新网络数据，只消费同一份冻结 Rese
 
 自动触发还要求 Evidence Quality 至少 70。显式 Debate 不套用这个 70 分自动门槛，但仍要求可引用 Evidence 且质量分不为空。未满足条件时保留稳定 reason code，不会静默强行运行 Debate。
 
-Bull/Bear 只能引用已冻结 claim/citation。Prompt v2 与 Judge 共用 0.5 门槛：只有诚实置信度至少为 0.5 的证据支撑观点才进入 `arguments`，较弱候选观点保留在 `limitations` / `open_questions`，不得为通过门槛抬高置信度；如果某一侧没有任何观点诚实达到门槛，仍输出一条有界低置信度观点，让 Judge 明确 fail closed。Verifier 确认快照完整、Bull/Bear 齐全、参数有引用且 Evidence lineage 匹配；Judge 在 Verifier 通过后计算两侧平均置信度。任意一侧平均置信度低于 0.5 时 fail closed；两侧差值绝对值小于 0.15 时为 `balanced`，否则返回 `bull` 或 `bear`。Verifier/Judge 都保留版本、输入/输出 hash 和 reason codes；任一 fail-closed review 不能支撑正式 Thesis。
+Bull/Bear 只能引用已冻结 claim/citation。Prompt v2 与 Judge 共用 0.5 门槛：只有诚实置信度至少为 0.5 的证据支撑观点才进入 `arguments`，较弱候选观点保留在 `limitations` / `open_questions`，不得为通过门槛抬高置信度；如果某一侧没有任何观点诚实达到门槛，仍输出一条有界低置信度观点，让 Judge 明确 fail closed。每个已配置模型的实际请求同时携带严格 `json_object` 响应格式，返回后仍由完整 `research-debate-output-v1` 业务校验器检查 stance、字段和 Claim/Citation 引用；JSON mode 不能替代业务校验，也不会在模型不支持时降级为无约束成功。Verifier 确认快照完整、Bull/Bear 齐全、参数有引用且 Evidence lineage 匹配；Judge 在 Verifier 通过后计算两侧平均置信度。任意一侧平均置信度低于 0.5 时 fail closed；两侧差值绝对值小于 0.15 时为 `balanced`，否则返回 `bull` 或 `bear`。Verifier/Judge 都保留版本、输入/输出 hash 和 reason codes；任一 fail-closed review 不能支撑正式 Thesis。
 
 ## Portfolio Policy Gate
 

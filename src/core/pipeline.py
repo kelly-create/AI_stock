@@ -845,6 +845,10 @@ class StockAnalysisPipeline:
     ) -> Dict[str, Any]:
         """Describe the exact text-only route used by bounded Debate calls."""
 
+        from src.services.research.debate_service import (
+            DEBATE_OUTPUT_SCHEMA_VERSION,
+        )
+
         route = self._build_research_model_route(use_agent=use_agent, tools=[])
         route.update(
             {
@@ -853,7 +857,8 @@ class StockAnalysisPipeline:
                     if use_agent
                     else "research-debate-traditional"
                 ),
-                "response_format": "research-debate-output-v1",
+                "response_format": {"type": "json_object"},
+                "response_contract": DEBATE_OUTPUT_SCHEMA_VERSION,
                 "temperature": 0.2,
                 "max_tokens": 2048,
                 "timeout_seconds": 60.0,
@@ -1000,6 +1005,7 @@ class StockAnalysisPipeline:
                         timeout=60.0,
                         raise_on_failure=True,
                         response_validator=request.validate_output,
+                        response_format=route["response_format"],
                     )
                     content = str(getattr(response, "content", "") or "").strip()
                     provider = str(getattr(response, "provider", "") or "").strip()
@@ -1031,6 +1037,7 @@ class StockAnalysisPipeline:
                 text, model_used, _usage = self.analyzer.generate_structured_text(
                     messages,
                     response_validator=request.validate_output,
+                    response_format=route["response_format"],
                     max_tokens=2048,
                     temperature=0.2,
                     timeout=60.0,

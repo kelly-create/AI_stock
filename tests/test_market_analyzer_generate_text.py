@@ -283,6 +283,38 @@ class TestAnalyzerGenerateText:
 
         mock_persist.assert_not_called()
 
+    def test_structured_text_forwards_json_object_response_format(self):
+        analyzer = self._make_analyzer()
+        messages = [
+            {"role": "system", "content": "Return strict JSON."},
+            {"role": "user", "content": "Analyze frozen Evidence."},
+        ]
+        with patch.object(
+            analyzer,
+            "_call_litellm",
+            return_value=("{}", "openai/test-model", {"total_tokens": 3}),
+        ) as mock_call, patch("src.analyzer.persist_llm_usage"):
+            text, model, _usage = analyzer.generate_structured_text(
+                messages,
+                response_validator=lambda value: value,
+                response_format={"type": "json_object"},
+                call_type="research_debate",
+                stock_code="600519",
+            )
+
+        assert text == "{}"
+        assert model == "openai/test-model"
+        assert mock_call.call_args.kwargs["response_validator"] is not None
+        assert mock_call.call_args.kwargs["audit_context"] == {
+            "_usage_call_type": "research_debate",
+            "_usage_stock_code": "600519",
+        }
+        assert mock_call.call_args.kwargs["generation_config"] == {
+            "max_tokens": 2048,
+            "temperature": 0.2,
+            "response_format": {"type": "json_object"},
+        }
+
     def test_generate_text_does_not_persist_unavailable_usage(self):
         analyzer = self._make_analyzer()
         usage = {
@@ -863,13 +895,21 @@ class TestAnalyzerGenerateText:
 
         def _fake_call_litellm_with_param_recovery(call, **kwargs):
             captured["model_list"] = kwargs.get("model_list")
+            captured["call_kwargs"] = kwargs.get("call_kwargs")
             return SimpleNamespace(
                 choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
                 usage=None,
             )
 
         with patch("src.analyzer.call_litellm_with_param_recovery", side_effect=_fake_call_litellm_with_param_recovery):
-            text, _, _ = analyzer._call_litellm("回归用例", {"max_tokens": 128, "temperature": 0.7})
+            text, _, _ = analyzer._call_litellm(
+                "回归用例",
+                {
+                    "max_tokens": 128,
+                    "temperature": 0.7,
+                    "response_format": {"type": "json_object"},
+                },
+            )
 
         assert text == "ok"
         passed_model_list = captured.get("model_list")
@@ -884,6 +924,9 @@ class TestAnalyzerGenerateText:
             {"x-tenant": "legacy-a"},
             {"x-tenant": "legacy-b"},
         ]
+        assert captured["call_kwargs"]["response_format"] == {
+            "type": "json_object"
+        }
 
     @patch("src.analyzer.Router")
     def test_analyzer_legacy_router_recovery_cache_is_scoped_by_api_base(self, mock_router):
