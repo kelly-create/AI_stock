@@ -1803,6 +1803,36 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             },
         )
 
+    def test_completed_task_status_preserves_personal_research_result(self) -> None:
+        personal_research = {
+            "contract_version": "personal-research-artifacts-v1",
+            "research_snapshot_hash": "a" * 64,
+            "skill_execution_hashes": {"personal-value-quality": "b" * 64},
+            "debate_snapshot_hash": None,
+            "debate_review_hash": None,
+            "thesis_hash": "c" * 64,
+            "decision_signal": {"id": 42},
+        }
+        task = SimpleNamespace(
+            task_id="task-personal-result",
+            trace_id="trace-personal-result",
+            stock_code="600519",
+            stock_name="贵州茅台",
+            created_at=datetime(2026, 8, 11, 12, 0, 0),
+            completed_at=datetime(2026, 8, 11, 12, 1, 0),
+            result={
+                "query_id": "task-personal-result",
+                "stock_code": "600519",
+                "stock_name": "贵州茅台",
+                "report": None,
+                "personal_research": personal_research,
+            },
+        )
+
+        response = analysis_endpoint_module._build_task_analysis_result(task)
+
+        self.assertEqual(response.personal_research, personal_research)
+
     def test_build_analysis_response_does_not_use_model_news_summary_as_retrieval_evidence(self) -> None:
         service = AnalysisService()
         result = service._build_analysis_response(

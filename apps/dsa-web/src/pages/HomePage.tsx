@@ -16,6 +16,7 @@ import { MarketReviewReportView } from '../components/report/MarketReviewReportV
 import { MarketReviewRegionSelector } from '../components/market-review/MarketReviewRegionSelector';
 import { ReportSummary } from '../components/report/ReportSummary';
 import { RunFlowPanel } from '../components/run-flow';
+import { PersonalResearchLauncher } from '../components/research/PersonalResearchLauncher';
 import { TaskPanel } from '../components/tasks';
 import {
   HomeStockWorkspace,
@@ -1559,6 +1560,13 @@ const HomePage: React.FC = () => {
                 <BarChart3 className="h-4 w-4" aria-hidden="true" />
                 {t('home.marketReview')}
               </Button>
+              <PersonalResearchLauncher
+                stockCode={query}
+                notify={notify}
+                reportLanguage={normalizeReportLanguage(uiLanguage)}
+                disabled={isAnalyzing || isSubmittingMarketReview}
+                onTaskAccepted={refreshActiveTasks}
+              />
               <button
                 type="button"
                 onClick={() => handleSubmitAnalysis()}

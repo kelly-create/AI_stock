@@ -140,6 +140,8 @@ Portfolio Policy context 同时封存 `decision_session_date` 与 `valuation_bar
 
 ## Web 只读可见性
 
+首页“个人深度研究”入口接收当前选中的单只 A 股，可选择 `auto`、`quick`、`standard`、`deep` 或 `debate`，并通过 `POST /api/v1/research/personal/runs` 提交 Durable Worker 任务。客户端使用幂等键防止响应丢失后的重复任务，持续显示任务阶段与进度；任务完成后按返回的正式 Decision Signal ID 打开“AI 建议”详情及 Thesis。普通“分析”按钮继续保留原有兼容链路，不等同于正式个人投研。
+
 Decision Signal 主卡和详情在存在 `account_action` 时，以它作为主决策，并并列显示 Policy verdict；legacy `action` 仅作为“上游研究动作”解释。详情中的 `Personal Research Thesis` 区块只读展示五项 Skill 分数/版本/lineage、Verifier/Judge、Thesis 结论和证据引用，并显式与 legacy Skill Outcome / Decision Outcome v1 分开。`null` 或 404 显示“尚无正式 Thesis”，不伪造 0 分；Skill/Review 子资产读取失败时保留 Thesis 并显示降级警告。
 
 用户可见页面改动在 PR 中应附当前页面截图；截图作为 PR 描述、评论或 Actions artifact 证据，不将一次性验收图片合入仓库。

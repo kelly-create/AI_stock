@@ -32,6 +32,7 @@ vi.mock('../../api/decisionSignals', () => ({
   getDecisionSignalReassessBlockedError: vi.fn(),
   decisionSignalsApi: {
     list: vi.fn(),
+    get: vi.fn(),
     getLatest: vi.fn(),
     getOutcomeStats: vi.fn(),
     getSignalOutcomes: vi.fn(),
@@ -440,6 +441,7 @@ beforeEach(() => {
   };
   vi.mocked(historyApi.getStockBarList).mockResolvedValue(stockBarResponse);
   vi.mocked(decisionSignalsApi.list).mockResolvedValue(listResponse());
+  vi.mocked(decisionSignalsApi.get).mockResolvedValue(signal);
   vi.mocked(decisionSignalsApi.getLatest).mockResolvedValue(listResponse([signal]));
   vi.mocked(decisionSignalsApi.getOutcomeStats).mockResolvedValue(outcomeStats);
   vi.mocked(decisionSignalsApi.getSignalOutcomes).mockResolvedValue(outcomeList);
@@ -461,6 +463,15 @@ beforeEach(() => {
 });
 
 describe('DecisionSignalsPage', () => {
+  it('opens an exact signal from the personal-research result link', async () => {
+    window.history.pushState({}, '', '/decision-signals?signalId=42');
+
+    renderPage();
+
+    await waitFor(() => expect(decisionSignalsApi.get).toHaveBeenCalledWith(42));
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+  });
+
   it('loads active signals by default', async () => {
     renderPage();
 
