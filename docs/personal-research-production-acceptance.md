@@ -28,21 +28,22 @@
 
 | 项目 | 记录值 |
 | --- | --- |
-| Git production commit / tree | `93c98dfbabbba82ca686ed6df84040a13a9988c4` / `54fcbeecb8867498940d31439a22b95d99bc58c6` |
-| Docker image digest | `sha256:0474a075f4876960cc90b4f405e91ccfae489ce893d22d27ff40c0f6970aec22`（OCI revision 为生产 commit） |
-| Compose 与渲染后配置 SHA-256 | 当前 `canary-outcome-shadow-thesis.json`：`d645b4fc9c99de580acefaf2feafe9c83190ec418499c756f5bd7d8dc1b1be18` |
-| SQLite 迁移 head | `2026-08-11-personal-research-skill-dataset-lineage`，共 11 条 marker |
+| Git production commit / tree | `f1aeb22bca593fefb88e12bd3c03deb2e7cdbfbc` / `2cf4d02dd399a072b95b93cbf1c5cc670f582f39` |
+| Docker image digest | `sha256:fa7e712bc84195e48b8d6c36507bf1d7cb84faf35345bfb27a96b0bf1aa16abe`（OCI revision 为生产 commit） |
+| Compose 与渲染后配置 SHA-256 | 当前 `canary-outcome-shadow-thesis-statuslineage.json`：`6fe8a4dab606d8b22d0a890bf5ba990d96dc93a30accfa4101b078458789c6d7` |
+| SQLite 迁移 head | `2026-08-11-personal-research-v2-signal-status-lineage`，共 12 条 marker |
 | 静态 OpenAPI SHA-256 | `9f725255c5c9eebe68a4c4fb34ab64c75f6fb4b4aafd2ced538f9ff00ce1f6e4` |
-| Web build artifact SHA-256 | 生产镜像内 47 文件规范化 tree：`68c0d693118a2d4b64c1bb76b568e8d9ff1efe9fb34a7ee520dd5229ab4e0de4`；`build-info.json` revision 为生产 commit |
-| 迁移前 rollback backup / manifest | 初始切换：`cb60f5219a522f17ca7b60d7615647d0c98be5ef621fe803a127d0534c6a493d` / `ad02927fe88cfda4249d416d79f7deecb274c435d7709cc01599a4cc47c94bc1`；lineage 切换：`5edfbab9891eb801b9633f021d5278e9e1d14e53d11043fd27e6106894d9c67f` / `efc15172b235c8dd1e31ebab5f3aacf417bcb31ac59063c6c14ac3dc32a83c9d` |
-| 迁移后 candidate backup / manifest | 初始切换：`a9ae9882f178bb06802c96006213b6ea491ffd07ebab51e7fad423cf2a1c60ed` / `833d3d15ba6264152ea0acc2dd856b9b558991e60c9dcff6778afd28fbfbcc31`；lineage 切换：`81da02352c50a1d1aafc4fddbc0a3650a8c88264b02d09c6fcf5baca1661cad9` / `c6d61ae8e48498bcb54ca92d50bc2691882443337db9acd59f415dfc07d86403` |
-| raw archive / manifest | lineage 切换前后配对归档 SHA-256 均为 `4f60979080452e0eb2722ce6d3289433ae557fc01987d511ea6939d8773d7f85`；生产观察基线另验证当前禁止路径不存在 |
-| 部署时间、执行人、验收人 | 初始切换 `2026-08-10T18:24:47Z`；最终代码切换 `2026-08-11T05:03Z`；自动验收已完成，7 日 Shadow 与人工签字进行中 |
+| Web build artifact SHA-256 | 生产镜像内 47 文件规范化 tree：`ef36e54f8566bd88684ab62b8073f3cbac1d6f34a9ccb01560959a653677ae26`；`build-info.json` revision 为生产 commit |
+| 迁移前 rollback backup / manifest | Outcome status-lineage 切换：`88e90638e9f9009b377a6fdbf5eebd9dc8019916390165cce10aba27eee2dae6` / `1e1df14adac2245550c1b5f0dedb46bf81489db0ff990ac848a377483903210b` |
+| 迁移后 candidate backup / manifest | Outcome status-lineage 切换：`a0aed7c8e83330ec9c4bf12a4cde2c49459d9c2d8e09e7caa9f8e9e2b0ff97d3` / `ec1219dff198563578700f14e30730653b39751616c5587463ade5d4421a02ed` |
+| raw archive / manifest | 切换前后 raw 配对归档 SHA-256 均为 `b07726463f84708779cc42ac1526ea637ab695d0216890cf4d4c628ab7379616`；迁移前 manifest 为 `00dee060c1c82f84905f970ad2507d0cc8c3d4f5071c2980ef2db438886a51e8`，迁移后为 `bc170ea54c68e0132c3ac23faa6d8a7c16e11cf82ff4869445f8774373bb33c2`；170 个引用与文件全部闭合 |
+| 部署时间、执行人、验收人 | 初始切换 `2026-08-10T18:24:47Z`；最终 Outcome status-lineage 切换 `2026-08-11T10:34:47Z`；自动验收已完成，7 日 Shadow 与人工签字进行中 |
 
-### 2026-08-11 PR #4 候选的离线与 CI 证据
+### 2026-08-11 PR #4 / PR #5 候选的离线与 CI 证据
 
-- 基线为 `94698b848f257b34fb5d2837a989b838ef82676f`；功能候选提交为 `abcd935b9ab9b6b4c8af15e10d011033ac237acd`，tree 为 `0ffeeb2f4fbfe10a82bdeb28c06881b3786a3361`。本节的验收状态回填属于 docs-only 收口；最终 PR head 与生产身份仍须以 PR #4 当前 Head CI、合并提交和密封镜像记录为准。
+- 基线为 `94698b848f257b34fb5d2837a989b838ef82676f`；PR #4 功能候选提交为 `abcd935b9ab9b6b4c8af15e10d011033ac237acd`，tree 为 `0ffeeb2f4fbfe10a82bdeb28c06881b3786a3361`。后续 Prompt/Judge 与 Outcome status-lineage 修复在 Draft PR #5 收口，当前生产身份以本文件的 f1 提交、CI 和密封镜像记录为准。
 - GitHub Actions [CI run 31404437702](https://github.com/kelly-create/AI_stock/actions/runs/31404437702) 对功能候选完成并通过：`ai-governance`、三片 `backend-tests`、汇总 `backend-gate`、`docker-build`（build、smoke、imports）和 `web-gate` 全部 `success`；Windows/macOS desktop-futu-package 因条件不适用而 `skipped`，不是失败。
+- Outcome status-lineage 修复提交 `f1aeb22bca593fefb88e12bd3c03deb2e7cdbfbc` 的 [CI run 31480412332](https://github.com/kelly-create/AI_stock/actions/runs/31480412332) 也全部通过：三片后端测试、`backend-gate`、Docker build/smoke/import 与 `ai-governance` 均为 `success`；该提交未改 Web，因此 Web/desktop 条件性跳过。
 - 三路独立语义终审已覆盖 PR3/PR4、Durable Resume、PR5/PR6、配置热更新、迁移顺序和备份核心表，当前未发现剩余 P0/P1。
 - Web 最终字节在本地基于锁定依赖通过全量 ESLint、TypeScript、Vite production build；Vitest 为 110 个测试文件、1154 passed、2 skipped。GitHub `web-gate` 又从 clean `npm ci` 开始完成 lint 与 production build；三张页面验收截图已作为 [PR #4 评论附件](https://github.com/kelly-create/AI_stock/pull/4#issuecomment-5243134319) 发布，未作为仓库文件提交。
 - 静态 OpenAPI 当前 SHA-256 为 `9f725255c5c9eebe68a4c4fb34ab64c75f6fb4b4aafd2ced538f9ff00ce1f6e4`；47 个 Web build 文件的规范化 tree SHA-256 为 `81a51c1c30e1b28b1ac8b4e603ea5bfdbf0d9bcd8204c9ffe4ba07d6777b9245`。Web tree 算法为：递归枚举 `static/` regular files，按 POSIX 相对路径排序，逐行写入 `<relative-path>  <file-sha256>`，使用 LF 与末尾换行拼接后再计算 SHA-256。
@@ -52,13 +53,16 @@
 ### 2026-08-10 至 2026-08-11 生产切换与 canary 证据
 
 - 初始四迁移、flag-off 切换及两阶段备份证据位于 `/opt/dsa-backups/personal-cutover-20260810T182351Z-05bdac1-retry2`；结果固定 10 条迁移、53 张表、Policy `off`，并保留迁移前后 SQLite/manifest 哈希。
-- 新增 Skill Dataset lineage 迁移先在 `/opt/dsa-backups/personal-lineage-migration-rehearsal-20260811T032100Z-76d4df3b` 隔离演练，再由 `/opt/dsa-backups/personal-lineage-cutover-20260811T033527Z-76d4df3b` 完成生产迁移、幂等复核、迁移前后 SQLite/raw 配对归档与服务恢复；当前迁移 head 为 11 条。
-- 最终代码身份由 `/opt/dsa-backups/personal-code-cutover-20260811T050253Z-93c98dfb` 固定；当前 server、analyzer、worker 均运行同一镜像 ID，searxng 保持原容器，全部 healthy、restart 0。
+- 新增 Skill Dataset lineage 迁移先在 `/opt/dsa-backups/personal-lineage-migration-rehearsal-20260811T032100Z-76d4df3b` 隔离演练，再由 `/opt/dsa-backups/personal-lineage-cutover-20260811T033527Z-76d4df3b` 完成生产迁移、幂等复核、迁移前后 SQLite/raw 配对归档与服务恢复。
+- Outcome pending 行在父 Signal 过期后无法推进的 status-lineage 问题由 `f1aeb22b` 修复。迁移先在 `/opt/dsa-backups/personal-outcome-status-rehearsal-20260811T102300Z-f1aeb22b` 完成 11→12 marker、幂等、约束和六行 Outcome 不变演练；生产切换位于 `/opt/dsa-backups/personal-outcome-status-cutover-20260811T103422Z-f1aeb22b`，其 `SHA256SUMS` SHA-256 为 `ac47347a671731809f8d8c2092f62a9a949b78a8a2bccfc0f6307a6f63a44ebf`。首次因错误假设 raw 不存在而在迁移前 fail-closed 的 `/opt/dsa-backups/personal-outcome-status-cutover-20260811T102953Z-f1aeb22b` 原样保留，不作为成功证据。
+- 当前代码身份由 `/opt/dsa-backups/personal-outcome-status-acceptance-20260811T104100Z-f1aeb22b` 固定；`acceptance.json` SHA-256 为 `21e1fd9ee72b97b07de645d0109c40abc3b8c6d4aa033407c7419114de740953`。server、analyzer、worker 均运行同一 `fa7e712b…16abe` 镜像，searxng 保持原容器，全部 healthy、restart 0。
 - Thesis 正向验收为 `/opt/dsa-backups/personal-thesis-acceptance-20260811T053500Z-93c98dfb`；Policy Shadow 正向验收为 `/opt/dsa-backups/personal-shadow-canary-20260811T060622Z-93c98dfb`，对应 signal `122`、完整 Portfolio context、`would_block=false`。
 - Outcome v2 正向提交与 pending 生命周期验收为 `/opt/dsa-backups/personal-outcome-shadow-promotion-20260811T062832Z-93c98dfb`：6 个 signal×horizon 候选均保持 `pending/entry_session_not_reached`，且 observation hash、lineage 与不可变状态完整。
+- 修复后的生产 Outcome job `c85af905552348d5b224c72ebf354cc6` 首次成功处理 9/9 候选：原 6 行在父 Signal 过期后仍保持冻结 `signal_status=active` 并合法 pending，新建 3 行，未再发生 lineage conflict；活动任务与 Outbox 为 0，DB `quick_check=ok`、外键错误 0。
 - Shadow Day 1 基线位于 `/opt/dsa-backups/personal-shadow-observation-acceptance-20260811T063353Z-93c98dfb`，固定 7 个 XSHG 交易日为 `2026-08-11/12/13/14/17/18/19`；自动门已通过，人工签字待完成。
 - Shadow Day 1 收盘后只读观察位于 `/opt/dsa-backups/personal-shadow-observation-day1-20260811T072420Z-93c98dfb`，result SHA-256 为 `b1eaca0eef4ab26b2c30fdec390fdf687180d7f9867f12e71ab7aeb304680ec4`，SHA256SUMS SHA-256 为 `f98c6f0296473c6f3712449054ce10d53a25926032d1ee248240426854497918`；活动任务/Outbox 均为 0、Policy 无 `enforce`、6 个 Outcome 保持合法 pending，容器/API/DB 门全部通过。
-- Debate 保持关闭。任务 `a2716ca555ad4ed7be41f60f311cb963`（600519）和 `4003b08a028345b4981c963c2dde8d07`（601985）均完成 20 份 Dataset、Factor、Evidence、双 stance 与 Verifier，随后被 Judge 以 `stance_confidence_below_minimum` 正确 fail-closed；对应 `.INCOMPLETE` 证据保留，Compose 已自动恢复。该安全负例通过，但在出现一次不放宽阈值的正向 Review/Thesis 前，G8 仍为 `IN_PROGRESS`。
+- Day 2–7 自动采证已重新绑定最终 f1 身份：密封脚本位于 `/opt/dsa-development/pr6-shadow-observation-f1aeb22b/collect-policy-shadow-observation-f1aeb22b.sh`，SHA-256 为 `078d785a1323bd52edafce09b8c2333cb29830693047665b2bc4240bb0dd67b4`；六个 `dsa-pr6-shadow-observation-dayN-f1aeb22b.timer` 分别固定到 `2026-08-12/13/14/17/18/19 15:20 CST`。脚本已通过 Bash/Python 语法、错误日期负例及线上只读预检，能校验当前 12 条迁移、9 个 Outcome、252 个 raw 引用与 170 个 raw 文件闭包；旧 93c 定时器已停止。
+- Debate 日常开关仍保持关闭。任务 `a2716ca555ad4ed7be41f60f311cb963`（600519）和 `4003b08a028345b4981c963c2dde8d07`（601985）完成双 stance 与 Verifier 后被 Judge 以 `stance_confidence_below_minimum` 正确 fail-closed；随后 `f5b93315` 的 JSON-mode 修复以任务 `53d4a9873a544390bba427b41e237dec` 完成一次不放宽阈值的正向 Debate、Review、Thesis、Signal 与 Policy Shadow canary。独立证据位于 `/opt/dsa-backups/personal-debate-jsonmode-acceptance-20260811T094436Z-f5b93315`，`acceptance.json` SHA-256 为 `6499cf99c989e83c3757c8c590ab7d8ba3cff99159271f70fcdea18a6506396c`，因此 G8 已关闭。
 
 ## 门禁总表
 
@@ -68,12 +72,12 @@
 | G1 契约 | migrations、DB 约束、不可变 lineage、API/Pydantic、Web 类型、配置默认关闭 | `PASS` | 三路独立终审、静态 OpenAPI 与 runtime exact 对照、直接 SQL 反例 |
 | G2 后端 | Python compile/lint、focused 回归、`ci_gate.sh`、非网络 pytest | `PASS` | 本地专项证据；GitHub CI run 31404437702 三片 backend-tests 与 backend-gate |
 | G3 Web | `npm ci`、全量 ESLint、Vitest、TypeScript、生产构建、关键页面视觉证据 | `PASS` | 本地 1154 passed/2 skipped、ESLint/TypeScript/build；GitHub clean install/web-gate；PR 评论三图 |
-| G4 迁移 | 旧库检查、全量 apply、幂等 apply、失败注入回滚、约束/trigger 直写反例 | `PASS` | 隔离演练与两次生产 migration evidence；11 markers、quick/FK 通过 |
-| G5 备份恢复 | 迁移前旧工具备份、迁移后候选工具全表备份、raw 配对、异名隔离恢复 | `PASS` | 初始与 lineage 两阶段 SQLite/manifest/raw 配对证据及隔离恢复 |
-| G6 镜像与编排 | Docker build/import smoke、normal/durable profiles、Worker heartbeat、唯一 Scheduler owner | `PASS` | 固定 image/OCI revision/Compose；server 抑制调度，analyzer 为唯一 owner，worker healthy |
+| G4 迁移 | 旧库检查、全量 apply、幂等 apply、失败注入回滚、约束/trigger 直写反例 | `PASS` | 隔离演练与生产 migration evidence；12 markers、quick/FK 通过 |
+| G5 备份恢复 | 迁移前旧工具备份、迁移后候选工具全表备份、raw 配对、异名隔离恢复 | `PASS` | 最新 f1 切换前后 SQLite/manifest 与 170 个 raw artifact 配对证据及异名恢复 |
+| G6 镜像与编排 | Docker build/import smoke、normal/durable profiles、Worker heartbeat、唯一 Scheduler owner | `PASS` | 固定 f1 image/OCI revision/Compose；server 抑制调度，analyzer 为唯一 owner，worker healthy |
 | G7 flag-off 部署 | 新 schema/image 上线但新增研究 flags 全关，旧 API/任务/通知无回归 | `PASS` | flag-off 首次上线、readiness/API/DB/容器身份及逐阶段可逆切换证据 |
-| G8 分阶段 canary | Durable → Tushare → Factors → Evidence → Skill → conditional Debate/Thesis → Outcome v2 | `IN_PROGRESS` | 除 Debate 正向 Review 外均已有成功任务；两次 Debate 安全负例正确 fail-closed |
-| G9 Policy Shadow | 7 个真实交易日 shadow；差异、误阻断、缺失估值、账户动作和回滚均复核 | `IN_PROGRESS` | Day 1 基线与收盘后观察均已封存；2026-08-12 至 19 仍需逐日证据与人工签字 |
+| G8 分阶段 canary | Durable → Tushare → Factors → Evidence → Skill → conditional Debate/Thesis → Outcome v2 | `PASS` | Debate 安全负例与一次不放宽阈值的正向 Review/Thesis 均通过；Outcome f1 job 9/9 成功 |
+| G9 Policy Shadow | 7 个真实交易日 shadow；差异、误阻断、缺失估值、账户动作和回滚均复核 | `IN_PROGRESS` | Day 1 基线与收盘后观察均已封存；Day 2–7 的 f1 定时采证已武装，2026-08-12 至 19 仍需逐日证据与人工签字 |
 
 ## PR0–PR6 功能签收
 
@@ -83,9 +87,9 @@
 | PR1 | Durable Worker、lease/heartbeat、JobEvent、Outbox、唯一 Scheduler owner | `PASS` | `PASS` |
 | PR2 | Worker-only Tushare、冻结 Dataset/Factor、限流、raw 可恢复 | `PASS` | `PASS` |
 | PR3 | watchlist/legacy/holding union、Opening/Reconciliation、预算、Policy shadow/enforce | `PASS` | `IN_PROGRESS`（Shadow Day 1/7；Enforce 禁止） |
-| PR4 | 五 Skill、模式/预算、条件 Debate、Verifier/Judge、immutable Thesis、durable resume | `PASS` | `IN_PROGRESS`（Skill/Thesis 已通过；Debate 正向验收待完成） |
-| PR5 | T+1、5/10/20d、复权、MFE/MAE、CSI300/SW1 点时基准、四维校准 | `PASS` | `IN_PROGRESS`（6 个 Outcome 已正确 pending；成熟窗口与 n≥30 尚未到达） |
-| PR6 | Web、OpenAPI、调度、通知、备份、部署与运维闭环 | `PASS` | `IN_PROGRESS`（G8/G9 尚未关闭） |
+| PR4 | 五 Skill、模式/预算、条件 Debate、Verifier/Judge、immutable Thesis、durable resume | `PASS` | `PASS`（安全负例与正向 Debate/Review/Thesis canary 均通过） |
+| PR5 | T+1、5/10/20d、复权、MFE/MAE、CSI300/SW1 点时基准、四维校准 | `PASS` | `IN_PROGRESS`（9 个 Outcome 已正确 pending；成熟窗口与 n≥30 尚未到达） |
+| PR6 | Web、OpenAPI、调度、通知、备份、部署与运维闭环 | `PASS` | `IN_PROGRESS`（仅 G9 七交易日 Shadow 尚未关闭） |
 
 ## Canary 与 Shadow 记录模板
 
@@ -124,4 +128,4 @@
 
 ## 当前结论
 
-截至 2026-08-11，固定生产版本已经完成 G4–G7 并运行于服务器；Evidence、Skills、Thesis、Outcome v2 与 Policy Shadow 的生产 canary 已通过。G8 仍缺一次不放宽阈值的 Debate 正向 Review，G9 处于 Day 1/7，因此当前准确结论是：**系统已受控上线，但尚不可宣称全部 canary 与七交易日验收完成，也不可启用 Policy Enforce。** 后续每关闭一个门禁，都必须继续回填固定版本、哈希和生产证据；仅更新叙述而不附可复核证据不构成验收。
+截至 2026-08-11，固定生产版本 `f1aeb22b` 已完成 G4–G8 并运行于服务器；迁移、SQLite/raw 配对恢复、镜像编排、flag-off 回归以及 Evidence、Skills、条件 Debate/Review、Thesis、Outcome v2 与 Policy Shadow 的生产 canary 均已通过。G9 仍处于 Day 1/7，因此当前准确结论是：**系统已正常上线且 canary 验收完成，但七交易日 Shadow 尚未完成，不可启用 Policy Enforce。** 后续每关闭一个门禁，都必须继续回填固定版本、哈希和生产证据；仅更新叙述而不附可复核证据不构成验收。

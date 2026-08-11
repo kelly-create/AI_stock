@@ -117,10 +117,10 @@ def test_production_acceptance_record_tracks_real_rollout_gates() -> None:
 
     assert "7 个真实交易日" in acceptance
     assert "PORTFOLIO_POLICY_GATE_MODE" in acceptance
-    assert "G4–G7" in acceptance
-    assert "G8 仍缺" in acceptance
-    assert "G9 处于 Day 1/7" in acceptance
-    assert "尚不可宣称全部 canary 与七交易日验收完成" in acceptance
+    assert "G4–G8" in acceptance
+    assert "G8 已关闭" in acceptance
+    assert "G9 仍处于 Day 1/7" in acceptance
+    assert "正常上线且 canary 验收完成" in acceptance
     assert "不可启用 Policy Enforce" in acceptance
     assert "不得填零或跳过" in acceptance
 
