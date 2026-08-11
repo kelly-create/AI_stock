@@ -98,7 +98,7 @@ def test_static_openapi_contains_only_accepted_personal_research_contracts() -> 
     assert "`null`" in outcome_doc
 
 
-def test_production_acceptance_record_keeps_real_rollout_gates_pending() -> None:
+def test_production_acceptance_record_tracks_real_rollout_gates() -> None:
     acceptance = _read("docs/personal-research-production-acceptance.md")
 
     for gate in (
@@ -117,7 +117,11 @@ def test_production_acceptance_record_keeps_real_rollout_gates_pending() -> None
 
     assert "7 个真实交易日" in acceptance
     assert "PORTFOLIO_POLICY_GATE_MODE" in acceptance
-    assert "不可宣称整个项目已经正常上线" in acceptance
+    assert "G4–G7" in acceptance
+    assert "G8 仍缺" in acceptance
+    assert "G9 处于 Day 1/7" in acceptance
+    assert "尚不可宣称全部 canary 与七交易日验收完成" in acceptance
+    assert "不可启用 Policy Enforce" in acceptance
     assert "不得填零或跳过" in acceptance
 
 
