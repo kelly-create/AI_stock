@@ -48,6 +48,9 @@ DECISION_OUTCOME_V2_SCHEMA_VERSION = "2026-08-10-personal-research-v2-outcomes"
 PERSONAL_RESEARCH_POLICY_CONTEXT_SCHEMA_VERSION = (
     "2026-08-10-personal-research-v3-policy-context"
 )
+PERSONAL_RESEARCH_SKILL_DATASET_LINEAGE_SCHEMA_VERSION = (
+    "2026-08-11-personal-research-skill-dataset-lineage"
+)
 
 
 class MigrationError(RuntimeError):
@@ -162,6 +165,16 @@ def _upgrade_personal_research_policy_context_schema(engine: Engine) -> None:
     run_personal_research_policy_context_schema_upgrade(engine)
 
 
+def _upgrade_personal_research_skill_dataset_lineage_schema(engine: Engine) -> None:
+    """Allow frozen Factor inputs to be a subset of Evidence/Skill inputs."""
+
+    from src.storage import (
+        run_personal_research_skill_dataset_lineage_schema_upgrade,
+    )
+
+    run_personal_research_skill_dataset_lineage_schema_upgrade(engine)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=BASELINE_SCHEMA_VERSION,
@@ -240,6 +253,14 @@ MIGRATIONS: tuple[Migration, ...] = (
             "immutability for policy evaluation audits"
         ),
         apply=_upgrade_personal_research_policy_context_schema,
+    ),
+    Migration(
+        version=PERSONAL_RESEARCH_SKILL_DATASET_LINEAGE_SCHEMA_VERSION,
+        description=(
+            "Permit deterministic Factor dataset lineage to be a subset of "
+            "the complete Evidence and personal Skill dataset lineage"
+        ),
+        apply=_upgrade_personal_research_skill_dataset_lineage_schema,
     ),
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version

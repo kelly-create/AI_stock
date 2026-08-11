@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] 个人 Skill Dataset lineage 允许 Factor 实际输入是 Evidence 全量冻结输入的子集，同时保持 Evidence 与 Skill 的全量 lineage 精确相等，并通过追加迁移替换旧触发器，避免 `news_search` 使正式 Evidence canary 安全失败。
 - [修复] Evidence `news_search` 使用与持久化 Dataset 相同的冻结行封装，确保 Research Snapshot 可从仓储记录逐字段重建并验证外部内容投影。
 - [修复] 个人投研 Dataset 投影按仓储合同去重排序，并保留增量空查询的最新知识时间，避免正式 Research Snapshot 对已冻结行情行误报冲突。
 - [修复] Research Snapshot 对外部新闻内容继续执行脱敏投影，同时保留并校验已持久化 Dataset 的 `content_hash/content_hashes`，避免 Evidence 血缘被二次摘要后失去仓储引用。

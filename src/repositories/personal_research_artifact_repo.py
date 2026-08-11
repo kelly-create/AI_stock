@@ -515,13 +515,25 @@ class PersonalResearchSkillExecutionRepository:
             or evidence.factor_snapshot_hash != factor.content_hash
         ):
             raise ValueError("Research, Factor, and Evidence lineage differs")
-        if (
-            factor.input_dataset_hashes_json
-            != values["dataset_snapshot_hashes_json"]
-            or evidence.input_dataset_hashes_json
-            != values["dataset_snapshot_hashes_json"]
-        ):
-            raise ValueError("Dataset lineage differs from Factor or Evidence")
+        try:
+            factor_dataset_hashes = _hashes(
+                json.loads(factor.input_dataset_hashes_json),
+                field="Factor dataset lineage",
+            )
+            evidence_dataset_hashes = _hashes(
+                json.loads(evidence.input_dataset_hashes_json),
+                field="Evidence dataset lineage",
+            )
+            execution_dataset_hashes = _hashes(
+                json.loads(values["dataset_snapshot_hashes_json"]),
+                field="Skill execution dataset lineage",
+            )
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise ValueError("Dataset lineage is not canonical") from exc
+        if evidence_dataset_hashes != execution_dataset_hashes:
+            raise ValueError("Dataset lineage differs from Evidence")
+        if not set(factor_dataset_hashes).issubset(execution_dataset_hashes):
+            raise ValueError("Factor dataset lineage is not a Skill lineage subset")
 
 
 class PersonalResearchDebateReviewRepository:

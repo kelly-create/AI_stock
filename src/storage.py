@@ -6454,11 +6454,20 @@ _PERSONAL_RESEARCH_SKILL_TRIGGER_SQL = {
               AND factor_snapshot_hash = NEW.factor_snapshot_hash
               AND evidence_snapshot_hash = NEW.evidence_snapshot_hash
         ) OR NOT EXISTS (
-            SELECT 1 FROM research_factor_snapshots
-            WHERE content_hash = NEW.factor_snapshot_hash
-              AND stock_code = NEW.stock_code
-              AND lower(market) = lower(NEW.market)
-              AND input_dataset_hashes_json = NEW.dataset_snapshot_hashes_json
+            SELECT 1 FROM research_factor_snapshots AS factor
+            WHERE factor.content_hash = NEW.factor_snapshot_hash
+              AND factor.stock_code = NEW.stock_code
+              AND lower(factor.market) = lower(NEW.market)
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM json_each(factor.input_dataset_hashes_json) AS factor_input
+                  WHERE NOT EXISTS (
+                      SELECT 1
+                      FROM json_each(NEW.dataset_snapshot_hashes_json)
+                           AS execution_input
+                      WHERE execution_input.value = factor_input.value
+                  )
+              )
         ) OR NOT EXISTS (
             SELECT 1 FROM research_evidence_snapshots
             WHERE evidence_hash = NEW.evidence_snapshot_hash
@@ -8069,6 +8078,46 @@ def run_personal_research_policy_context_schema_upgrade(engine) -> None:
                 connection.exec_driver_sql(trigger_sql)
             for trigger_sql in _RESEARCH_BUDGET_TRIGGER_SQL.values():
                 connection.exec_driver_sql(trigger_sql)
+            _verify_personal_research_policy_context_schema_contract(connection)
+        except BaseException:
+            connection.rollback()
+            raise
+        else:
+            connection.commit()
+
+
+def run_personal_research_skill_dataset_lineage_schema_upgrade(engine) -> None:
+    """Allow Factor inputs to be a subset of full Evidence/Skill lineage."""
+
+    if engine.url.get_backend_name() != 'sqlite':
+        raise RuntimeError(
+            'Personal research Skill lineage migration only supports SQLite'
+        )
+    with engine.connect() as connection:
+        connection.exec_driver_sql('BEGIN IMMEDIATE')
+        try:
+            required_tables = {
+                'personal_research_skill_executions',
+                'research_factor_snapshots',
+                'research_evidence_snapshots',
+            }
+            existing_tables = {
+                row[0]
+                for row in connection.exec_driver_sql(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).all()
+            }
+            missing_tables = sorted(required_tables.difference(existing_tables))
+            if missing_tables:
+                raise RuntimeError(
+                    'Personal research Skill lineage migration prerequisites '
+                    'are missing=' + ','.join(missing_tables)
+                )
+            trigger_name = 'trg_personal_research_skill_execution_lineage'
+            connection.exec_driver_sql(f'DROP TRIGGER IF EXISTS {trigger_name}')
+            connection.exec_driver_sql(
+                _PERSONAL_RESEARCH_SKILL_TRIGGER_SQL[trigger_name]
+            )
             _verify_personal_research_policy_context_schema_contract(connection)
         except BaseException:
             connection.rollback()

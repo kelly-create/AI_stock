@@ -147,6 +147,8 @@ Evidence 写入 `research_evidence_snapshots`，并以 `research_evidence_snapsh
 
 五项 Skill 在 LLM 前由冻结因子/Evidence 确定性计算，Debate 如实际触发则必须再通过 Verifier/Judge fail-closed 检查。`RESEARCH_THESIS_ENABLED=true` 后，系统在 Decision Signal 写入后追加不可变 Thesis；未触发 Debate 也可用 Evidence 形成 Thesis，因此 Thesis 不依赖 Debate 开关。
 
+Skill execution 保存完整 Evidence Dataset lineage，并要求与 Evidence Snapshot 精确相等；Factor Snapshot 只保存其确定性计算实际消费的 Dataset，因此 Factor lineage 必须是该完整集合的子集，而不是被强制伪装为相等。例如 `news_search` 可被 Evidence 引用但不参与 Factor 计算。`2026-08-11-personal-research-skill-dataset-lineage` 追加迁移以事务方式替换旧插入触发器；失败会回滚触发器和 migration marker，既有不可变 Skill 行不被改写。
+
 持久任务 API、任务模式、日预算、Skill 计算、Debate 触发、Verifier/Judge、Policy 门槛、Thesis/Artifact API 和 Web 缺失态见[个人投研任务、Skill、Debate 与 Thesis](personal-research-execution-artifacts.md)。
 
 ## 备份与恢复
