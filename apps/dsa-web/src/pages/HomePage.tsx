@@ -16,6 +16,7 @@ import { MarketReviewReportView } from '../components/report/MarketReviewReportV
 import { MarketReviewRegionSelector } from '../components/market-review/MarketReviewRegionSelector';
 import { ReportSummary } from '../components/report/ReportSummary';
 import { RunFlowPanel } from '../components/run-flow';
+import { PersonalResearchLauncher } from '../components/research/PersonalResearchLauncher';
 import { TaskPanel } from '../components/tasks';
 import {
   HomeStockWorkspace,
@@ -474,6 +475,14 @@ const HomePage: React.FC = () => {
   const liveMarketReviewLanguage = normalizeReportLanguage(marketReviewPayload?.language);
   const isMarketReviewHistoryReport = selectedReport?.meta.reportType === 'market_review';
   const isHistoryTrendUnavailable = !selectedReport || !selectedReport.meta.stockCode;
+  const toolbarStockCode = query.trim() || (
+    selectedReport && !isMarketReviewHistoryReport
+      ? selectedReport.meta.stockCode.trim()
+      : ''
+  );
+  const toolbarStockName = query.trim() || !selectedReport || isMarketReviewHistoryReport
+    ? undefined
+    : selectedReport.meta.stockName;
 
   useEffect(() => {
     if (!isHistoryTrendUnavailable || !isHistoryTrendOpen) {
@@ -1559,10 +1568,17 @@ const HomePage: React.FC = () => {
                 <BarChart3 className="h-4 w-4" aria-hidden="true" />
                 {t('home.marketReview')}
               </Button>
+              <PersonalResearchLauncher
+                stockCode={toolbarStockCode}
+                notify={notify}
+                reportLanguage={normalizeReportLanguage(uiLanguage)}
+                disabled={isAnalyzing || isSubmittingMarketReview}
+                onTaskAccepted={refreshActiveTasks}
+              />
               <button
                 type="button"
-                onClick={() => handleSubmitAnalysis()}
-                disabled={!query || isAnalyzing}
+                onClick={() => handleSubmitAnalysis(toolbarStockCode, toolbarStockName)}
+                disabled={!toolbarStockCode || isAnalyzing}
                 className="btn-primary flex h-10 flex-1 items-center justify-center gap-1.5 whitespace-nowrap md:flex-none"
               >
                 {isAnalyzing ? (

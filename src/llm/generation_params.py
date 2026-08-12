@@ -43,6 +43,28 @@ class GenerationParamRecovery:
 
 _GENERATION_PARAM_RECOVERY_CACHE: Dict[str, GenerationParamRecovery] = {}
 
+
+def normalize_litellm_response_format(
+    response_format: Optional[Mapping[str, Any]],
+) -> Optional[Dict[str, str]]:
+    """Return the one response-format contract supported by shared calls.
+
+    Durable structured stages currently require one complete JSON object and
+    retain a domain validator after generation. Accepting arbitrary schemas
+    here would create a second, drifting response contract.
+    """
+
+    if response_format is None:
+        return None
+    if not isinstance(response_format, Mapping):
+        raise TypeError("response_format must be a mapping")
+    if set(response_format) != {"type"}:
+        raise ValueError("response_format must contain only type")
+    if response_format.get("type") != "json_object":
+        raise ValueError("response_format.type must be json_object")
+    return {"type": "json_object"}
+
+
 _LITELLM_ENDPOINT_PARAM_KEYS = (
     "api_base",
     "base_url",

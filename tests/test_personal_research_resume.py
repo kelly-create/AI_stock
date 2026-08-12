@@ -14,6 +14,9 @@ from src.services.portfolio_policy_gate_service import (
     build_portfolio_policy_replay_contract,
 )
 from src.services.research.canonical import canonical_hash
+from src.services.research.personal_skill_evaluator import (
+    PersonalResearchSkillEvaluationError,
+)
 
 
 class _Pack:
@@ -68,6 +71,73 @@ def test_pipeline_pins_context_pack_time_and_bound_hash_on_retry() -> None:
     args, kwargs = runtime.freeze_calls[0]
     assert args[1].created_at == as_of
     assert kwargs["expected_snapshot_hash"] == "a" * 64
+
+
+@pytest.mark.parametrize(
+    ("job_type", "should_degrade"),
+    (
+        ("stock_analysis", True),
+        ("scheduled_analysis", True),
+        ("personal_research", False),
+    ),
+)
+def test_missing_factor_score_only_degrades_optional_artifacts_for_ordinary_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+    job_type: str,
+    should_degrade: bool,
+) -> None:
+    import src.core.pipeline as pipeline_module
+    from src.services.personal_research_artifact_service import (
+        PersonalResearchArtifactService,
+    )
+
+    pipeline = StockAnalysisPipeline.__new__(StockAnalysisPipeline)
+    pipeline.config = SimpleNamespace(personal_research_enabled=True)
+    pipeline.db = MagicMock()
+    runtime = _Runtime("b" * 64)
+    pipeline._get_research_runtime = lambda: runtime
+    pipeline._build_research_execution_policy = lambda **_kwargs: {"v": 1}
+    pipeline._build_research_model_route = lambda **_kwargs: {"model": "frozen"}
+    prepared = SimpleNamespace(
+        as_of=datetime(2026, 8, 11, 8, 0, tzinfo=timezone.utc),
+        stock_code="601398",
+        task_decision=None,
+        budget_reservations=(),
+    )
+
+    def fail_scorecard(*_args, **_kwargs):
+        raise PersonalResearchSkillEvaluationError(
+            "quality score is unavailable in the frozen Factor snapshot"
+        )
+
+    monkeypatch.setattr(pipeline_module, "_durable_execution_active", lambda: True)
+    monkeypatch.setattr(pipeline_module, "_durable_job_type", lambda: job_type)
+    monkeypatch.setattr(
+        PersonalResearchArtifactService,
+        "persist_pre_llm",
+        fail_scorecard,
+    )
+
+    if not should_degrade:
+        with pytest.raises(
+            PersonalResearchSkillEvaluationError,
+            match="quality score is unavailable",
+        ):
+            pipeline._freeze_research_before_llm(
+                prepared,
+                context_pack=_Pack(prepared.as_of),
+                prompt={"system": "frozen"},
+                use_agent=False,
+            )
+        return
+
+    result = pipeline._freeze_research_before_llm(
+        prepared,
+        context_pack=_Pack(prepared.as_of),
+        prompt={"system": "frozen"},
+        use_agent=False,
+    )
+    assert result.snapshot_hash == "b" * 64
 
 
 def test_terminal_resume_skips_collection_and_llm() -> None:

@@ -415,6 +415,7 @@ export interface AnalysisResult {
   stockCode: string;
   stockName: string;
   report: AnalysisReport;
+  personalResearch?: import('./personalResearch').PersonalResearchResultSummary;
   diagnosticSummary?: RunDiagnosticSummary;
   createdAt: string;
 }

@@ -15,6 +15,7 @@ from src.services.research.debate_runner import (
     run_research_debate,
 )
 from src.services.research.debate_service import (
+    DEBATE_PROMPT_VERSION,
     DebateBuildInput,
     DebateTurnBuildInput,
     build_debate_request,
@@ -28,6 +29,9 @@ from src.services.research.debate_service import (
     validate_debate_request,
     validate_debate_snapshot,
     validate_debate_turn,
+)
+from src.services.research.debate_security import (
+    DEBATE_JUDGE_MINIMUM_MEAN_CONFIDENCE,
 )
 from src.services.research.evidence_service import (
     EvidenceArtifact,
@@ -190,6 +194,23 @@ def test_request_freezes_exact_bull_bear_messages_and_is_secret_safe() -> None:
 
     assert first.turn_requests[0].messages != first.turn_requests[1].messages
     validate_debate_request(first)
+
+
+def test_prompt_v2_aligns_argument_admission_with_fail_closed_judge() -> None:
+    request = _request()
+
+    assert request.prompt_version == DEBATE_PROMPT_VERSION
+    assert request.prompt_version == "research-debate-prompt-v2"
+    threshold = f"at least {DEBATE_JUDGE_MINIMUM_MEAN_CONFIDENCE:.2f}"
+    for item in request.turn_requests:
+        system = item.messages[0]["content"]
+        user = item.messages[1]["content"]
+        assert threshold in system
+        assert "never inflate confidence" in system
+        assert "limitations or open_questions" in system
+        assert "exactly one bounded low-confidence argument" in system
+        assert "do not invent support or inflate argument confidence" in user
+        assert "keep confidence low" not in user
 
 
 def test_request_hash_is_sensitive_to_route_and_prompt_version() -> None:
@@ -391,6 +412,22 @@ def test_runner_makes_exactly_two_calls_with_exact_frozen_messages() -> None:
     assert result.snapshot.status == "available"
     assert result.new_turns == tuple(persisted)
     assert not result.failures
+
+
+def test_completion_request_validates_domain_contract_before_route_acceptance() -> None:
+    request = _request()
+    call = DebateCompletionRequest.from_frozen_request(request, "bull")
+    call.validate_output(json.dumps(_output(request, "bull")))
+
+    wrong_stance = _output(request, "bull")
+    wrong_stance["stance"] = "bear"
+    with pytest.raises(ValueError, match="stance"):
+        call.validate_output(json.dumps(wrong_stance))
+
+    unknown_reference = _output(request, "bull")
+    unknown_reference["arguments"][0]["claim_ids"] = ["claim_unknown"]
+    with pytest.raises(ValueError, match="unknown Evidence claims"):
+        call.validate_output(json.dumps(unknown_reference))
 
 
 def test_runner_resumes_existing_turn_without_repeating_it() -> None:

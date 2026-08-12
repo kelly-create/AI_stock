@@ -153,6 +153,29 @@ def test_manual_override_only_bypasses_daily_counter(isolated_db) -> None:
     assert override["manual_daily_override"] is True
 
 
+def test_zero_budget_disables_daily_admission_limit(isolated_db) -> None:
+    service = ResearchBudgetService(config=_config(standard_deep=0))
+    service.repo.db = isolated_db
+    today = date(2026, 8, 10)
+
+    for index in range(25):
+        reservation = service.reserve(
+            task_id=f"unlimited-{index}",
+            stock_code=f"60{index:04d}",
+            market="cn",
+            requested_mode="standard",
+            trigger_source="api",
+            budget_date=today,
+        )
+        assert reservation["daily_limit"] == 0
+        service.consume(reservation["id"])
+
+    with isolated_db.get_session() as session:
+        rows = session.execute(select(ResearchBudgetReservationRecord)).scalars().all()
+    assert len(rows) == 25
+    assert all(row.status == "consumed" for row in rows)
+
+
 def test_reservation_state_transitions_are_one_way(isolated_db) -> None:
     service = ResearchBudgetService(config=_config())
     service.repo.db = isolated_db

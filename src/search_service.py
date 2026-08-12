@@ -341,7 +341,7 @@ class BaseSearchProvider(ABC):
         with self._state_lock:
             self._key_errors[key] = self._key_errors.get(key, 0) + 1
             error_count = self._key_errors[key]
-        logger.warning(f"[{self._name}] API Key {key[:8]}... 错误计数: {error_count}")
+        logger.warning("[%s] API Key 错误计数: %s", self._name, error_count)
     
     @abstractmethod
     def _do_search(self, query: str, api_key: str, max_results: int, days: int = 7) -> SearchResponse:
@@ -1033,7 +1033,7 @@ class BochaSearchProvider(BaseSearchProvider):
     - 支持时间范围过滤和AI摘要
     - 兼容Bing Search API格式
     
-    文档：https://bocha-ai.feishu.cn/wiki/RXEOw02rFiwzGSkd9mUcqoeAnNK
+    文档：https://open.bochaai.com/
     """
     
     def __init__(self, api_keys: List[str]):
@@ -1054,7 +1054,7 @@ class BochaSearchProvider(BaseSearchProvider):
         
         try:
             # API 端点
-            url = "https://api.bocha.cn/v1/web-search"
+            url = "https://api.bochaai.com/v1/web-search"
             
             # 请求头
             headers = {
@@ -1218,6 +1218,172 @@ class BochaSearchProvider(BaseSearchProvider):
             return domain or '未知来源'
         except Exception:
             return '未知来源'
+
+
+class BaiduAISearchProvider(BaseSearchProvider):
+    """Baidu Qianfan AI Search provider backed by Baidu Search v2 references."""
+
+    _ENDPOINT = "https://qianfan.baidubce.com/v2/ai_search/chat/completions"
+
+    def __init__(self, api_keys: List[str]):
+        super().__init__(api_keys, "BaiduAI")
+
+    @staticmethod
+    def _recency_filter(days: int) -> str:
+        if days <= 7:
+            return "week"
+        if days <= 30:
+            return "month"
+        if days <= 180:
+            return "semiyear"
+        return "year"
+
+    @staticmethod
+    def _error_message(response: requests.Response) -> str:
+        try:
+            payload = response.json()
+        except ValueError:
+            return f"HTTP {response.status_code}"
+        if not isinstance(payload, dict):
+            return f"HTTP {response.status_code}"
+        code = payload.get("code")
+        message = str(payload.get("message") or "request failed").strip()
+        return f"HTTP {response.status_code}, code={code}: {message[:240]}"
+
+    def _do_search(
+        self,
+        query: str,
+        api_key: str,
+        max_results: int,
+        days: int = 7,
+    ) -> SearchResponse:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "messages": [{"role": "user", "content": query}],
+            "search_source": "baidu_search_v2",
+            "resource_type_filter": [
+                {"type": "web", "top_k": min(max(1, max_results), 20)}
+            ],
+            "search_recency_filter": self._recency_filter(days),
+            "stream": False,
+        }
+
+        try:
+            response = _post_with_retry(
+                self._ENDPOINT,
+                headers=headers,
+                json=payload,
+                timeout=15,
+            )
+        except requests.exceptions.Timeout:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message="request timeout",
+            )
+        except requests.exceptions.RequestException as exc:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message=f"network request failed: {type(exc).__name__}",
+            )
+
+        if response.status_code != 200:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message=self._error_message(response),
+            )
+
+        try:
+            data = response.json()
+        except ValueError:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message="invalid JSON response",
+            )
+        if not isinstance(data, dict):
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message="invalid response shape",
+            )
+        if data.get("code") not in (None, 0, "0"):
+            message = str(data.get("message") or "request failed").strip()
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message=f"code={data.get('code')}: {message[:240]}",
+            )
+
+        references = data.get("references")
+        if references is None:
+            choices = data.get("choices") or []
+            if choices and isinstance(choices[0], dict):
+                message = choices[0].get("message") or {}
+                if isinstance(message, dict):
+                    references = message.get("references")
+        if not isinstance(references, list):
+            references = []
+
+        results: List[SearchResult] = []
+        seen_urls = set()
+        for item in references:
+            if not isinstance(item, dict):
+                continue
+            resource_type = str(item.get("type") or "web").strip().lower()
+            if resource_type != "web":
+                continue
+            url = str(item.get("url") or "").strip()
+            parsed = urlparse(url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                continue
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            title = str(
+                item.get("title")
+                or item.get("web_anchor")
+                or item.get("website")
+                or parsed.netloc
+            ).strip()
+            snippet = str(item.get("content") or "").strip()[:1000]
+            source = str(item.get("website") or parsed.netloc).strip()
+            published_date = str(item.get("date") or "").strip() or None
+            results.append(
+                SearchResult(
+                    title=title,
+                    snippet=snippet,
+                    url=url,
+                    source=source,
+                    published_date=published_date,
+                )
+            )
+            if len(results) >= max_results:
+                break
+
+        return SearchResponse(
+            query=query,
+            results=results,
+            provider=self.name,
+            success=True,
+        )
 
 
 class AnspireSearchProvider(BaseSearchProvider):
@@ -2323,6 +2489,16 @@ class SearchService:
         "上交所", "深交所", "港交所", "证券交易所",
         "上海证券交易所", "深圳证券交易所", "香港交易所", "香港联合交易所",
     )
+    _MAINSTREAM_FINANCIAL_SOURCE_HOSTS = (
+        "cnstock.com", "stcn.com", "cs.com.cn", "cls.cn", "caixin.com",
+        "yicai.com", "21jingji.com", "thepaper.cn",
+    )
+    _COMMUNITY_DISCUSSION_SOURCE_HOSTS = (
+        "guba.eastmoney.com",
+    )
+    _COMMUNITY_DISCUSSION_SOURCE_TERMS = (
+        "股吧", "社区讨论", "股票论坛",
+    )
     _LOW_QUALITY_DOWNLOAD_ACTION_TERMS = (
         "下载", "安装", "下载安装", "下载安装到手机", "下载链接",
         "免费下载", "客户端下载", "应用下载", "官方app下载",
@@ -2408,6 +2584,7 @@ class SearchService:
     def __init__(
         self,
         bocha_keys: Optional[List[str]] = None,
+        baidu_ai_search_keys: Optional[List[str]] = None,
         tavily_keys: Optional[List[str]] = None,
         anspire_keys: Optional[List[str]] = None,
         brave_keys: Optional[List[str]] = None,
@@ -2423,6 +2600,7 @@ class SearchService:
 
         Args:
             bocha_keys: 博查搜索 API Key 列表
+            baidu_ai_search_keys: 百度千帆 AI 搜索 API Key 列表
             tavily_keys: Tavily API Key 列表
             anspire_keys: Anspire Search API Key 列表
             brave_keys: Brave Search API Key 列表
@@ -2435,6 +2613,7 @@ class SearchService:
         """
         self._constructor_kwargs: Dict[str, Any] = {
             "bocha_keys": list(bocha_keys or []),
+            "baidu_ai_search_keys": list(baidu_ai_search_keys or []),
             "tavily_keys": list(tavily_keys or []),
             "anspire_keys": list(anspire_keys or []),
             "brave_keys": list(brave_keys or []),
@@ -2468,6 +2647,13 @@ class SearchService:
         if bocha_keys:
             self._providers.append(BochaSearchProvider(bocha_keys))
             logger.info(f"已配置 Bocha 搜索，共 {len(bocha_keys)} 个 API Key")
+
+        if baidu_ai_search_keys:
+            self._providers.append(BaiduAISearchProvider(baidu_ai_search_keys))
+            logger.info(
+                "已配置 Baidu AI 搜索，共 %s 个 API Key",
+                len(baidu_ai_search_keys),
+            )
 
         # 2. Tavily（免费额度更多，每月 1000 次）
         if tavily_keys:
@@ -3028,6 +3214,28 @@ class SearchService:
         return source_label in cls._OFFICIAL_SOURCE_LABELS
 
     @classmethod
+    def _is_mainstream_financial_news_source(cls, item: SearchResult) -> bool:
+        host = cls._candidate_hostname(item.url) or cls._candidate_hostname(item.source)
+        return any(
+            host == trusted_host or host.endswith(f".{trusted_host}")
+            for trusted_host in cls._MAINSTREAM_FINANCIAL_SOURCE_HOSTS
+        )
+
+    @classmethod
+    def _is_community_discussion_source(cls, item: SearchResult) -> bool:
+        host = cls._candidate_hostname(item.url) or cls._candidate_hostname(item.source)
+        if any(
+            host == community_host or host.endswith(f".{community_host}")
+            for community_host in cls._COMMUNITY_DISCUSSION_SOURCE_HOSTS
+        ):
+            return True
+        source_label = str(item.source or "").strip().lower()
+        return any(
+            term.lower() in source_label
+            for term in cls._COMMUNITY_DISCUSSION_SOURCE_TERMS
+        )
+
+    @classmethod
     def _has_low_quality_news_page_signal(cls, item: SearchResult) -> bool:
         """Detect app/download/listing pages without relying on a domain blocklist."""
         content_text = " ".join(filter(None, [item.title, item.snippet])).lower()
@@ -3330,6 +3538,13 @@ class SearchService:
         if cls._is_trusted_official_news_source(item):
             score += 8
             add_reason("来源接近公告或交易所渠道")
+        elif cls._is_mainstream_financial_news_source(item):
+            score += 6
+            add_reason("来源为主流财经媒体")
+
+        if cls._is_community_discussion_source(item):
+            score -= 18
+            add_reason("来源为社区讨论，降低证据优先级")
 
         has_sector_signal = cls._contains_any_news_term(full_text, cls._SECTOR_NEWS_TERMS)
         has_macro_signal = cls._contains_any_news_term(full_text, cls._MACRO_NEWS_TERMS)
@@ -3422,6 +3637,52 @@ class SearchService:
             success=response.success,
             error_message=response.error_message,
             search_time=response.search_time,
+        )
+
+    @classmethod
+    def _merge_ranked_news_responses(
+        cls,
+        responses: List[SearchResponse],
+        *,
+        stock_code: str,
+        stock_name: str,
+        prefer_chinese: bool,
+        max_results: int,
+        log_scope: str,
+    ) -> SearchResponse:
+        """Merge evidence from complementary providers and deduplicate by URL."""
+        merged_results: List[SearchResult] = []
+        seen_urls = set()
+        provider_names: List[str] = []
+        for response in responses:
+            if response.provider and response.provider not in provider_names:
+                provider_names.append(response.provider)
+            for item in response.results or []:
+                parsed = urlparse(item.url or "")
+                normalized_url = parsed._replace(fragment="").geturl().rstrip("/")
+                identity = normalized_url or f"{item.title}|{item.source}"
+                if identity in seen_urls:
+                    continue
+                seen_urls.add(identity)
+                merged_results.append(item)
+
+        merged = SearchResponse(
+            query=next((response.query for response in responses if response.query), ""),
+            results=merged_results,
+            provider="+".join(provider_names),
+            success=bool(merged_results),
+        )
+        ranked = cls._rank_news_response(
+            merged,
+            stock_code=stock_code,
+            stock_name=stock_name,
+            prefer_chinese=prefer_chinese,
+            max_results=max_results,
+            log_scope=log_scope,
+        )
+        return cls._filter_ranked_news_for_context(
+            ranked,
+            log_scope=log_scope,
         )
 
     @classmethod
@@ -4130,6 +4391,21 @@ class SearchService:
             had_provider_success = False
             best_ranked_response: Optional[SearchResponse] = None
             best_ranked_stats: Optional[Dict[str, int]] = None
+            normalized_a_code = (stock_code or "").strip().split(".", 1)[0]
+            a_share_dual_search = (
+                prefer_chinese
+                and normalized_a_code.isdigit()
+                and len(normalized_a_code) == 6
+                and any(
+                    isinstance(item, BochaSearchProvider) and item.is_available
+                    for item in self._providers
+                )
+                and any(
+                    isinstance(item, BaiduAISearchProvider) and item.is_available
+                    for item in self._providers
+                )
+            )
+            a_share_search_responses: List[SearchResponse] = []
             for provider in self._providers:
                 if not provider.is_available:
                     continue
@@ -4213,6 +4489,24 @@ class SearchService:
                         )
                         continue
 
+                    if (
+                        a_share_dual_search
+                        and isinstance(
+                            provider,
+                            (BochaSearchProvider, BaiduAISearchProvider),
+                        )
+                    ):
+                        a_share_search_responses.append(limited_response)
+                        if isinstance(provider, BaiduAISearchProvider):
+                            limited_response = self._merge_ranked_news_responses(
+                                a_share_search_responses,
+                                stock_code=stock_code,
+                                stock_name=stock_name,
+                                prefer_chinese=prefer_chinese,
+                                max_results=max_results,
+                                log_scope=f"{stock_code}:Bocha+BaiduAI:stock_news",
+                            )
+
                     stats = self._news_relevance_stats(
                         limited_response,
                         prefer_chinese=prefer_chinese,
@@ -4230,6 +4524,14 @@ class SearchService:
                     if stats["direct_count"] > 0 and (
                         not prefer_chinese or stats["preferred_direct_count"] > 0
                     ):
+                        if a_share_dual_search and isinstance(
+                            provider,
+                            BochaSearchProvider,
+                        ):
+                            logger.info(
+                                "Bocha 已命中 A 股直接新闻，继续查询 Baidu AI 后融合证据",
+                            )
+                            continue
                         logger.info(
                             "%s 搜索成功，识别到 %s 条直接个股新闻，优先返回",
                             provider.name,
@@ -4916,6 +5218,11 @@ def get_search_service() -> SearchService:
                 
                 _search_service = SearchService(
                     bocha_keys=config.bocha_api_keys,
+                    baidu_ai_search_keys=getattr(
+                        config,
+                        "baidu_ai_search_api_keys",
+                        None,
+                    ),
                     tavily_keys=config.tavily_api_keys,
                     anspire_keys=config.anspire_api_keys,
                     brave_keys=config.brave_api_keys,

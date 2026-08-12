@@ -19,6 +19,7 @@ from .debate_service import (
     FrozenDebateSnapshot,
     validate_debate_snapshot,
 )
+from .debate_security import DEBATE_JUDGE_MINIMUM_MEAN_CONFIDENCE
 
 
 DEBATE_VERIFIER_VERSION = "personal-research-debate-verifier-v1"
@@ -128,7 +129,7 @@ class DebateJudgePolicy:
     """Versioned, count-neutral confidence-margin rule for two stances."""
 
     version: str = DEBATE_JUDGE_VERSION
-    minimum_mean_confidence: float = 0.5
+    minimum_mean_confidence: float = DEBATE_JUDGE_MINIMUM_MEAN_CONFIDENCE
     decisive_margin: float = 0.15
 
     def __post_init__(self) -> None:

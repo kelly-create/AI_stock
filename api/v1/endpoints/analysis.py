@@ -513,6 +513,7 @@ def _handle_sync_analysis(
             stock_name=result.get("stock_name"),
             report=report.model_dump() if report else None,
             diagnostic_summary=result.get("diagnostic_summary"),
+            personal_research=result.get("personal_research"),
             created_at=datetime.now().isoformat()
         )
 

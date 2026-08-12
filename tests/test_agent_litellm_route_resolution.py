@@ -10,7 +10,7 @@ from tests.litellm_stub import ensure_litellm_stub
 
 ensure_litellm_stub()
 
-from src.agent.llm_adapter import LLMToolAdapter
+from src.agent.llm_adapter import LLMResponse, LLMToolAdapter
 from src.agent.litellm_route_resolution import resolve_agent_litellm_route
 from src.llm.backend_registry import LOCAL_CLI_GENERATION_BACKEND_IDS
 
@@ -293,6 +293,126 @@ def test_text_completion_can_propagate_last_failure_for_durable_retries() -> Non
                 [{"role": "user", "content": "hello"}],
                 raise_on_failure=True,
             )
+
+
+def test_text_completion_falls_back_when_response_contract_is_invalid() -> None:
+    config = _config(
+        litellm_model="openai/first",
+        litellm_fallback_models=["openai/second"],
+    )
+    adapter = LLMToolAdapter.__new__(LLMToolAdapter)
+    adapter._config = config
+    adapter._backend_error = None
+    adapter._route_resolution = resolve_agent_litellm_route(config)
+    responses = {
+        "openai/first": LLMResponse(
+            content='{"schema":"wrong"}',
+            provider="openai",
+            model="openai/first",
+        ),
+        "openai/second": LLMResponse(
+            content='{"schema":"expected"}',
+            provider="openai",
+            model="openai/second",
+        ),
+    }
+
+    def validate(text: str) -> None:
+        if text != '{"schema":"expected"}':
+            raise ValueError("response contract mismatch")
+
+    with patch.object(
+        adapter,
+        "_call_litellm_model",
+        side_effect=lambda _messages, _tools, model, **_kwargs: responses[model],
+    ) as call_model:
+        response = adapter.call_text(
+            [{"role": "user", "content": "hello"}],
+            response_validator=validate,
+            raise_on_failure=True,
+        )
+
+    assert response.model == "openai/second"
+    assert [call.args[2] for call in call_model.call_args_list] == [
+        "openai/first",
+        "openai/second",
+    ]
+
+
+def test_text_completion_forwards_json_object_format_to_every_fallback() -> None:
+    config = _config(
+        litellm_model="openai/first",
+        litellm_fallback_models=["openai/second"],
+    )
+    adapter = LLMToolAdapter.__new__(LLMToolAdapter)
+    adapter._config = config
+    adapter._backend_error = None
+    adapter._route_resolution = resolve_agent_litellm_route(config)
+    responses = {
+        "openai/first": LLMResponse(
+            content='{"schema":"wrong"}',
+            provider="openai",
+            model="openai/first",
+        ),
+        "openai/second": LLMResponse(
+            content='{"schema":"expected"}',
+            provider="openai",
+            model="openai/second",
+        ),
+    }
+
+    def validate(text: str) -> None:
+        if text != '{"schema":"expected"}':
+            raise ValueError("response contract mismatch")
+
+    with patch.object(
+        adapter,
+        "_call_litellm_model",
+        side_effect=lambda _messages, _tools, model, **_kwargs: responses[model],
+    ) as call_model:
+        response = adapter.call_text(
+            [{"role": "user", "content": "return JSON"}],
+            response_validator=validate,
+            response_format={"type": "json_object"},
+            raise_on_failure=True,
+        )
+
+    assert response.model == "openai/second"
+    assert [
+        call.kwargs["response_format"] for call in call_model.call_args_list
+    ] == [
+        {"type": "json_object"},
+        {"type": "json_object"},
+    ]
+
+
+@pytest.mark.parametrize(
+    "response_format",
+    (
+        "json_object",
+        {},
+        {"type": "text"},
+        {"type": "json_object", "schema": {}},
+    ),
+)
+def test_text_completion_rejects_unsupported_response_format_before_dispatch(
+    response_format,
+) -> None:
+    config = _config(litellm_model="openai/test-model")
+    adapter = LLMToolAdapter.__new__(LLMToolAdapter)
+    adapter._config = config
+    adapter._backend_error = None
+    adapter._route_resolution = resolve_agent_litellm_route(config)
+
+    with patch.object(adapter, "_call_litellm_model") as call_model:
+        with pytest.raises((TypeError, ValueError)):
+            adapter.call_text(
+                [{"role": "user", "content": "return JSON"}],
+                response_format=response_format,
+                raise_on_failure=True,
+            )
+
+    call_model.assert_not_called()
 
 
 def test_call_completion_does_not_overwrite_adapter_route_resolution() -> None:

@@ -74,6 +74,8 @@ curl.exe -X POST "http://127.0.0.1:8000/api/v1/research/personal/runs" `
 | Standard + Deep | 20 | `RESEARCH_STANDARD_DEEP_DAILY_BUDGET` |
 | Debate | 8 | `RESEARCH_DEBATE_DAILY_BUDGET` |
 
+三个预算配置均接受 `0`，表示个人部署不限制每日次数。无限模式仍保留 Durable lease、任务去重、并发、取消、不可变血缘和 Policy 检查，只关闭按日数量拒绝；预算账本继续记录任务，便于审计与成本回看。
+
 预算不足时任务 fail closed；重试复用同一任务保留，不应反复扣减。
 
 ## 五项确定性 Skill
@@ -101,7 +103,7 @@ Skill 不调用模型，不读取新网络数据，只消费同一份冻结 Rese
 
 自动触发还要求 Evidence Quality 至少 70。显式 Debate 不套用这个 70 分自动门槛，但仍要求可引用 Evidence 且质量分不为空。未满足条件时保留稳定 reason code，不会静默强行运行 Debate。
 
-Bull/Bear 只能引用已冻结 claim/citation。Verifier 确认快照完整、Bull/Bear 齐全、参数有引用且 Evidence lineage 匹配；Judge 在 Verifier 通过后计算两侧平均置信度。任意一侧平均置信度低于 0.5 时 fail closed；两侧差值绝对值小于 0.15 时为 `balanced`，否则返回 `bull` 或 `bear`。Verifier/Judge 都保留版本、输入/输出 hash 和 reason codes；任一 fail-closed review 不能支撑正式 Thesis。
+Bull/Bear 只能引用已冻结 claim/citation。Prompt v2 与 Judge 共用 0.5 门槛：只有诚实置信度至少为 0.5 的证据支撑观点才进入 `arguments`，较弱候选观点保留在 `limitations` / `open_questions`，不得为通过门槛抬高置信度；如果某一侧没有任何观点诚实达到门槛，仍输出一条有界低置信度观点，让 Judge 明确 fail closed。每个已配置模型的实际请求同时携带严格 `json_object` 响应格式，返回后仍由完整 `research-debate-output-v1` 业务校验器检查 stance、字段和 Claim/Citation 引用；JSON mode 不能替代业务校验，也不会在模型不支持时降级为无约束成功。Verifier 确认快照完整、Bull/Bear 齐全、参数有引用且 Evidence lineage 匹配；Judge 在 Verifier 通过后计算两侧平均置信度。任意一侧平均置信度低于 0.5 时 fail closed；两侧差值绝对值小于 0.15 时为 `balanced`，否则返回 `bull` 或 `bear`。Verifier/Judge 都保留版本、输入/输出 hash 和 reason codes；任一 fail-closed review 不能支撑正式 Thesis。
 
 ## Portfolio Policy Gate
 
@@ -137,6 +139,8 @@ Decision Signal 同时保留 legacy `action` 和正式 `research_stance` / `acco
 Portfolio Policy context 同时封存 `decision_session_date` 与 `valuation_bar_date`：前者绑定正式决策与行业事实，后者使用市场日历给出的最新已完成日线。周末、节假日和盘前不会仅因“上一收盘日早于自然日”而误判 stale；缺少该有效交易日行情时仍 fail closed。`open_candidate` 必须没有现有仓位，`add_candidate` 必须已有仓位且目标权重严格高于当前权重。
 
 ## Web 只读可见性
+
+首页“个人深度研究”入口接收当前选中的单只 A 股，可选择 `auto`、`quick`、`standard`、`deep` 或 `debate`，并通过 `POST /api/v1/research/personal/runs` 提交 Durable Worker 任务。客户端使用幂等键防止响应丢失后的重复任务，持续显示任务阶段与进度；任务完成后按返回的正式 Decision Signal ID 打开“AI 建议”详情及 Thesis。普通“分析”按钮继续保留原有兼容链路，不等同于正式个人投研。
 
 Decision Signal 主卡和详情在存在 `account_action` 时，以它作为主决策，并并列显示 Policy verdict；legacy `action` 仅作为“上游研究动作”解释。详情中的 `Personal Research Thesis` 区块只读展示五项 Skill 分数/版本/lineage、Verifier/Judge、Thesis 结论和证据引用，并显式与 legacy Skill Outcome / Decision Outcome v1 分开。`null` 或 404 显示“尚无正式 Thesis”，不伪造 0 分；Skill/Review 子资产读取失败时保留 Thesis 并显示降级警告。
 

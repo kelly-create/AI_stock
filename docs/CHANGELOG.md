@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] 历史趋势在未捕获实时行情时回退展示本次分析已冻结的日线收盘价、涨跌幅与量价快照，避免有效历史记录的股价、量比和换手率整列显示为空。
+- [新功能] 新闻搜索新增百度千帆 AI 搜索 Provider，并将博查与百度置于 A 股中文搜索回退链前部；凭据仅通过敏感运行配置注入。
+- [新功能] 首页新增“个人深度研究”入口，支持自动、快速、标准、深度与显式辩论模式，展示 Durable Worker 进度，并在完成后直达不可变 Thesis 与正式决策信号。
+- [修复] 首页顶部输入框为空但已选中个股历史报告时，“个人深度研究”和“分析”会直接使用当前报告股票，不再错误保持禁用。
+
+- [修复] 普通股票分析在冻结因子分数缺失时保留 partial/unknowns 审计并继续生成基础报告，避免可选个人 Skill 增强层导致整项分析失败
+
+- [修复] 个人研究日预算支持以 0 显式关闭次数上限，避免个人部署的普通股票分析被预设配额阻断
+- [修复] Decision Outcome v2 在首次创建 pending 行时冻结 `DecisionSignal.status`，后续 5/10/20 交易日观察不再因来源信号正常过期而误报 lineage 冲突；其他 Signal、Policy 与 Dataset 血缘仍逐项严格校验，并由追加迁移收敛数据库触发器。
+- [修复] 个人投研 Debate 的 Agent 与传统 LiteLLM 路径向每个候选模型传递严格 JSON-object 响应格式，同时保留完整业务 validator 和模型回退，避免路由快照声明结构化输出但实际请求仅依赖提示词。
+- [修复] 将 Bounded Debate Prompt 升级为 v2，并与 Judge 的 0.5 平均置信度门槛共用同一合同；低置信度候选观点保留为限制或开放问题，禁止抬高分数或降低 fail-closed 安全阈值。
+
+- [修复] YFinance TTM 分红窗口按除权日的自然日边界计算，完整包含恰好 365 天前的事件，避免测试和生产结果随当天执行时刻漂移。
+- [修复] 个人投研 Debate 将完整业务输出合同纳入模型回退门禁；JSON 语法合法但 stance、字段或 Claim/Citation 引用不合格的响应会继续尝试下一已配置模型，全部模型不合格时仍严格失败关闭。
+- [修复] 个人 Skill Dataset lineage 允许 Factor 实际输入是 Evidence 全量冻结输入的子集，同时保持 Evidence 与 Skill 的全量 lineage 精确相等，并通过追加迁移替换旧触发器，避免 `news_search` 使正式 Evidence canary 安全失败。
 - [修复] Evidence `news_search` 使用与持久化 Dataset 相同的冻结行封装，确保 Research Snapshot 可从仓储记录逐字段重建并验证外部内容投影。
 - [修复] 个人投研 Dataset 投影按仓储合同去重排序，并保留增量空查询的最新知识时间，避免正式 Research Snapshot 对已冻结行情行误报冲突。
 - [修复] Research Snapshot 对外部新闻内容继续执行脱敏投影，同时保留并校验已持久化 Dataset 的 `content_hash/content_hashes`，避免 Evidence 血缘被二次摘要后失去仓储引用。

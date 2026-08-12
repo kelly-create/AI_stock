@@ -17,7 +17,7 @@ import math
 import re
 import time
 from dataclasses import dataclass
-from typing import Optional, Dict, Any, List, Tuple, Callable
+from typing import Optional, Dict, Any, List, Mapping, Tuple, Callable
 
 import litellm
 from json_repair import repair_json
@@ -50,7 +50,10 @@ from src.llm.hermes import (
     route_has_hermes,
     sanitize_hermes_error_text,
 )
-from src.llm.generation_params import apply_litellm_generation_params
+from src.llm.generation_params import (
+    apply_litellm_generation_params,
+    normalize_litellm_response_format,
+)
 from src.llm.errors import call_litellm_with_param_recovery
 from src.llm.backend_registry import (
     LOCAL_CLI_GENERATION_BACKEND_IDS,
@@ -3213,6 +3216,9 @@ class GeminiAnalyzer:
         )
         requested_temperature = generation_config.get('temperature', 0.7)
         requested_timeout = generation_config.get("timeout")
+        requested_response_format = normalize_litellm_response_format(
+            generation_config.get("response_format")
+        )
 
         usage_call_type = ""
         usage_stock_code: Optional[str] = None
@@ -3395,6 +3401,8 @@ class GeminiAnalyzer:
                 }
                 if requested_timeout not in (None, ""):
                     call_kwargs["timeout"] = requested_timeout
+                if requested_response_format is not None:
+                    call_kwargs["response_format"] = requested_response_format
                 if extra:
                     call_kwargs["extra_body"] = extra
                 uses_router = (
@@ -3641,6 +3649,7 @@ class GeminiAnalyzer:
         messages: List[Dict[str, str]],
         *,
         response_validator: Callable[[str], None],
+        response_format: Optional[Mapping[str, Any]] = None,
         max_tokens: int = 2048,
         temperature: float = 0.2,
         timeout: Optional[float] = None,
@@ -3679,6 +3688,11 @@ class GeminiAnalyzer:
             "max_tokens": int(max_tokens),
             "temperature": float(temperature),
         }
+        normalized_response_format = normalize_litellm_response_format(
+            response_format
+        )
+        if normalized_response_format is not None:
+            generation_config["response_format"] = normalized_response_format
         if timeout is not None:
             generation_config["timeout"] = float(timeout)
         audit_context: Dict[str, Any] = {

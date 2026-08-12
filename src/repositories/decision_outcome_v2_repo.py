@@ -1013,8 +1013,27 @@ class DecisionOutcomeV2Repository:
             if policy is None:
                 raise ValueError("DecisionSignal policy evaluation does not exist")
 
+            existing = session.execute(
+                select(DecisionOutcomeV2Record)
+                .where(
+                    DecisionOutcomeV2Record.signal_id == int(signal_id),
+                    DecisionOutcomeV2Record.horizon
+                    == normalized_evaluation["horizon"],
+                    DecisionOutcomeV2Record.engine_version
+                    == normalized_evaluation["engine_version"],
+                )
+                .limit(1)
+            ).scalar_one_or_none()
+            frozen_fields = _frozen_fields(signal, policy, normalized_evaluation)
+            if existing is not None:
+                # DecisionSignal.status is a lifecycle field: active signals
+                # normally expire long before a 5/10/20-session observation
+                # matures.  Preserve the status frozen by the first pending
+                # row while every other signal/policy lineage field remains
+                # exact and fail-closed.
+                frozen_fields["signal_status"] = existing.signal_status
             fields = {
-                **_frozen_fields(signal, policy, normalized_evaluation),
+                **frozen_fields,
                 **{
                     name: normalized_evaluation[name]
                     for name in _MUTABLE_OBSERVATION_COLUMNS
@@ -1022,16 +1041,6 @@ class DecisionOutcomeV2Repository:
                 },
                 "evaluated_at": utc_naive_now() if terminal else None,
             }
-            existing = session.execute(
-                select(DecisionOutcomeV2Record)
-                .where(
-                    DecisionOutcomeV2Record.signal_id == int(signal_id),
-                    DecisionOutcomeV2Record.horizon == fields["horizon"],
-                    DecisionOutcomeV2Record.engine_version
-                    == fields["engine_version"],
-                )
-                .limit(1)
-            ).scalar_one_or_none()
             if existing is None:
                 row = DecisionOutcomeV2Record(**fields)
                 session.add(row)

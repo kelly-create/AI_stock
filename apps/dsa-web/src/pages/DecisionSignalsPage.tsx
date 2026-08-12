@@ -179,6 +179,12 @@ function parseSourceReportId(value: string): number | undefined {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
+function parseSignalId(search = typeof window === 'undefined' ? '' : window.location.search): number | undefined {
+  const value = new URLSearchParams(search).get('signalId') ?? '';
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
 function getInitialFilters(search = typeof window === 'undefined' ? '' : window.location.search): ListFilters {
   const params = new URLSearchParams(search);
   const sourceReportId = parseSourceReportId(params.get('sourceReportId') ?? params.get('source_report_id') ?? '');
@@ -442,6 +448,7 @@ const DecisionSignalsPage: React.FC = () => {
   const selectedSignalIdRef = useRef<number | null>(null);
   const statusUpdateInFlightRef = useRef(false);
   const timelineMarketSourceRef = useRef<TimelineMarketSource>(null);
+  const initialSignalIdRef = useRef(parseSignalId());
 
   const popularCandidates = useMemo(
     () => toPopularCandidates(stockIndex, STOCK_CANDIDATE_LIMIT),
@@ -457,6 +464,20 @@ const DecisionSignalsPage: React.FC = () => {
   useEffect(() => {
     document.title = t('decisionSignals.pageTitle');
   }, [t]);
+
+  useEffect(() => {
+    const signalId = initialSignalIdRef.current;
+    if (signalId === undefined) return undefined;
+    let cancelled = false;
+    void decisionSignalsApi.get(signalId).then((item) => {
+      if (!cancelled) setSelected({ source: 'persisted', item });
+    }).catch((err) => {
+      if (!cancelled) setError(getParsedApiError(err));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let mounted = true;

@@ -262,9 +262,22 @@ class HistoryService:
                 return value
         return None
 
-    def _extract_history_market_fields(self, context_snapshot: Any) -> Dict[str, Optional[float]]:
+    def _extract_history_market_fields(
+        self,
+        context_snapshot: Any,
+        raw_result: Any = None,
+    ) -> Dict[str, Optional[float]]:
+        """Resolve the market snapshot displayed by the history timeline.
+
+        Realtime fields are authoritative when the run captured them.  After
+        market close (or when a realtime provider is temporarily unavailable),
+        the persisted report can legitimately contain only the effective daily
+        bar and the structured dashboard.  Keep those immutable run-time values
+        as display fallbacks instead of turning the whole timeline into ``--``.
+        """
         snapshot_obj = parse_json_field(context_snapshot)
         realtime_fields = extract_realtime_detail_fields(snapshot_obj)
+        raw_result_obj = parse_json_field(raw_result)
 
         volume_ratio = None
         turnover_rate = None
@@ -288,9 +301,60 @@ class HistoryService:
                         source.get("turnover"),
                     )
 
+        current_price = realtime_fields.get("current_price")
+        change_pct = realtime_fields.get("change_pct")
+        if isinstance(raw_result_obj, dict):
+            market_snapshot = raw_result_obj.get("market_snapshot")
+            if not isinstance(market_snapshot, dict):
+                market_snapshot = {}
+
+            dashboard = raw_result_obj.get("dashboard")
+            data_perspective = (
+                dashboard.get("data_perspective")
+                if isinstance(dashboard, dict)
+                else None
+            )
+            if not isinstance(data_perspective, dict):
+                data_perspective = {}
+            price_position = data_perspective.get("price_position")
+            if not isinstance(price_position, dict):
+                price_position = {}
+            volume_analysis = data_perspective.get("volume_analysis")
+            if not isinstance(volume_analysis, dict):
+                volume_analysis = {}
+
+            current_price = self._first_present(
+                current_price,
+                raw_result_obj.get("current_price"),
+                market_snapshot.get("price"),
+                market_snapshot.get("current_price"),
+                market_snapshot.get("close"),
+                price_position.get("current_price"),
+            )
+            change_pct = self._first_present(
+                change_pct,
+                raw_result_obj.get("change_pct"),
+                market_snapshot.get("change_pct"),
+                market_snapshot.get("pct_chg"),
+            )
+            volume_ratio = self._first_present(
+                volume_ratio,
+                raw_result_obj.get("volume_ratio"),
+                market_snapshot.get("volume_ratio"),
+                volume_analysis.get("volume_ratio"),
+            )
+            turnover_rate = self._first_present(
+                turnover_rate,
+                raw_result_obj.get("turnover_rate"),
+                market_snapshot.get("turnover_rate"),
+                market_snapshot.get("turnover"),
+                volume_analysis.get("turnover_rate"),
+                volume_analysis.get("turnover"),
+            )
+
         return {
-            "current_price": self._safe_float(realtime_fields.get("current_price")),
-            "change_pct": self._safe_float(realtime_fields.get("change_pct")),
+            "current_price": self._safe_float(current_price),
+            "change_pct": self._safe_float(change_pct),
             "volume_ratio": self._safe_float(volume_ratio),
             "turnover_rate": self._safe_float(turnover_rate),
         }
@@ -327,7 +391,8 @@ class HistoryService:
         model_used = raw_result.get("model_used") if isinstance(raw_result, dict) else None
         display_code = self._display_stock_code(record.code)
         market_fields = self._extract_history_market_fields(
-            getattr(record, "context_snapshot", None)
+            getattr(record, "context_snapshot", None),
+            raw_result,
         )
         market_phase_summary = self._display_market_phase_summary(
             record.code,

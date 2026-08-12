@@ -507,6 +507,17 @@ def test_judge_uses_count_neutral_confidence_margin_and_balanced_result() -> Non
     )
 
 
+def test_default_judge_threshold_uses_shared_prompt_contract() -> None:
+    from src.services.research.debate_security import (
+        DEBATE_JUDGE_MINIMUM_MEAN_CONFIDENCE,
+    )
+
+    assert (
+        DebateJudgePolicy().minimum_mean_confidence
+        == DEBATE_JUDGE_MINIMUM_MEAN_CONFIDENCE
+    )
+
+
 def test_judge_fails_closed_on_verification_or_low_confidence() -> None:
     invalid = judge_bounded_debate(None)
     assert invalid.verdict == "fail_closed"

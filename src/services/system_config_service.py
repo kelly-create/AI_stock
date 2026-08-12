@@ -4552,6 +4552,15 @@ class SystemConfigService:
                         effective_map.get(key),
                         default,
                         field_name=key,
+                        minimum=(
+                            0
+                            if key in {
+                                "RESEARCH_QUICK_DAILY_BUDGET",
+                                "RESEARCH_STANDARD_DEEP_DAILY_BUDGET",
+                                "RESEARCH_DEBATE_DAILY_BUDGET",
+                            }
+                            else 1
+                        ),
                         maximum=(
                             1440
                             if key == "DECISION_OUTCOME_V2_INTERVAL_MINUTES"

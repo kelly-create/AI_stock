@@ -125,6 +125,23 @@ def _durable_execution_active() -> bool:
         return False
 
 
+def _durable_job_type() -> Optional[str]:
+    """Return the bound durable job type without inventing a fallback."""
+
+    try:
+        from src.services.durable_job_handlers import (
+            get_optional_durable_execution_context,
+        )
+
+        context = get_optional_durable_execution_context()
+        if context is None:
+            return None
+        value = str(getattr(context.claimed_job, "job_type", "") or "").strip()
+        return value or None
+    except (AttributeError, ImportError, RuntimeError):
+        return None
+
+
 def _policy_context_date(
     context_snapshot: Optional[Mapping[str, Any]],
     field_name: str,
@@ -346,6 +363,11 @@ class StockAnalysisPipeline:
         try:
             self.search_service = SearchService(
                 bocha_keys=self.config.bocha_api_keys,
+                baidu_ai_search_keys=getattr(
+                    self.config,
+                    "baidu_ai_search_api_keys",
+                    [],
+                ),
                 tavily_keys=self.config.tavily_api_keys,
                 anspire_keys=self.config.anspire_api_keys,
                 brave_keys=self.config.brave_api_keys,
@@ -845,6 +867,10 @@ class StockAnalysisPipeline:
     ) -> Dict[str, Any]:
         """Describe the exact text-only route used by bounded Debate calls."""
 
+        from src.services.research.debate_service import (
+            DEBATE_OUTPUT_SCHEMA_VERSION,
+        )
+
         route = self._build_research_model_route(use_agent=use_agent, tools=[])
         route.update(
             {
@@ -853,7 +879,8 @@ class StockAnalysisPipeline:
                     if use_agent
                     else "research-debate-traditional"
                 ),
-                "response_format": "research-debate-output-v1",
+                "response_format": {"type": "json_object"},
+                "response_contract": DEBATE_OUTPUT_SCHEMA_VERSION,
                 "temperature": 0.2,
                 "max_tokens": 2048,
                 "timeout_seconds": 60.0,
@@ -965,6 +992,7 @@ class StockAnalysisPipeline:
             DebateTransientError,
             DebateTerminalError,
         )
+        from src.services.research.debate_service import DEBATE_PROMPT_VERSION
 
         route = self._build_research_debate_model_route(use_agent=use_agent)
 
@@ -998,6 +1026,8 @@ class StockAnalysisPipeline:
                         max_tokens=2048,
                         timeout=60.0,
                         raise_on_failure=True,
+                        response_validator=request.validate_output,
+                        response_format=route["response_format"],
                     )
                     content = str(getattr(response, "content", "") or "").strip()
                     provider = str(getattr(response, "provider", "") or "").strip()
@@ -1014,7 +1044,7 @@ class StockAnalysisPipeline:
 
                     usage = dict(getattr(response, "usage", {}) or {})
                     usage["stage"] = f"research_debate_{request.stance}"
-                    usage["prompt_version"] = "research-debate-prompt-v1"
+                    usage["prompt_version"] = DEBATE_PROMPT_VERSION
                     persist_llm_usage(
                         usage,
                         model_used,
@@ -1028,7 +1058,8 @@ class StockAnalysisPipeline:
 
                 text, model_used, _usage = self.analyzer.generate_structured_text(
                     messages,
-                    response_validator=lambda raw: json.loads(raw),
+                    response_validator=request.validate_output,
+                    response_format=route["response_format"],
                     max_tokens=2048,
                     temperature=0.2,
                     timeout=60.0,
@@ -1241,11 +1272,31 @@ class StockAnalysisPipeline:
             from src.services.personal_research_artifact_service import (
                 PersonalResearchArtifactService,
             )
-
-            return PersonalResearchArtifactService(self.db).persist_pre_llm(
-                prepared=prepared_research,
-                frozen_write=frozen_write,
+            from src.services.research.personal_skill_evaluator import (
+                PersonalResearchSkillEvaluationError,
             )
+
+            try:
+                return PersonalResearchArtifactService(self.db).persist_pre_llm(
+                    prepared=prepared_research,
+                    frozen_write=frozen_write,
+                )
+            except PersonalResearchSkillEvaluationError as exc:
+                if (
+                    _durable_job_type()
+                    not in {"stock_analysis", "scheduled_analysis"}
+                    or " score is unavailable in the frozen Factor snapshot"
+                    not in str(exc)
+                ):
+                    raise
+                logger.warning(
+                    "Optional personal research artifacts skipped for ordinary "
+                    "analysis because a frozen Factor score is unavailable: "
+                    "stock_code=%s error=%s",
+                    getattr(prepared_research, "stock_code", None),
+                    exc,
+                )
+                return frozen_write
         return frozen_write
 
     def _build_research_execution_policy(self, *, use_agent: bool) -> Dict[str, Any]:

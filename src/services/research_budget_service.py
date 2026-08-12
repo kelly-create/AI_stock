@@ -82,8 +82,10 @@ class ResearchBudgetService:
             "debate": int(getattr(self.config, "research_debate_daily_budget", 8)),
         }
         daily_limit = limits[bucket]
-        if daily_limit < 1:
-            raise ValueError(f"Configured daily research budget for {bucket} must be positive")
+        if daily_limit < 0:
+            raise ValueError(
+                f"Configured daily research budget for {bucket} must be non-negative"
+            )
 
         # The manual override is intentionally scoped to the daily counter.
         # Durable lease/concurrency checks remain caller-owned and unchanged.

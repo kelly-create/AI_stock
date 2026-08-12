@@ -168,6 +168,8 @@ def _assert_debate_route(route: dict[str, object], *, channel: str) -> None:
     assert route["temperature"] == 0.2
     assert route["max_tokens"] == 2048
     assert route["timeout_seconds"] == 60.0
+    assert route["response_format"] == {"type": "json_object"}
+    assert route["response_contract"] == "research-debate-output-v1"
 
 
 class _PipelineDebateRuntime:
@@ -203,6 +205,7 @@ class _PipelineDebateRuntime:
                         {"role": "system", "content": "DEBATE-SYSTEM"},
                         {"role": "user", "content": f"DEBATE-USER::{stance}"},
                     ),
+                    validate_output=lambda _output: None,
                 )
             )
             assert result.model_used == "provider/debate-model"
@@ -226,11 +229,14 @@ class _RecordingDebateTextAdapter:
         stance = str(messages[1]["content"]).rsplit("::", 1)[-1]
         self.events.append(f"debate-{stance}")
         assert [item["role"] for item in messages] == ["system", "user"]
+        validator = kwargs.pop("response_validator")
+        assert callable(validator)
         assert kwargs == {
             "temperature": 0.2,
             "max_tokens": 2048,
             "timeout": 60.0,
             "raise_on_failure": True,
+            "response_format": {"type": "json_object"},
         }
         return SimpleNamespace(
             content="{}",
@@ -383,6 +389,7 @@ def test_agent_debate_rejects_unsafe_model_before_usage_storage() -> None:
                     {"role": "system", "content": "DEBATE-SYSTEM"},
                     {"role": "user", "content": "DEBATE-USER::bull"},
                 ),
+                validate_output=lambda _output: None,
             )
         )
 
@@ -423,6 +430,7 @@ def test_agent_debate_rejects_unsafe_route_before_adapter_dispatch() -> None:
                     {"role": "system", "content": "DEBATE-SYSTEM"},
                     {"role": "user", "content": "DEBATE-USER::bull"},
                 ),
+                validate_output=lambda _output: None,
             )
         )
 
@@ -828,6 +836,7 @@ class TestResearchAnalyzeStockIntegration:
                 "timeout": 60.0,
                 "call_type": "research_debate",
                 "stock_code": "600519",
+                "response_format": {"type": "json_object"},
             }
             return "{}", "provider/debate-model", {"total_tokens": 1}
 

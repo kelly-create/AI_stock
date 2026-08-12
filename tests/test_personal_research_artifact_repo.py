@@ -19,6 +19,7 @@ from src.analyzer import AnalysisResult
 from src.services.personal_research_artifact_service import (
     PersonalResearchArtifactService,
 )
+from src.services.research.evidence_service import hydrate_evidence_snapshot
 from src.services.research.debate_review import DebateJudgePolicy
 from src.services.research.personal_skill_contract import (
     PERSONAL_RESEARCH_SKILL_IDS,
@@ -31,7 +32,10 @@ from src.services.research.personal_skill_evaluator import (
     hydrate_personal_research_skill_scorecard,
 )
 from src.services.research.repositories import ResearchSnapshotRepository
-from src.services.research.snapshot_service import persist_research_snapshot
+from src.services.research.snapshot_service import (
+    build_research_snapshot,
+    persist_research_snapshot,
+)
 from src.storage import (
     AnalysisHistory,
     AnalysisJobRecord,
@@ -46,7 +50,13 @@ from tests.test_research_debate_storage import (
     _research_snapshot_with_debate,
     _write_graph,
 )
-from tests.test_research_evidence_storage import NOW, _claim
+from tests.test_research_evidence_storage import (
+    NOW,
+    _claim,
+    _dataset_input,
+    _evidence_input,
+    _sources,
+)
 
 
 pytest_plugins = ("tests.test_research_evidence_storage",)
@@ -280,6 +290,114 @@ def test_skill_repository_rejects_dataset_or_snapshot_lineage_drift(personal_gra
             factor_snapshot_hash="e" * 64,
             evidence_snapshot_hash=graph["evidence"].evidence_hash,
         )
+
+
+def test_skill_accepts_factor_dataset_subset_of_complete_evidence_lineage(
+    evidence_db,
+) -> None:
+    db, store = evidence_db
+    lease = _claim(store, "personal-research-dataset-subset-job")
+    research_repo = ResearchSnapshotRepository(db)
+    factor_dataset, factor = _sources(research_repo, lease)
+    news_dataset = research_repo.write_dataset(
+        _dataset_input(dataset="news_search"),
+        lease=lease,
+        now=NOW + timedelta(seconds=3),
+    )
+    evidence_result = research_repo.write_evidence(
+        _evidence_input(
+            sorted([factor_dataset.content_hash, news_dataset.content_hash]),
+            factor.content_hash,
+        ),
+        lease=lease,
+        now=NOW + timedelta(seconds=4),
+    )
+    evidence_record = research_repo.get_evidence(evidence_result.content_hash)
+    assert evidence_record is not None
+    evidence = hydrate_evidence_snapshot(evidence_record)
+    research = build_research_snapshot(
+        stock_code="600519",
+        market="A",
+        as_of=NOW,
+        available_at=NOW - timedelta(minutes=1),
+        context_pack={
+            "subject": {"code": "600519", "market": "A"},
+            "pack_version": "1.0",
+            "blocks": {},
+        },
+        datasets={
+            name: {
+                "dataset": name,
+                "status": "available",
+                "row_count": 1,
+                "available_at": NOW - timedelta(hours=1),
+                "data_as_of": NOW - timedelta(hours=2),
+                "content_hash": content_hash,
+                "content_hashes": [content_hash],
+                "raw_ref": None,
+                "rows": [{"stock_code": "600519", "value": name}],
+            }
+            for name, content_hash in (
+                ("daily_basic", factor_dataset.content_hash),
+                ("news_search", news_dataset.content_hash),
+            )
+        },
+        factors={"quality": {"status": "available", "score": 80}},
+        prompt_version="prompt-v1",
+        prompt={"system": "frozen prompt"},
+        model_route={
+            "backend": "litellm",
+            "model": "primary-model",
+            "channel": "analysis",
+        },
+        policy_version="policy-v1",
+        policy={"risk_max": 45},
+        pack_version="1.0",
+        factor_engine_version="factor-v1",
+        factor_snapshot_hash=factor.content_hash,
+        evidence=evidence.canonical_payload,
+        evidence_snapshot_hash=evidence.evidence_hash,
+    )
+    persist_research_snapshot(
+        research,
+        research_repo,
+        lease=lease,
+        now=NOW + timedelta(seconds=5),
+    )
+
+    contract = get_personal_research_skill_contract("personal-value-quality")
+    skill_input = build_personal_research_skill_input(
+        {
+            "skill_id": contract.skill_id,
+            "skill_version": contract.version,
+            "skill_content_hash": contract.content_hash,
+            "stock_code": "600519",
+            "market": "A",
+            "research_snapshot_hash": research.snapshot_hash,
+            "factor_snapshot_hash": factor.content_hash,
+        }
+    )
+    skill_output = build_personal_research_skill_output(
+        skill_input,
+        {
+            "score": 70,
+            "evidence_refs": ["citation-1"],
+            "reason_codes": ["factor_subset_of_evidence"],
+        },
+    )
+    result = PersonalResearchSkillExecutionRepository(db).persist_success(
+        task_id=lease.job_id,
+        skill_input=skill_input,
+        skill_output=skill_output,
+        dataset_snapshot_hashes=tuple(sorted(evidence.input_dataset_hashes)),
+        factor_snapshot_hash=factor.content_hash,
+        evidence_snapshot_hash=evidence.evidence_hash,
+    )
+
+    assert result.created is True
+    assert json.loads(result.row.dataset_snapshot_hashes_json) == sorted(
+        [factor_dataset.content_hash, news_dataset.content_hash]
+    )
 
 
 def test_terminal_skill_failure_is_canonical_and_cannot_be_rebound(personal_graph) -> None:

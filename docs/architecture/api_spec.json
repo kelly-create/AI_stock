@@ -12991,6 +12991,16 @@
             "title": "Diagnostic Summary",
             "description": "运行诊断摘要"
           },
+          "personal_research": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Personal Research",
+            "description": "Server-owned personal-research lineage, skill, debate, thesis, and decision-signal summary"
+          },
           "created_at": {
             "type": "string",
             "title": "Created At",

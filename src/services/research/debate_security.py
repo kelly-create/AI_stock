@@ -30,6 +30,13 @@ MAX_DEBATE_OUTPUT_CHARS = 64_000
 MAX_DEBATE_ARTIFACT_JSON_CHARS = 256_000
 MAX_DEBATE_PROMPT_CONTEXT_CHARS = 12_000
 
+# The default deterministic Judge rejects a Debate when either stance's mean
+# argument confidence is below this value.  The generation prompt imports the
+# same constant so low-confidence candidate ideas are routed to limitations or
+# open questions instead of silently dragging an otherwise admissible stance
+# below the published Judge contract.
+DEBATE_JUDGE_MINIMUM_MEAN_CONFIDENCE = 0.5
+
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _RAW_URL_RE = re.compile(r"(?i)(?:[a-z][a-z0-9+.-]*://|www\.)\S+")
 _TOKEN_LIKE_RE = re.compile(
@@ -241,6 +248,7 @@ def validate_debate_prose(value: str, *, field: str) -> None:
 
 
 __all__ = [
+    "DEBATE_JUDGE_MINIMUM_MEAN_CONFIDENCE",
     "MAX_DEBATE_ARGUMENTS_PER_STANCE",
     "MAX_DEBATE_CITATION_IDS_PER_ARGUMENT",
     "MAX_DEBATE_CLAIM_IDS_PER_ARGUMENT",
