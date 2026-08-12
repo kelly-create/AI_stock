@@ -675,6 +675,49 @@ class AnalysisHistoryTestCase(unittest.TestCase):
         self.assertEqual(item["market_phase_summary"]["phase"], "intraday")
         self.assertEqual(item["market_phase_summary"]["minutes_to_close"], 300)
 
+    def test_history_list_falls_back_to_daily_and_dashboard_market_fields(self) -> None:
+        """Post-market history keeps useful values when no realtime quote was captured."""
+        result = self._build_result()
+        result.current_price = None
+        result.change_pct = None
+        result.market_snapshot = {
+            "date": "2026-08-11",
+            "close": "43.87",
+            "pct_chg": "12.92%",
+        }
+        result.dashboard = {
+            "data_perspective": {
+                "price_position": {"current_price": 44.01},
+                "volume_analysis": {
+                    "volume_ratio": "3.12",
+                    "turnover_rate": "13.31%",
+                },
+            },
+        }
+
+        saved = self.db.save_analysis_history(
+            result=result,
+            query_id="query_timeline_daily_fallback",
+            report_type="full",
+            news_content="news",
+            context_snapshot={"enhanced_context": {}, "realtime_quote_raw": {}},
+            save_snapshot=True,
+        )
+        self.assertGreater(saved, 0)
+
+        payload = HistoryService(self.db).get_history_list(
+            stock_code="600519",
+            page=1,
+            limit=5,
+        )
+
+        self.assertEqual(payload["total"], 1)
+        item = payload["items"][0]
+        self.assertEqual(item["current_price"], 43.87)
+        self.assertEqual(item["change_pct"], 12.92)
+        self.assertEqual(item["volume_ratio"], 3.12)
+        self.assertEqual(item["turnover_rate"], 13.31)
+
     def test_history_persistence_keeps_softened_operation_advice_from_guardrail(self) -> None:
         """Conservative-market guardrail short operation_advice is persisted and exposed to history list."""
         result = self._build_result()
