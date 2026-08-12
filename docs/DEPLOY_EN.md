@@ -505,6 +505,7 @@ Add these Secrets:
 | `SERPAPI_API_KEYS` | SerpAPI Key | Recommended |
 | `TAVILY_API_KEYS` | Tavily Search API Key | Optional |
 | `BOCHA_API_KEYS` | Bocha Search API Key | Optional |
+| `BAIDU_AI_SEARCH_API_KEYS` | Baidu Qianfan AI Search API key (Baidu Search v2 for Chinese and A-share web recall) | Optional |
 | `BRAVE_API_KEYS` | Brave Search API Key | Optional |
 | `MINIMAX_API_KEYS` | MiniMax Coding Plan Web Search | Optional |
 | `TUSHARE_TOKEN` | Tushare Token | Optional |

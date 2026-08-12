@@ -154,7 +154,8 @@ Go to your forked repo → `Settings` → `Secrets and variables` → `Actions` 
 | `ANSPIRE_API_KEYS` | [Anspire AI Search](https://aisearch.anspire.cn/) optimized for Chinese content; the same key can also be used for Anspire LLM fallback scenarios (example model: `Doubao-Seed-2.0-lite`) | Recommended |
 | `SERPAPI_API_KEYS` | [SerpAPI](https://serpapi.com/baidu-search-api?utm_source=github_daily_stock_analysis) search-engine results for realtime financial news | Recommended |
 | `TAVILY_API_KEYS` | [Tavily](https://tavily.com/) Search API (for news search) | Optional |
-| `BOCHA_API_KEYS` | [Bocha Search](https://open.bocha.cn/) Web Search API (Chinese search optimized, supports AI summaries, multiple keys comma-separated) | Optional |
+| `BOCHA_API_KEYS` | [Bocha Search](https://open.bochaai.com/) Web Search API (Chinese search optimized, supports AI summaries, multiple keys comma-separated) | Optional |
+| `BAIDU_AI_SEARCH_API_KEYS` | [Baidu Qianfan AI Search](https://cloud.baidu.com/doc/qianfan-api/s/Hmbu8m06u) API key (Baidu Search v2 for Chinese and A-share web recall) | Optional |
 | `BRAVE_API_KEYS` | [Brave Search](https://brave.com/search/api/) API (privacy-first, US-stock news enrichment, comma-separated for multiple keys) | Optional |
 | `MINIMAX_API_KEYS` | [MiniMax](https://platform.minimax.io/) Coding Plan Web Search (structured search results) | Optional |
 | `SEARXNG_BASE_URLS` | SearXNG self-hosted instances (quota-free fallback, enable format: json in settings.yml); when empty the app auto-discovers public instances | Optional |
@@ -329,6 +330,7 @@ For the notification baseline, diagnostics, and deployment notes, see [Notificat
 | `SERPAPI_API_KEYS` | SerpAPI search-engine results for realtime financial news | Recommended |
 | `TAVILY_API_KEYS` | Tavily Search API Key | Optional |
 | `BOCHA_API_KEYS` | Bocha Search API Key (Chinese optimized) | Optional |
+| `BAIDU_AI_SEARCH_API_KEYS` | Baidu Qianfan AI Search API key (Baidu Search v2 for Chinese and A-share web recall) | Optional |
 | `BRAVE_API_KEYS` | Brave Search API Key (US stocks optimized) | Optional |
 | `MINIMAX_API_KEYS` | MiniMax Coding Plan Web Search (structured results) | Optional |
 | `SOCIAL_SENTIMENT_API_KEY` | Stock Sentiment API Key (Reddit / X / Polymarket, US stocks optional) | Optional |

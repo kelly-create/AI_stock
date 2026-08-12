@@ -363,6 +363,11 @@ class StockAnalysisPipeline:
         try:
             self.search_service = SearchService(
                 bocha_keys=self.config.bocha_api_keys,
+                baidu_ai_search_keys=getattr(
+                    self.config,
+                    "baidu_ai_search_api_keys",
+                    [],
+                ),
                 tavily_keys=self.config.tavily_api_keys,
                 anspire_keys=self.config.anspire_api_keys,
                 brave_keys=self.config.brave_api_keys,

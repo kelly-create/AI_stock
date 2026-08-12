@@ -1445,9 +1445,37 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "validation": {"multi_value": True, "delimiter": ","},
         "display_order": 51,
     },
+    "BAIDU_AI_SEARCH_API_KEYS": {
+        "title": "Baidu AI Search API Keys",
+        "description": (
+            "Comma-separated Baidu Qianfan AI Search API keys. "
+            "Uses Baidu Search v2 for Chinese web and A-share news recall."
+        ),
+        "category": "data_source",
+        "data_type": "string",
+        "ui_control": "password",
+        "is_sensitive": True,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": None,
+        "options": [],
+        "validation": {"multi_value": True, "delimiter": ","},
+        "display_order": 52,
+        "help_key": "settings.data_source.search_api_keys",
+        "examples": [
+            "BAIDU_AI_SEARCH_API_KEYS=bce-v3/your-access-key/your-secret-key",
+        ],
+        "docs": [
+            {
+                "label": "Baidu Qianfan AI Search API",
+                "href": "https://cloud.baidu.com/doc/qianfan-api/s/Hmbu8m06u",
+            },
+        ],
+        "warning_codes": ["secret_value", "comma_separated_keys"],
+    },
     "MINIMAX_API_KEYS": {
         "title": "MiniMax API Key",
-        "description": "MiniMax API key (search priority: Bocha > Tavily > Brave > SerpAPI > MiniMax > SearXNG).",
+        "description": "MiniMax API key (search priority: Bocha > Baidu AI > Tavily > Brave > SerpAPI > MiniMax > SearXNG).",
         "category": "data_source",
         "data_type": "string",
         "ui_control": "password",

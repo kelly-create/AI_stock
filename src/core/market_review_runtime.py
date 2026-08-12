@@ -94,6 +94,11 @@ def build_market_review_runtime(
     if callable(has_search_capability) and has_search_capability():
         search_service = SearchService(
             bocha_keys=getattr(config, "bocha_api_keys", None),
+            baidu_ai_search_keys=getattr(
+                config,
+                "baidu_ai_search_api_keys",
+                None,
+            ),
             tavily_keys=getattr(config, "tavily_api_keys", None),
             anspire_keys=getattr(config, "anspire_api_keys", None),
             brave_keys=getattr(config, "brave_api_keys", None),

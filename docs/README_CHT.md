@@ -57,7 +57,7 @@
 |------|------|
 | AI 模型 | [Anspire](https://open.anspire.cn/?share_code=QFBC0FYC)、[AIHubMix](https://aihubmix.com/?aff=CfMq)、Gemini、OpenAI 兼容、DeepSeek、通義千問、Claude、Ollama 本地模型等 |
 | 行情數據 | [TickFlow](https://tickflow.org/auth/register?ref=WDSGSPS5XC)、AkShare、Tushare、Pytdx、Baostock、YFinance、Longbridge |
-| 新聞搜尋 | [Anspire](https://open.anspire.cn/?share_code=QFBC0FYC)、[SerpAPI](https://serpapi.com/baidu-search-api?utm_source=github_daily_stock_analysis)、[Tavily](https://tavily.com/)、[Bocha](https://open.bocha.cn/)、[Brave](https://brave.com/search/api/)、[MiniMax](https://platform.minimaxi.com/)、SearXNG |
+| 新聞搜尋 | [Anspire](https://open.anspire.cn/?share_code=QFBC0FYC)、[SerpAPI](https://serpapi.com/baidu-search-api?utm_source=github_daily_stock_analysis)、[Tavily](https://tavily.com/)、[Bocha](https://open.bochaai.com/)、[百度千帆 AI 搜尋](https://cloud.baidu.com/doc/qianfan-api/s/Hmbu8m06u)、[Brave](https://brave.com/search/api/)、[MiniMax](https://platform.minimaxi.com/)、SearXNG |
 | 社交輿情 | [Stock Sentiment API](https://api.adanos.org/docs)（Reddit / X / Polymarket，僅美股，可選） |
 
 > 專案預設內建 AkShare、Baostock、YFinance 等免費行情源，可零配置執行；免費源受上游限流、介面變動和網路波動影響，穩定性不保證。長期定時、批量分析或更穩定行情建議配置 TickFlow、Tushare、Longbridge 等 token 型數據源，適用市場、Actions 映射和 fallback 規則見 [數據源配置](./full-guide.md#数据源配置)。
@@ -119,7 +119,8 @@
 | `ANSPIRE_API_KEYS` | [Anspire AI Search](https://aisearch.anspire.cn/)：中文內容特別優化，可增強 A 股分析效果；同一 Key 也可作為 Anspire 大模型網關兜底示例 | **推薦** |
 | `SERPAPI_API_KEYS` | [SerpAPI](https://serpapi.com/baidu-search-api?utm_source=github_daily_stock_analysis)：搜尋引擎結果補強，適合即時金融新聞 | **推薦** |
 | `TAVILY_API_KEYS` | [Tavily](https://tavily.com/)：通用新聞搜尋 API | 可選 |
-| `BOCHA_API_KEYS` | [博查搜尋](https://open.bocha.cn/)：中文搜尋優化，支援 AI 摘要 | 可選 |
+| `BOCHA_API_KEYS` | [博查搜尋](https://open.bochaai.com/)：中文搜尋優化，支援 AI 摘要 | 可選 |
+| `BAIDU_AI_SEARCH_API_KEYS` | [百度千帆 AI 搜尋](https://cloud.baidu.com/doc/qianfan-api/s/Hmbu8m06u)：百度搜尋 v2，補充 A 股中文網頁與輿情召回 | 可選 |
 | `BRAVE_API_KEYS` | [Brave Search](https://brave.com/search/api/)：隱私優先，美股資訊補強 | 可選 |
 | `MINIMAX_API_KEYS` | [MiniMax](https://platform.minimaxi.com/)：結構化搜尋結果 | 可選 |
 | `SEARXNG_BASE_URLS` | SearXNG 自建實例：無配額兜底，適合私有部署 | 可選 |
